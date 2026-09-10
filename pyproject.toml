@@ -1,0 +1,20 @@
+[project]
+name = "smithtune"
+version = "0.1.0"
+description = "Prepare LangSmith trajectories for Fireworks SFT and Baseten Loops training."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fireworks-training-cookbook==0.1.0",
+  "jsonschema==4.26.0",
+]
+
+[project.optional-dependencies]
+baseten = ["baseten-loops==0.21.0"]
+test = ["pytest==9.1.1"]
+
+[tool.uv.sources]
+fireworks-training-cookbook = { path = "fireworks-cookbook/training", editable = true }
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
