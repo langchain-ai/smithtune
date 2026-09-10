@@ -12,6 +12,10 @@ dependencies = [
 baseten = ["baseten-loops==0.21.0"]
 test = ["pytest==9.1.1"]
 
+[tool.uv]
+# The pinned Fireworks cookbook requires a version affected by CVE-2026-9856.
+override-dependencies = ["transformers==5.10.4"]
+
 [tool.uv.sources]
 fireworks-training-cookbook = { path = "fireworks-cookbook/training", editable = true }
 
