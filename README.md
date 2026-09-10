@@ -1,6 +1,6 @@
 # Smithtune
 
-Smithtune is a standalone CLI that turns a LangSmith trajectory dataset into a trained
+'smithtune' is a standalone CLI that turns a LangSmith trajectory dataset into a trained
 Fireworks LoRA model and a held-out replay evaluation report, or into a
 Baseten Loops SFT checkpoint. Fireworks remains the default provider.
 
