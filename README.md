@@ -23,37 +23,39 @@ Configure credentials in your environment:
 | Baseten training | `BASETEN_API_KEY` |
 | Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
 
-## Create a dataset from traces
+## Create a dataset from conversations
 
-Select root traces from a project using LangSmith's existing filter syntax:
+Select whole conversations (threads) by filtering trace root runs in a project:
 
 ```bash
 python pipeline.py dataset select \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))' \
-  --scope thread --limit 100 --seed 42 \
+  --limit 100 --seed 42 \
   --output data/selection.json
 
 python pipeline.py dataset create \
   --selection data/selection.json --name my-sft-dataset
 ```
 
-`select` previews matches and saves IDs. The time window includes the start and excludes the end.
-`--scope trace` creates one example per trace; `--scope thread` imports each matched thread's full
-trajectory, including turns outside the window. Roots without a thread ID are excluded in thread
-scope and counted in the preview. Sampling happens after deduplication; omit `--limit` to keep all.
+`select` applies LangSmith filters to root runs within the time window (start inclusive, end exclusive),
+previews matches, and saves their thread IDs. A matching root selects its entire thread, including
+earlier turns and turns outside the window. Roots without a thread ID are excluded and counted
+in the preview. Threads are deduplicated before sampling; `--limit` counts threads, and omitting
+it keeps all matching threads.
 
-`create` imports the saved selection into a new dataset and prints its ID for `prepare` below.
-Thread imports stay server-side. Trace imports pass messages through local memory without saving
-trajectory files. Messages, including recorded system prompts, are preserved. IDs are fixed by
-the selection file; source content can still change before import.
+`create` imports one full conversation per example into a new dataset, entirely server-side,
+and prints its ID for `prepare` below. Messages, including recorded system prompts, are preserved.
+The selection file fixes the thread IDs; source content can still change before import.
+Existing thread selection files still work. The `--scope` flag has been removed; old trace
+selections must be regenerated with `dataset select`.
 
 An existing selection, receipt, or dataset name is rejected. Imports stop on the first error;
 `data/selection.import.json` records confirmed examples and any pending write. A timeout can leave
 the last write's outcome unknown. Inspect the partial dataset before starting a new attempt with
 a new selection path and dataset name. Automatic retry/resume and appending are not supported.
-These commands require current LangSmith run-query, trajectory, and thread-import APIs.
+These commands require current LangSmith run-query and thread-import APIs.
 
 ## Prepare data
 
@@ -159,6 +161,8 @@ See command help for model profiles, custom models, split fractions, and provide
 
 ```bash
 python pipeline.py --help
+python pipeline.py dataset select --help
+python pipeline.py dataset create --help
 python pipeline.py prepare --help
 python pipeline.py train --help
 python -m pytest

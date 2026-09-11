@@ -1,4 +1,4 @@
-"""Select root traces and import their trajectories into LangSmith datasets."""
+"""Select threads through root trace filters and import whole conversations into LangSmith datasets."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def _matches(values: Any) -> dict[str, dict]:
 
 def select_dataset(
     *, workspace_id: str, project_id: str, start_time: str, end_time: str,
-    scope: str, output: Path, filter: str | None = None, limit: int | None = None,
+    output: Path, filter: str | None = None, limit: int | None = None,
     seed: int = 42, runner: Callable[..., Any] = _run,
 ) -> dict:
     workspace_id = _uuid(workspace_id, "workspace_id")
@@ -119,8 +119,6 @@ def select_dataset(
     start_time, end_time = _time(start_time), _time(end_time)
     if datetime.fromisoformat(start_time) >= datetime.fromisoformat(end_time):
         raise PipelineError("start_time must precede end_time")
-    if not isinstance(scope, str) or scope not in {"trace", "thread"}:
-        raise PipelineError("scope must be trace or thread")
     if limit is not None and (type(limit) is not int or limit < 1):
         raise PipelineError("limit must be a positive integer")
     if type(seed) is not int:
@@ -155,11 +153,11 @@ def select_dataset(
         body["cursor"] = cursor
     roots = sorted(matches.values(), key=lambda item: item["trace_id"])
     threads = {item["thread_id"] for item in roots if item["thread_id"] is not None}
-    candidates = sorted(matches if scope == "trace" else threads)
+    candidates = sorted(threads)
     selected = candidates if limit is None else sorted(random.Random(seed).sample(candidates, min(limit, len(candidates))))
     value = {
         "schema_version": 1, "created_at_utc": _utc_now(),
-        "workspace_id": workspace_id, "project_id": project_id, "scope": scope,
+        "workspace_id": workspace_id, "project_id": project_id, "scope": "thread",
         "query": {"start_time": start_time, "end_time": end_time,
                   "filter": filter, "limit": limit, "seed": seed},
         "matches": roots, "selected_ids": selected,
@@ -167,11 +165,11 @@ def select_dataset(
     _write_new(output, value)
     selected_set = set(selected)
     return {
-        "selection": str(output), "scope": scope, "matching_roots": len(roots),
+        "selection": str(output), "scope": "thread", "matching_roots": len(roots),
         "distinct_threads": len(threads),
-        "excluded_unthreaded_roots": sum(item["thread_id"] is None for item in roots) if scope == "thread" else 0,
+        "excluded_unthreaded_roots": sum(item["thread_id"] is None for item in roots),
         "eligible_examples": len(candidates), "selected_examples": len(selected),
-        "preview": [{**item, "selected": item[f"{scope}_id"] in selected_set} for item in roots[:20]],
+        "preview": [{**item, "selected": item["thread_id"] in selected_set} for item in roots[:20]],
     }
 
 
@@ -181,15 +179,16 @@ def create_dataset(*, selection: Path, name: str, runner: Callable[..., Any] = _
         raise PipelineError("selection must use schema_version 1")
     workspace_id = _uuid(value.get("workspace_id"), "workspace_id")
     project_id = _uuid(value.get("project_id"), "project_id")
-    scope = value.get("scope")
-    if not isinstance(scope, str) or scope not in {"trace", "thread"}:
-        raise PipelineError("selection scope must be trace or thread")
+    if value.get("scope") != "thread":
+        raise PipelineError(
+            "only thread selections are supported; regenerate this selection with dataset select (without --scope)"
+        )
     matches = _matches(value.get("matches"))
     ids = value.get("selected_ids")
     if not isinstance(ids, list) or not ids:
         raise PipelineError("selection must contain selected_ids; empty selections cannot be imported")
-    ids = [_uuid(item, "selected trace ID") if scope == "trace" else _text(item, "selected thread ID") for item in ids]
-    candidates = set(matches) if scope == "trace" else {item["thread_id"] for item in matches.values() if item["thread_id"]}
+    ids = [_text(item, "selected thread ID") for item in ids]
+    candidates = {item["thread_id"] for item in matches.values() if item["thread_id"] is not None}
     if len(ids) != len(set(ids)) or not set(ids) <= candidates:
         raise PipelineError("selected_ids must be unique and belong to the saved matches")
     name = _text(name, "name")
@@ -198,7 +197,7 @@ def create_dataset(*, selection: Path, name: str, runner: Callable[..., Any] = _
         raise PipelineError("selection path must differ from its import receipt path")
     receipt = {
         "selection": str(selection.resolve()), "workspace_id": workspace_id,
-        "project_id": project_id, "scope": scope, "dataset_name": name,
+        "project_id": project_id, "scope": "thread", "dataset_name": name,
         "dataset_id": None, "status": "in_progress", "example_ids": [],
         "current_source_id": None, "pending_write": "dataset", "created_at_utc": _utc_now(),
     }
@@ -209,37 +208,16 @@ def create_dataset(*, selection: Path, name: str, runner: Callable[..., Any] = _
         receipt.update(dataset_id=dataset_id, pending_write=None)
         _save_receipt(receipt_path, receipt)
         common = {"trajectory_format": "messages", "conversation_scope": "root",
-                  "source_project_id": project_id, "selection_scope": scope}
+                  "source_project_id": project_id, "selection_scope": "thread"}
         for source_id in ids:
-            receipt.update(current_source_id=source_id, pending_write=None)
+            receipt.update(current_source_id=source_id, pending_write="example")
             _save_receipt(receipt_path, receipt)
-            if scope == "trace":
-                trajectory = _api(workspace_id, "POST", "/v1/trajectory", {
-                    "project_id": project_id, "trace_id": source_id,
-                    "format": "messages", "include": {"system_messages": True},
-                }, runner=runner)
-                if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list) or not trajectory["messages"]:
-                    raise PipelineError(f"trace {source_id} returned no messages")
-                if trajectory.get("next_cursor") or trajectory.get("prev_cursor"):
-                    raise PipelineError(f"trace {source_id} returned an unexpected continuation cursor")
-                metadata = {**common, "source_trace_id": source_id}
-                if matches[source_id]["thread_id"]:
-                    metadata["source_thread_id"] = matches[source_id]["thread_id"]
-                path = "/api/v1/examples"
-                body = {"dataset_id": dataset_id, "inputs": {"messages": trajectory["messages"]},
-                        "outputs": None, "metadata": metadata}
-            else:
-                path = f"/v1/platform/datasets/{dataset_id}/examples/thread-imports"
-                body = {"project_id": project_id, "thread_ids": [source_id], "metadata": common}
-            receipt["pending_write"] = "example"
-            _save_receipt(receipt_path, receipt)
-            result = _api(workspace_id, "POST", path, body, runner=runner)
-            if scope == "trace":
-                example_id = _uuid(result.get("id") if isinstance(result, dict) else None, "returned example ID")
-            else:
-                if not isinstance(result, dict) or result.get("count") != 1 or not isinstance(result.get("example_ids"), list) or len(result["example_ids"]) != 1:
-                    raise PipelineError("thread import did not confirm exactly one example")
-                example_id = _uuid(result["example_ids"][0], "returned example ID")
+            result = _api(workspace_id, "POST", f"/v1/platform/datasets/{dataset_id}/examples/thread-imports", {
+                "project_id": project_id, "thread_ids": [source_id], "metadata": common,
+            }, runner=runner)
+            if not isinstance(result, dict) or result.get("count") != 1 or not isinstance(result.get("example_ids"), list) or len(result["example_ids"]) != 1:
+                raise PipelineError("thread import did not confirm exactly one example")
+            example_id = _uuid(result["example_ids"][0], "returned example ID")
             if example_id in receipt["example_ids"]:
                 raise PipelineError("LangSmith returned a duplicate example ID")
             receipt["example_ids"].append(example_id)

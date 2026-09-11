@@ -25,20 +25,19 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    curate = sub.add_parser("dataset", help="select traces and create a trajectory dataset")
+    curate = sub.add_parser("dataset", help="select threads and create a conversation trajectory dataset")
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
-    select = curate_sub.add_parser("select", help="preview matching root traces and save source IDs")
+    select = curate_sub.add_parser("select", help="filter root traces and save their containing thread IDs",
+                                   description="Select whole conversations through matching root traces. Imports include turns outside the time window.")
     select.add_argument("--workspace-id", required=True)
     select.add_argument("--project-id", required=True)
     select.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
     select.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
-    select.add_argument("--scope", choices=("trace", "thread"), required=True,
-                        help="one selected trace or the full containing thread per example")
     select.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
-    select.add_argument("--limit", type=int, help="sample at most this many examples after deduplication")
+    select.add_argument("--limit", type=int, help="sample at most this many distinct threads")
     select.add_argument("--seed", type=int, default=42)
     select.add_argument("--output", type=Path, required=True)
-    create = curate_sub.add_parser("create", help="import saved source IDs into a new LangSmith dataset")
+    create = curate_sub.add_parser("create", help="import saved whole threads server-side into a new LangSmith dataset")
     create.add_argument("--selection", type=Path, required=True)
     create.add_argument("--name", required=True)
 
@@ -237,7 +236,7 @@ def main() -> None:
                 value = curation.select_dataset(
                     workspace_id=args.workspace_id, project_id=args.project_id,
                     start_time=args.start_time, end_time=args.end_time,
-                    scope=args.scope, output=args.output, filter=args.filter,
+                    output=args.output, filter=args.filter,
                     limit=args.limit, seed=args.seed,
                 )
             else:
