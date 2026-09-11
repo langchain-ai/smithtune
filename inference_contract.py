@@ -92,7 +92,22 @@ def _canonicalize_captured_tools(value: Any) -> list[dict[str, Any]]:
     for entry in value:
         if not isinstance(entry, Mapping):
             raise ContractError("captured tool definitions must be objects")
-        declarations = entry.get("function_declarations")
+        # Provider-native descriptors are not portable function definitions,
+        # even when a provider also records an input schema for them.
+        kind = entry.get("type")
+        declarations = entry.get("function_declarations", entry.get("functionDeclarations"))
+        # Gemini wraps functions and built-ins in the same Tool object. Only
+        # populated fields count: SDK dumps may include optional null fields.
+        built_in = None
+        if isinstance(declarations, list) or (kind is None and not entry.get("name")):
+            built_in = next((key for key, value in entry.items()
+                             if key not in ("function_declarations", "functionDeclarations", "type")
+                             and value is not None), None)
+        if kind not in (None, "function", "custom") or built_in:
+            label = entry.get("name") or kind or built_in
+            raise ContractError(f"provider built-in tool {label!r} is not supported")
+        if kind == "custom" and not isinstance(entry.get("input_schema"), Mapping):
+            raise ContractError("custom-format tools are not supported; use function tools")
         if isinstance(declarations, list):
             canonical.extend(_canonicalize_captured_tools(declarations))
             continue
@@ -333,3 +348,60 @@ def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str,
         "inference_settings": settings,
         "contract_sha256": json_sha256(semantic_contract),
     }
+
+
+def contract_from_runs(
+    runs: Sequence[Mapping[str, Any]], *, workspace_id: str,
+    source_run_id: str, thread_id: str,
+) -> dict[str, Any]:
+    """Combine the recorded function tools from every LLM call in a thread."""
+    tools: dict[str, dict[str, Any]] = {}
+    tool_sources: dict[str, str] = {}
+    source_run = None
+    for run in sorted(runs, key=lambda item: (item.get("start_time") or "", item["id"])):
+        run_id = run["id"]
+        if run.get("run_type") != "llm":
+            raise ContractError(f"run {run_id} is not an LLM run")
+        if run_id == source_run_id:
+            source_run = run
+        extra = run.get("extra") or {}
+        if not isinstance(extra, Mapping):
+            raise ContractError(f"run {run_id}: invalid extra metadata")
+        invocation = extra.get("invocation_params") or {}
+        if not isinstance(invocation, Mapping):
+            raise ContractError(f"run {run_id}: invalid invocation parameters")
+        if not isinstance(run.get("trace_id"), str) or not run["trace_id"]:
+            raise ContractError(f"run {run_id}: missing trace ID")
+        definitions = invocation.get("tools")
+        if definitions is None or definitions == []:
+            continue
+        try:
+            captured = _canonicalize_captured_tools(definitions)
+        except ContractError as exc:
+            raise ContractError(f"run {run_id}: {exc}") from exc
+        for tool in captured:
+            name = tool["function"]["name"]
+            if name in tools and tools[name] != tool:
+                raise ContractError(
+                    f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
+                )
+            tools[name] = tool
+            tool_sources[name] = run_id
+    if source_run is None:
+        raise ContractError(f"source LLM run {source_run_id} was not returned in the thread scan")
+    if not tools:
+        raise ContractError("no function tool definitions were recorded in the sample thread")
+    # Keep replay settings from the selected call; tools come from the full scan.
+    combined = copy.deepcopy(dict(source_run))
+    combined.setdefault("extra", {})
+    if combined["extra"] is None:
+        combined["extra"] = {}
+    invocation = combined["extra"].get("invocation_params") or {}
+    combined["extra"]["invocation_params"] = {**invocation, "tools": [tools[name] for name in sorted(tools)]}
+    payload = contract_from_run(combined, workspace_id=workspace_id)
+    payload["provenance"].update({
+        "source_thread_id": thread_id,
+        "source_run_ids": sorted(run["id"] for run in runs),
+        "source_trace_ids": sorted({run["trace_id"] for run in runs}),
+    })
+    return payload

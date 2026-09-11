@@ -43,10 +43,10 @@ def _parser() -> argparse.ArgumentParser:
 
     capture_contract = sub.add_parser(
         "capture-contract",
-        help="capture tool schemas and inference settings from a LangSmith LLM run",
+        help="collect all function tools from a sample conversation; reject provider built-ins",
     )
     capture_contract.add_argument("--workspace-id", required=True)
-    capture_contract.add_argument("--run-id", required=True, help="ID of an llm run with recorded tool definitions, not the root agent run")
+    capture_contract.add_argument("--run-id", required=True, help="LLM run ID used to locate the sample thread; scans every LLM call in that thread")
     capture_contract.add_argument("--output", type=Path, required=True)
 
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")

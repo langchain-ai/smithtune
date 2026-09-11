@@ -60,9 +60,15 @@ These commands require current LangSmith run-query and thread-import APIs.
 ## Prepare data
 
 For trajectories with tool calls, provide a contract containing the tools' names, descriptions,
-and argument schemas. Use an existing contract, or capture one from an `llm` run inside a source
-trace that logged the tool definitions your dataset uses. Pass the LLM run's ID, not the root
-agent run's ID. Capture also saves supported inference settings for replay.
+and argument schemas. Use an existing contract, or capture one from a sample conversation.
+Pass an `llm` run ID inside that conversation, not the root agent run's ID. Capture scans every
+LLM call across the entire thread, combines the function tool definitions, and saves one global
+list used by every dataset example. Tools introduced later are included from the start during
+training. Supported inference settings for replay still come from the selected LLM call.
+
+Capture fails if any scanned call lists a provider built-in (such as Anthropic tool search or
+OpenAI web search), even if it was never called. No contract is written on failure. Conflicting
+definitions for the same tool name also fail with the source run IDs.
 
 System messages come from each trajectory and are preserved during preparation and replay.
 They do not need to match across examples or match a prompt in an existing contract. New

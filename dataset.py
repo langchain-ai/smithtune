@@ -14,7 +14,7 @@ from artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
 from inference_contract import (
     ContractError,
     InferenceContract,
-    contract_from_run,
+    contract_from_runs,
     load_inference_contract,
 )
 from providers.base import ModelSpec, PipelineError, ReasoningPolicy
@@ -89,29 +89,45 @@ def _langsmith_page_command(
     ]
 
 
-def _langsmith_run_contract_command(workspace_id: str, run_id: str) -> list[str]:
+def _query_contract_runs(
+    workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any],
+) -> list[dict[str, Any]]:
     body = {
-        "id": [run_id],
-        "limit": 1,
-        "select": [
-            "id",
-            "trace_id",
-            "session_id",
-            "name",
-            "run_type",
-            "start_time",
-            "extra",
-        ],
+        "limit": LANGSMITH_PAGE_SIZE,
+        "select": ["id", "trace_id", "session_id", "name", "run_type", "start_time", "extra"],
+        **query,
     }
-    return [
-        "langsmith",
-        "api",
-        "runs/query",
-        "--workspace",
-        workspace_id,
-        "--body",
-        _canonical(body),
-    ]
+    runs: dict[str, dict[str, Any]] = {}
+    cursors: set[str] = set()
+    while True:
+        result = runner([
+            "langsmith", "api", "runs/query", "--workspace", workspace_id,
+            "--body", _canonical(body),
+        ], capture=True)
+        try:
+            response = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise PipelineError("LangSmith run query returned invalid JSON") from exc
+        if not isinstance(response, dict) or not isinstance(response.get("runs"), list):
+            raise PipelineError("LangSmith returned an invalid run query page")
+        for run in response["runs"]:
+            if not isinstance(run, dict) or not isinstance(run.get("id"), str) or not run["id"]:
+                raise PipelineError("LangSmith returned an invalid run")
+            if body.get("session") and run.get("session_id") not in body["session"]:
+                raise PipelineError("LangSmith returned a run from a different project")
+            if run["id"] in runs and runs[run["id"]] != run:
+                raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; capture again")
+            runs[run["id"]] = run
+        page_cursors = response.get("cursors") or {}
+        if not isinstance(page_cursors, dict):
+            raise PipelineError("LangSmith returned invalid query cursors")
+        cursor = page_cursors.get("next")
+        if cursor is None:
+            return list(runs.values())
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise PipelineError("LangSmith returned an invalid or repeated query cursor")
+        cursors.add(cursor)
+        body["cursor"] = cursor
 
 
 def capture_inference_contract(
@@ -121,26 +137,50 @@ def capture_inference_contract(
     *,
     runner: Callable[..., Any] = _run,
 ) -> dict[str, Any]:
-    """Capture tool schemas and inference settings from one LangSmith LLM run."""
-    result = runner(
-        _langsmith_run_contract_command(workspace_id, run_id),
-        capture=True,
-    )
-    try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise PipelineError("LangSmith run query returned invalid JSON") from exc
-    runs = response.get("runs") if isinstance(response, dict) else response
-    if not isinstance(runs, list) or len(runs) != 1 or runs[0].get("id") != run_id:
+    """Collect all function tools in the selected LLM run's conversation thread."""
+    sources = _query_contract_runs(workspace_id, {"id": [run_id], "limit": 1}, runner=runner)
+    if len(sources) != 1 or sources[0]["id"] != run_id:
         raise PipelineError(f"LangSmith did not return the requested run {run_id}")
+    source = sources[0]
+    if source.get("run_type") != "llm":
+        raise PipelineError("contract capture requires an LLM run ID inside the sample conversation")
+    project_id, trace_id = source.get("session_id"), source.get("trace_id")
+    if not isinstance(project_id, str) or not project_id or not isinstance(trace_id, str) or not trace_id:
+        raise PipelineError("source LLM run has no project or trace ID")
+    roots = _query_contract_runs(
+        workspace_id, {"session": [project_id], "id": [trace_id], "limit": 1}, runner=runner,
+    )
+    if len(roots) != 1 or roots[0]["id"] != trace_id:
+        raise PipelineError(f"LangSmith did not return the source trace root {trace_id}")
+    metadata = (roots[0].get("extra") or {}).get("metadata") or {}
+    thread_keys = ("thread_id", "conversation_id", "session_id")
+    thread_id = next((metadata[key] for key in thread_keys if isinstance(metadata.get(key), str) and metadata[key]), None)
+    if thread_id is None:
+        raise PipelineError("source trace has no thread ID; choose an LLM run from a conversation thread")
+    # Child calls need not repeat their thread ID. Query each root metadata
+    # alias separately: the run API does not support OR across these joins.
+    thread_runs: dict[str, dict[str, Any]] = {}
+    for key in thread_keys:
+        thread_filter = f"and(eq(metadata_key,{json.dumps(key)}),eq(metadata_value,{json.dumps(thread_id)}))"
+        for run in _query_contract_runs(workspace_id, {
+            "session": [project_id], "run_type": "llm", "trace_filter": thread_filter,
+        }, runner=runner):
+            if run["id"] in thread_runs and thread_runs[run["id"]] != run:
+                raise PipelineError(f"run {run['id']} changed during the thread scan; capture again")
+            thread_runs[run["id"]] = run
+    runs = list(thread_runs.values())
     try:
-        payload = contract_from_run(runs[0], workspace_id=workspace_id)
+        payload = contract_from_runs(runs, workspace_id=workspace_id, source_run_id=run_id, thread_id=thread_id)
     except ContractError as exc:
         raise PipelineError(f"cannot capture inference contract: {exc}") from exc
+    # Only publish a usable contract after every page and every tool passes.
     _json_dump(output, payload)
     return {
         "output": str(output),
         "source_run_id": run_id,
+        "source_thread_id": thread_id,
+        "llm_run_count": len(runs),
+        "trace_count": len(payload["provenance"]["source_trace_ids"]),
         "contract_sha256": payload["contract_sha256"],
         "tools_sha256": payload["tools_sha256"],
         "tool_count": len(payload["tools"]),

@@ -190,7 +190,13 @@ def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
 
     def runner(command, capture=False):
         commands.append(command)
-        return SimpleNamespace(stdout=json.dumps([run]))
+        body = json.loads(command[command.index("--body") + 1])
+        if body.get("id") == ["trace-id"]:
+            result = {"id": "trace-id", "session_id": "project-id",
+                      "extra": {"metadata": {"thread_id": "thread-id"}}}
+        else:
+            result = run
+        return SimpleNamespace(stdout=json.dumps({"runs": [result], "cursors": {"next": None}}))
 
     output = tmp_path / "contract.json"
     summary = dataset_ops.capture_inference_contract(
