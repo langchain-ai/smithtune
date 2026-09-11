@@ -101,6 +101,7 @@ def validate_model_context(
                 {
                     "example_id": row["_source"]["example_id"],
                     "source_thread_id": row["_source"]["source_thread_id"],
+                    "source_trace_id": row["_source"].get("source_trace_id"),
                     "rendered_tokens": row_max_context,
                     "context_limit": model.max_seq_len,
                     "reason": "rendered example exceeds model context limit",
@@ -166,6 +167,8 @@ def validate_replay_context(
                 {
                     "id": case["id"],
                     "example_id": case["example_id"],
+                    "source_thread_id": case.get("source_thread_id"),
+                    "source_trace_id": case.get("source_trace_id"),
                     "prompt_tokens": prompt_tokens,
                     "max_output_tokens": max_output_tokens,
                     "context_limit": model.max_seq_len,

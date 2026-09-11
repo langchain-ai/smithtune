@@ -10,6 +10,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import dataset
+import curation
 import evaluation as replay_evaluation
 from inference_contract import ContractError, load_inference_contract
 from providers.baseten import BasetenSFTSettings
@@ -23,6 +24,23 @@ def _parser() -> argparse.ArgumentParser:
     project = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    curate = sub.add_parser("dataset", help="select traces and create a trajectory dataset")
+    curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
+    select = curate_sub.add_parser("select", help="preview matching root traces and save source IDs")
+    select.add_argument("--workspace-id", required=True)
+    select.add_argument("--project-id", required=True)
+    select.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
+    select.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
+    select.add_argument("--scope", choices=("trace", "thread"), required=True,
+                        help="one selected trace or the full containing thread per example")
+    select.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
+    select.add_argument("--limit", type=int, help="sample at most this many examples after deduplication")
+    select.add_argument("--seed", type=int, default=42)
+    select.add_argument("--output", type=Path, required=True)
+    create = curate_sub.add_parser("create", help="import saved source IDs into a new LangSmith dataset")
+    create.add_argument("--selection", type=Path, required=True)
+    create.add_argument("--name", required=True)
 
     capture_contract = sub.add_parser(
         "capture-contract",
@@ -214,7 +232,17 @@ def main() -> None:
     parser = _parser()
     args = parser.parse_args()
     try:
-        if args.command == "capture-contract":
+        if args.command == "dataset":
+            if args.dataset_command == "select":
+                value = curation.select_dataset(
+                    workspace_id=args.workspace_id, project_id=args.project_id,
+                    start_time=args.start_time, end_time=args.end_time,
+                    scope=args.scope, output=args.output, filter=args.filter,
+                    limit=args.limit, seed=args.seed,
+                )
+            else:
+                value = curation.create_dataset(selection=args.selection, name=args.name)
+        elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(
                 args.workspace_id,
                 args.run_id,
