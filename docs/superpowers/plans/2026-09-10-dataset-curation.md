@@ -12,7 +12,7 @@
 
 ## Scope and commands
 
-Work in `/Users/jake/Documents/ChatGPT/LangChain __ Baseten/smithtune`. At planning time it is clean on `fix/transformers-path-traversal` (`b4067bd`). Implementation should use a fresh `codex/dataset-curation` branch/worktree from the current main, preserving the unrelated dependency fix.
+Work in `/Users/jake/Documents/ChatGPT/LangChain __ Baseten/smithtune`. At planning time it is clean on `fix/transformers-path-traversal` (`b4067bd`). Implementation should use a fresh `jake/dataset-curation` branch/worktree from the current main, preserving the unrelated dependency fix.
 
 Keep the current invocation; adding an installed `smithtune` entry point is deferred.
 
@@ -146,7 +146,7 @@ Native imports set a top-level `source_thread_id`. The current `langsmith exampl
 - [x] Add parser/dispatch tests for required flags, explicit scope, defaults and passing the saved selection to creation. Add a fixture-backed select → create → download → prepare test for each scope. The resulting examples must pass the existing preparation contract; use enough independent source groups for the requested split and mock renderer/network boundaries.
 - [x] Add a short README walkthrough ending with `uv run python pipeline.py prepare --workspace-id "$WORKSPACE_ID" --dataset-id "$DATASET_ID"`, retaining existing inference-contract requirements for tool datasets. Explain full-thread scope, local trace relay, fixed IDs versus mutable content, partial receipts, and current all-assistant-message training in a few sentences.
 - [x] Run the complete existing suite once: `uv run --no-sync python -m pytest`. Check `uv run --no-sync python pipeline.py dataset select --help` and `dataset create --help`.
-- [ ] In a configured development workspace, smoke-test each scope using a few approved traces and a new dataset, then run existing `prepare`. Verify imported system/tool messages and source identities. Do not launch training. If credentials, CLI or dependencies are missing, report that live verification is deferred; do not install or repair the environment as part of this task.
+- [x] In a configured development workspace, smoke-test each scope using a few approved traces and a new dataset, then run existing `prepare`. Verify imported system/tool messages and source identities. Do not launch training. If credentials, CLI or dependencies are missing, report that live verification is deferred; do not install or repair the environment as part of this task.
 
 **Done:** Both scopes complete select → create → existing prepare; selections are inspectable and reproducible from saved IDs; failed imports are visible; existing thread datasets still prepare identically.
 
@@ -157,4 +157,4 @@ Native imports set a top-level `source_thread_id`. The current `langsmith exampl
 - [Thread importer](https://github.com/langchain-ai/langchainplus/blob/main/smith-go/examples/thread_examples.go): server-side full trajectories, dedicated source field, fresh example IDs; no request idempotency key. One-thread requests avoid introducing batching policy in v1.
 - [System-message support](https://github.com/langchain-ai/langchainplus/pull/37841): explicit inclusion for trace relay; messages format includes systems by default.
 
-Source contracts were inspected on September 10, 2026. The local LangSmith CLI is not on PATH, so CLI transport behavior was checked in source, not exercised live. Implementation completed on `codex/dataset-curation`, based on current main `f90dc82` (which includes the dependency fix). Verification: 268 tests passed, both command help checks passed, and independent code review found no actionable issues. Live smoke testing remains deferred because the LangSmith CLI is not on PATH.
+Source contracts were inspected on September 10, 2026. At planning time, the LangSmith CLI was not on PATH; it has now been installed and exercised live. Implementation completed on `jake/dataset-curation`, based on current main `f90dc82` (which includes the dependency fix). Verification: 268 tests passed, both command help checks passed, and independent code review found no actionable issues. Live verification subsequently passed with LangSmith CLI v0.2.54; see [the verification report](../../verification/2026-09-10-dataset-curation.md) for source comparisons, preparation results and the existing tool-contract limitation.
