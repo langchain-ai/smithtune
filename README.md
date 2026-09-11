@@ -59,7 +59,16 @@ These commands require current LangSmith run-query and thread-import APIs.
 
 ## Prepare data
 
-For trajectories with tools, capture the tool schemas and system prompt from a representative main-model `llm` run. Review the contract before using it.
+For trajectories with tool calls, provide a contract containing the tools' names, descriptions,
+and argument schemas. Use an existing contract, or capture one from an `llm` run inside a source
+trace that logged the tool definitions your dataset uses. Pass the LLM run's ID, not the root
+agent run's ID. Capture also saves supported inference settings for replay.
+
+System messages come from each trajectory and are preserved during preparation and replay.
+They do not need to match across examples or match a prompt in an existing contract. New
+contracts do not capture prompts; existing contract files remain supported. The default Qwen
+renderer supports a system message only as the first message in a conversation.
+For trajectories without tool calls, skip capture and omit `--inference-contract` below.
 
 ```bash
 python pipeline.py capture-contract \

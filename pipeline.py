@@ -43,10 +43,10 @@ def _parser() -> argparse.ArgumentParser:
 
     capture_contract = sub.add_parser(
         "capture-contract",
-        help="capture an inference contract from one approved LangSmith LLM run",
+        help="capture tool schemas and inference settings from a LangSmith LLM run",
     )
     capture_contract.add_argument("--workspace-id", required=True)
-    capture_contract.add_argument("--run-id", required=True)
+    capture_contract.add_argument("--run-id", required=True, help="ID of an llm run with recorded tool definitions, not the root agent run")
     capture_contract.add_argument("--output", type=Path, required=True)
 
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")
@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--data-dir", type=Path, default=project / "data")
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
-    prep.add_argument("--inference-contract", type=Path)
+    prep.add_argument("--inference-contract", type=Path, help="tool-schema contract for trajectories with tool calls")
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
         help="omit source reasoning from SFT and replay (default), or explicitly preserve readable reasoning",

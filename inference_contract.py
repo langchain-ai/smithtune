@@ -87,7 +87,7 @@ def _validate_tools(value: Any) -> tuple[dict[str, Any], ...]:
 
 def _canonicalize_captured_tools(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
-        raise ContractError("approved LLM run has no extra.invocation_params.tools")
+        raise ContractError("LLM run has no extra.invocation_params.tools")
     canonical: list[dict[str, Any]] = []
     for entry in value:
         if not isinstance(entry, Mapping):
@@ -112,36 +112,6 @@ def _canonicalize_captured_tools(value: Any) -> list[dict[str, Any]]:
     return canonical
 
 
-def _captured_system_prompt(inputs: Any) -> dict[str, Any]:
-    if not isinstance(inputs, Mapping):
-        raise ContractError("approved LLM run has no message inputs")
-    messages = inputs.get("messages")
-    while (
-        isinstance(messages, list)
-        and len(messages) == 1
-        and isinstance(messages[0], list)
-    ):
-        messages = messages[0]
-    if not isinstance(messages, list):
-        raise ContractError("approved LLM run has no message inputs")
-    for message in messages:
-        if not isinstance(message, Mapping):
-            continue
-        role = message.get("role")
-        content = message.get("content")
-        kwargs = message.get("kwargs")
-        if isinstance(kwargs, Mapping):
-            role = kwargs.get("type", role)
-            content = kwargs.get("content", content)
-        constructor_id = message.get("id")
-        if role is None and isinstance(constructor_id, list) and constructor_id:
-            if str(constructor_id[-1]).lower() == "systemmessage":
-                role = "system"
-        if role == "system":
-            return {"role": "system", "content": copy.deepcopy(content)}
-    raise ContractError("approved LLM run inputs contain no system prompt")
-
-
 def _validate_settings(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -157,8 +127,9 @@ def _validate_settings(value: Any) -> dict[str, Any]:
 class InferenceContract:
     tools: tuple[dict[str, Any], ...]
     tools_sha256: str
-    system_prompt: dict[str, Any]
-    system_prompt_sha256: str
+    # Legacy prompt metadata only; retained for artifact and hash compatibility.
+    system_prompt: dict[str, Any] | None
+    system_prompt_sha256: str | None
     provenance: dict[str, Any]
     inference_settings: dict[str, Any]
     contract_sha256: str
@@ -185,10 +156,7 @@ class InferenceContract:
             )
 
     def validate_messages(self, messages: Sequence[Mapping[str, Any]]) -> None:
-        if not messages or messages[0].get("role") != "system":
-            raise ContractError("messages must start with the contract system prompt")
-        if content_sha256(messages[0].get("content")) != self.system_prompt_sha256:
-            raise ContractError("messages system prompt does not match the inference contract")
+        """Validate recorded tool calls without imposing a system prompt."""
         for message in messages:
             tool_calls = message.get("tool_calls")
             if tool_calls is None:
@@ -238,27 +206,31 @@ class InferenceContract:
         return request
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": 1,
             "format": "main_model_inference_contract",
             "tools": copy.deepcopy(list(self.tools)),
             "tools_sha256": self.tools_sha256,
-            "system_prompt": copy.deepcopy(self.system_prompt),
             "provenance": copy.deepcopy(self.provenance),
             "inference_settings": copy.deepcopy(self.inference_settings),
             "contract_sha256": self.contract_sha256,
         }
+        if self.system_prompt is not None:
+            payload["system_prompt"] = copy.deepcopy(self.system_prompt)
+        return payload
 
     def manifest_summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "schema_version": 1,
             "contract_sha256": self.contract_sha256,
             "tools_sha256": self.tools_sha256,
             "tool_count": len(self.tools),
-            "system_prompt_sha256": self.system_prompt_sha256,
             "provenance": copy.deepcopy(self.provenance),
             "inference_settings": copy.deepcopy(self.inference_settings),
         }
+        if self.system_prompt_sha256 is not None:
+            summary["system_prompt_sha256"] = self.system_prompt_sha256
+        return summary
 
 
 def load_inference_contract(path: Path) -> InferenceContract:
@@ -280,13 +252,15 @@ def load_inference_contract(path: Path) -> InferenceContract:
         raise ContractError("tools_sha256 does not match the canonical tool schemas")
 
     system_prompt = payload.get("system_prompt")
-    if not isinstance(system_prompt, Mapping) or system_prompt.get("role") != "system":
-        raise ContractError("system_prompt must be a system message")
-    if "content" not in system_prompt:
-        raise ContractError("system_prompt must contain content")
-    prompt_hash = _require_sha256(system_prompt.get("sha256"), "system_prompt.sha256")
-    if prompt_hash != content_sha256(system_prompt["content"]):
-        raise ContractError("system_prompt.sha256 does not match system_prompt.content")
+    prompt_hash = None
+    if system_prompt is not None:
+        if not isinstance(system_prompt, Mapping) or system_prompt.get("role") != "system":
+            raise ContractError("system_prompt must be a system message")
+        if "content" not in system_prompt:
+            raise ContractError("system_prompt must contain content")
+        prompt_hash = _require_sha256(system_prompt.get("sha256"), "system_prompt.sha256")
+        if prompt_hash != content_sha256(system_prompt["content"]):
+            raise ContractError("system_prompt.sha256 does not match system_prompt.content")
 
     provenance = payload.get("provenance")
     if not isinstance(provenance, Mapping):
@@ -295,9 +269,10 @@ def load_inference_contract(path: Path) -> InferenceContract:
     semantic_contract = {
         "schema_version": 1,
         "tools_sha256": declared_tools_hash,
-        "system_prompt_sha256": prompt_hash,
         "inference_settings": settings,
     }
+    if prompt_hash is not None:
+        semantic_contract["system_prompt_sha256"] = prompt_hash
     contract_hash = json_sha256(semantic_contract)
     declared_contract_hash = payload.get("contract_sha256")
     if declared_contract_hash is not None and declared_contract_hash != contract_hash:
@@ -305,7 +280,7 @@ def load_inference_contract(path: Path) -> InferenceContract:
     return InferenceContract(
         tools=tools,
         tools_sha256=declared_tools_hash,
-        system_prompt=copy.deepcopy(dict(system_prompt)),
+        system_prompt=copy.deepcopy(dict(system_prompt)) if system_prompt is not None else None,
         system_prompt_sha256=prompt_hash,
         provenance=copy.deepcopy(dict(provenance)),
         inference_settings=settings,
@@ -314,22 +289,19 @@ def load_inference_contract(path: Path) -> InferenceContract:
 
 
 def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str, Any]:
-    """Create a canonical contract payload from one approved LangSmith LLM run."""
+    """Capture tool schemas and inference settings from a LangSmith LLM run."""
     if run.get("run_type") != "llm":
-        raise ContractError("contract capture requires an approved LLM run")
+        raise ContractError("contract capture requires an LLM run")
     if not isinstance(workspace_id, str) or not workspace_id:
         raise ContractError("source workspace ID is required")
     extra = run.get("extra")
     if not isinstance(extra, Mapping):
-        raise ContractError("approved LLM run has no extra.invocation_params.tools")
+        raise ContractError("LLM run has no extra.invocation_params.tools")
     invocation = extra.get("invocation_params")
     if not isinstance(invocation, Mapping):
-        raise ContractError("approved LLM run has no extra.invocation_params.tools")
+        raise ContractError("LLM run has no extra.invocation_params.tools")
     tools = _canonicalize_captured_tools(invocation.get("tools"))
-    system_prompt = _captured_system_prompt(run.get("inputs"))
     tool_hash = json_sha256(tools)
-    prompt_hash = content_sha256(system_prompt["content"])
-    system_prompt["sha256"] = prompt_hash
     settings = {
         key: copy.deepcopy(invocation[key])
         for key in sorted(ALLOWED_INFERENCE_SETTINGS)
@@ -350,7 +322,6 @@ def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str,
     semantic_contract = {
         "schema_version": 1,
         "tools_sha256": tool_hash,
-        "system_prompt_sha256": prompt_hash,
         "inference_settings": settings,
     }
     return {
@@ -358,7 +329,6 @@ def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str,
         "format": "main_model_inference_contract",
         "tools": tools,
         "tools_sha256": tool_hash,
-        "system_prompt": system_prompt,
         "provenance": provenance,
         "inference_settings": settings,
         "contract_sha256": json_sha256(semantic_contract),

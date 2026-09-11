@@ -87,7 +87,7 @@ def write_manifest(
     (prepared / "test.jsonl").write_text("{}\n", encoding="utf-8")
 
 
-def loaded_contract(tmp_path: Path) -> inference_contract.InferenceContract:
+def loaded_contract(tmp_path: Path, *, legacy: bool = True) -> inference_contract.InferenceContract:
     tools = [
         {
             "type": "function",
@@ -115,6 +115,14 @@ def loaded_contract(tmp_path: Path) -> inference_contract.InferenceContract:
         "provenance": {"source_run_id": "run-id"},
         "inference_settings": {"temperature": 0},
     }
+    if not legacy:
+        del payload["system_prompt"]
+    else:
+        payload["contract_sha256"] = inference_contract.json_sha256({
+            "schema_version": 1, "tools_sha256": payload["tools_sha256"],
+            "system_prompt_sha256": payload["system_prompt"]["sha256"],
+            "inference_settings": payload["inference_settings"],
+        })
     path = tmp_path / "inference-contract.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return inference_contract.load_inference_contract(path)
@@ -161,7 +169,6 @@ def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
         "name": "ChatModel",
         "run_type": "llm",
         "start_time": "2026-09-03T12:00:00Z",
-        "inputs": {"messages": [[{"role": "system", "content": "policy"}]]},
         "extra": {
             "metadata": {"ls_provider": "provider", "ls_model_name": "model"},
             "invocation_params": {
@@ -198,7 +205,9 @@ def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
     assert commands[0][:3] == ["langsmith", "api", "runs/query"]
     assert commands[0][commands[0].index("--workspace") + 1] == "workspace-id"
     assert request_body["id"] == ["run-id"]
-    assert {"extra", "inputs"}.issubset(request_body["select"])
+    assert "extra" in request_body["select"]
+    assert "inputs" not in request_body["select"]
+    assert "system_prompt" not in json.loads(output.read_text())
     assert summary["contract_sha256"] == contract.contract_sha256
     assert summary["source_run_id"] == "run-id"
 
@@ -431,7 +440,8 @@ def test_prepare_keeps_all_rows_and_metadata(tmp_path: Path, monkeypatch: pytest
     assert all("_source" in json.loads(line) for line in train + validation + test)
 
 
-def test_prepare_requires_contract_for_tool_trajectories_and_writes_tools(tmp_path: Path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_prepare_requires_tool_schemas_and_preserves_recorded_prompts(tmp_path: Path, legacy):
     messages = [
         message("system", "policy", "system-1"),
         message("human", "find x", "human-1"),
@@ -448,6 +458,12 @@ def test_prepare_requires_contract_for_tool_trajectories_and_writes_tools(tmp_pa
         trajectory = copy.deepcopy(messages)
         trajectory[1]["content"] = f"find x {index}"
         trajectory[2]["content"][0]["args"]["query"] = f"x-{index}"
+        if index % 3 == 0:
+            trajectory.pop(0)
+        else:
+            trajectory[0]["content"] = f"recorded policy {index}"
+            if index % 3 == 2:
+                trajectory.insert(-1, message("system", f"follow-up instructions {index}", f"system-{index}-2"))
         examples.append(example(index, trajectory, thread=f"thread-{index}"))
     write_raw(tmp_path, examples)
 
@@ -461,7 +477,7 @@ def test_prepare_requires_contract_for_tool_trajectories_and_writes_tools(tmp_pa
             check_render=False,
         )
 
-    contract = loaded_contract(tmp_path)
+    contract = loaded_contract(tmp_path, legacy=legacy)
     manifest = dataset_ops.prepare_dataset(
         "workspace-id",
         "dataset-id",
@@ -477,6 +493,13 @@ def test_prepare_requires_contract_for_tool_trajectories_and_writes_tools(tmp_pa
         for line in (tmp_path / "prepared" / f"{split}.jsonl").read_text().splitlines()
     ]
 
+    expected_systems = {
+        ex["id"]: [msg for msg in ex["inputs"]["messages"] if msg["role"] == "system"]
+        for ex in examples
+    }
+    for row in rows:
+        assert [msg for msg in row["messages"] if msg["role"] == "system"] == expected_systems[row["_source"]["example_id"]]
+    assert json.loads((tmp_path / "raw" / "examples.json").read_text()) == examples
     assert all(row["tools"] == list(contract.tools) for row in rows)
     assert all(row["_source"]["contract_sha256"] == contract.contract_sha256 for row in rows)
     assert manifest["inference_contract"]["contract_sha256"] == contract.contract_sha256
@@ -868,9 +891,11 @@ def test_replay_context_counts_tool_declarations(monkeypatch: pytest.MonkeyPatch
         rendering.validate_replay_context([case], model, max_output_tokens=2)
 
 
-def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("system_prompt", [None, "a different recorded policy"])
+def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy, system_prompt):
     data_dir = tmp_path / "data"
-    contract = loaded_contract(tmp_path)
+    contract = loaded_contract(tmp_path, legacy=legacy)
     write_manifest(data_dir, contract=contract)
     row = {
         "messages": [
@@ -886,6 +911,11 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
             "contract_sha256": contract.contract_sha256,
         },
     }
+    if system_prompt is None:
+        row["messages"].pop(0)
+    else:
+        row["messages"][0]["content"] = system_prompt
+    expected_prefix = copy.deepcopy(row["messages"][:-2])
     (data_dir / "prepared" / "test.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     monkeypatch.setattr(
         replay,
@@ -903,6 +933,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
             reference = evidence["reference_next_action"]["tool_calls"][0]["function"]
             passed = candidate["name"] == reference["name"] and candidate["arguments"] == reference["arguments"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "tool check"})}
+        assert messages == expected_prefix
         candidate_contracts.append(request_contract)
         return tool_call("lookup" if model == "tuned-model" else "wrong")
 
@@ -1120,12 +1151,16 @@ def test_deterministic_metric_summary_reports_base_tuned_rates_and_deltas():
     assert summary["base"]["parallel_call_set_match"]["rate"] is None
 
 
-def test_fireworks_inference_uses_the_shared_contract_request(
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("system_prompt", [None, "recorded policy differs from capture"])
+def test_fireworks_inference_uses_recorded_messages_with_contract_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    legacy,
+    system_prompt,
 ):
     captured = {}
-    contract = loaded_contract(tmp_path)
+    contract = loaded_contract(tmp_path, legacy=legacy)
 
     class Response(io.BytesIO):
         def __enter__(self):
@@ -1148,6 +1183,12 @@ def test_fireworks_inference_uses_the_shared_contract_request(
         {"role": "user", "content": "find x"},
     ]
 
+    if system_prompt is None:
+        messages.pop(0)
+    else:
+        messages[0]["content"] = system_prompt
+    original = copy.deepcopy(messages)
+
     inference_transport._chat_completion(
         "accounts/fireworks/models/model",
         messages,
@@ -1156,7 +1197,8 @@ def test_fireworks_inference_uses_the_shared_contract_request(
         contract,
     )
 
-    assert captured["body"]["messages"] == messages
+    assert messages == original
+    assert captured["body"]["messages"] == original
     assert captured["body"]["tools"] == list(contract.tools)
     assert captured["body"]["temperature"] == 0
     assert captured["body"]["max_tokens"] == 256

@@ -101,7 +101,6 @@ def _langsmith_run_contract_command(workspace_id: str, run_id: str) -> list[str]
             "run_type",
             "start_time",
             "extra",
-            "inputs",
         ],
     }
     return [
@@ -122,7 +121,7 @@ def capture_inference_contract(
     *,
     runner: Callable[..., Any] = _run,
 ) -> dict[str, Any]:
-    """Capture schemas and prompt provenance from one approved LangSmith LLM run."""
+    """Capture tool schemas and inference settings from one LangSmith LLM run."""
     result = runner(
         _langsmith_run_contract_command(workspace_id, run_id),
         capture=True,
