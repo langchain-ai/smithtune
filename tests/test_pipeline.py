@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -120,6 +122,8 @@ def loaded_contract(tmp_path: Path) -> inference_contract.InferenceContract:
 
 def test_download_dataset_pages_past_one_hundred(tmp_path: Path):
     rows = [example(i) for i in range(205)]
+    for row in rows:
+        row["source_thread_id"] = row["metadata"].pop("source_thread_id")
     commands: list[list[str]] = []
 
     def runner(command, capture=False):
@@ -129,19 +133,24 @@ def test_download_dataset_pages_past_one_hundred(tmp_path: Path):
         if command[1:3] == ["dataset", "export"]:
             Path(command[4]).write_text(json.dumps([{}] * 205), encoding="utf-8")
             return SimpleNamespace(stdout="")
-        offset = int(command[command.index("--offset") + 1])
-        limit = int(command[command.index("--limit") + 1])
+        query = parse_qs(urlparse(command[2]).query)
+        offset = int(query["offset"][0])
+        limit = int(query["limit"][0])
         return SimpleNamespace(stdout=json.dumps(rows[offset : offset + limit]))
 
     dataset, returned = dataset_ops.download_dataset("workspace-id", "dataset-id", tmp_path, runner)
 
     downloaded = json.loads((tmp_path / "examples.json").read_text(encoding="utf-8"))
-    page_commands = [command for command in commands if command[1:3] == ["example", "list"]]
+    page_commands = [command for command in commands if command[1] == "api" and command[2].startswith("/api/v1/examples?")]
     assert len(downloaded) == 205
     assert dataset["id"] == "dataset-id"
     assert returned == rows
-    assert [command[command.index("--offset") + 1] for command in page_commands] == ["0", "100", "200"]
-    assert all("workspace-id" in command and "dataset-id" in command for command in commands)
+    assert [parse_qs(urlparse(command[2]).query)["offset"][0] for command in page_commands] == ["0", "100", "200"]
+    assert all(command[-2:] == ["--method", "GET"] for command in page_commands)
+    assert all("workspace-id" in command for command in commands)
+    assert all(any("dataset-id" in argument for argument in command) for command in commands)
+    dataset_ops.validate_trajectories(returned, 205)
+    assert all(row["_source"]["source_thread_id"] for row in dataset_ops.prepare_sft_rows(returned))
 
 
 def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
@@ -302,6 +311,67 @@ def test_split_groups_source_threads_without_leakage():
     assert test_threads == {row["_source"]["source_thread_id"] for row in second[2]}
     assert train_threads.isdisjoint(validation_threads | test_threads)
     assert validation_threads.isdisjoint(test_threads)
+
+
+def test_source_identity_supports_native_legacy_and_standalone_trace():
+    native = example(1)
+    native["source_thread_id"] = "native-thread"
+    native["metadata"].pop("source_thread_id")
+    legacy = example(2, thread="legacy-thread")
+    trace = example(3)
+    trace["metadata"].pop("source_thread_id")
+    trace["metadata"]["source_trace_id"] = "trace-3"
+
+    dataset_ops.validate_trajectories([native, legacy, trace], 3)
+    rows = dataset_ops.prepare_sft_rows([native, legacy, trace])
+
+    assert rows[0]["_source"]["source_thread_id"] == "native-thread"
+    assert rows[0]["_source"]["source_trace_id"] is None
+    assert rows[1]["_source"]["source_thread_id"] == "legacy-thread"
+    assert rows[2]["_source"]["source_thread_id"] is None
+    assert rows[2]["_source"]["source_trace_id"] == "trace-3"
+
+
+def test_source_identity_rejects_conflicting_thread_ids():
+    conflicting = example(1, thread="legacy-thread")
+    conflicting["source_thread_id"] = "native-thread"
+
+    with pytest.raises(PipelineError, match="conflicting source_thread_id"):
+        dataset_ops.validate_trajectories([conflicting], 1)
+
+
+def test_split_uses_threads_before_traces_and_preserves_legacy_ranking():
+    examples = [example(index, thread=f"thread-{index}") for index in range(10)]
+    for index, item in enumerate(examples):
+        item["metadata"]["source_trace_id"] = f"trace-{index}"
+    rows = dataset_ops.prepare_sft_rows(examples)
+    first = dataset_ops.split_rows(rows)
+    second = dataset_ops.split_rows(list(reversed(rows)))
+    legacy_ranked = sorted(
+        {f"thread-{index}" for index in range(10)},
+        key=lambda value: hashlib.sha256(f"{dataset_ops.SPLIT_SEED}:{value}".encode()).hexdigest(),
+    )
+
+    assert {row["_source"]["source_thread_id"] for row in first[1]} == {legacy_ranked[0]}
+    assert {row["_source"]["source_thread_id"] for row in first[2]} == {legacy_ranked[1]}
+    assert [[row["_source"]["example_id"] for row in part] for part in first] != [
+        [row["_source"]["example_id"] for row in part] for part in second
+    ]
+    assert [{dataset_ops._source_group(row) for row in part} for part in first] == [
+        {dataset_ops._source_group(row) for row in part} for part in second
+    ]
+
+
+def test_standalone_traces_are_independent_split_groups():
+    examples = [example(index) for index in range(10)]
+    for index, item in enumerate(examples):
+        item["metadata"].pop("source_thread_id")
+        item["metadata"]["source_trace_id"] = f"trace-{index}"
+    rows = dataset_ops.prepare_sft_rows(examples)
+    splits = dataset_ops.split_rows(rows)
+
+    assert [len(part) for part in splits] == [8, 1, 1]
+    assert all(row["_source"]["source_thread_id"] is None for part in splits for row in part)
 
 
 def test_split_supports_test_only_and_validation_only_holdouts():
@@ -535,7 +605,11 @@ def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyP
     model = ModelSpec("tiny", "accounts/fireworks/models/tiny", "tokenizer", "revision", "renderer", 2)
     row = {
         "messages": [],
-        "_source": {"example_id": "one", "source_thread_id": "thread-one"},
+        "_source": {
+            "example_id": "one",
+            "source_thread_id": "thread-one",
+            "source_trace_id": "trace-one",
+        },
     }
     accepted, rejected, audit = rendering.validate_model_context([row], model)
     assert accepted == []
@@ -543,6 +617,7 @@ def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyP
         {
             "example_id": "one",
             "source_thread_id": "thread-one",
+            "source_trace_id": "trace-one",
             "rendered_tokens": 3,
             "context_limit": 2,
             "reason": "rendered example exceeds model context limit",
@@ -696,6 +771,27 @@ def test_replay_cases_preserve_tools_and_contract_hash():
     assert cases[0]["contract_sha256"] == "contract-hash"
 
 
+def test_replay_cases_include_trace_provenance():
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ],
+            "_source": {
+                "example_id": "example-1",
+                "source_thread_id": None,
+                "source_trace_id": "trace-1",
+            },
+        }
+    ]
+
+    cases = replay.build_replay_cases(rows)
+
+    assert cases[0]["source_thread_id"] is None
+    assert cases[0]["source_trace_id"] == "trace-1"
+
+
 def test_replay_context_rejects_without_truncation(monkeypatch: pytest.MonkeyPatch):
     import training.renderer
     import training.utils.tokenizers
@@ -707,13 +803,21 @@ def test_replay_context_rejects_without_truncation(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: object())
     monkeypatch.setattr(training.renderer, "get_renderer", lambda *args: SimpleNamespace(build_generation_prompt=lambda messages: Prompt()))
     model = ModelSpec("tiny", "accounts/fireworks/models/tiny", "tok", "rev", "renderer", 4)
-    case = {"id": "case", "example_id": "example", "messages": []}
+    case = {
+        "id": "case",
+        "example_id": "example",
+        "source_thread_id": None,
+        "source_trace_id": "trace-1",
+        "messages": [],
+    }
 
     accepted, rejected = rendering.validate_replay_context([case], model, max_output_tokens=2)
 
     assert accepted == []
     assert rejected[0]["prompt_tokens"] == 3
     assert rejected[0]["context_limit"] == 4
+    assert rejected[0]["source_thread_id"] is None
+    assert rejected[0]["source_trace_id"] == "trace-1"
 
 
 def test_replay_context_counts_tool_declarations(monkeypatch: pytest.MonkeyPatch):

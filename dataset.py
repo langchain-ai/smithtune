@@ -83,9 +83,9 @@ def _langsmith_page_command(
     limit: int,
 ) -> list[str]:
     return [
-        "langsmith", "example", "list", "--dataset", dataset_id,
-        "--limit", str(limit), "--offset", str(offset),
-        "--workspace", workspace_id, "--format", "json",
+        "langsmith", "api",
+        f"/api/v1/examples?dataset={dataset_id}&limit={limit}&offset={offset}",
+        "--workspace", workspace_id, "--method", "GET",
     ]
 
 
@@ -368,6 +368,29 @@ def _has_message_content(message: dict[str, Any]) -> bool:
     return bool(has_text or message.get("tool_calls") or message.get("reasoning_content"))
 
 
+def _source_identity(example: dict[str, Any]) -> dict[str, str | None]:
+    """Resolve native and legacy LangSmith source identities."""
+    metadata = example.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    native_thread_id = example.get("source_thread_id")
+    legacy_thread_id = metadata.get("source_thread_id")
+    trace_id = metadata.get("source_trace_id")
+    for label, value in (
+        ("source_thread_id", native_thread_id),
+        ("metadata.source_thread_id", legacy_thread_id),
+        ("metadata.source_trace_id", trace_id),
+    ):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise PipelineError(f"example source identity {label} must be a non-empty string")
+    if native_thread_id and legacy_thread_id and native_thread_id != legacy_thread_id:
+        raise PipelineError("example has conflicting source_thread_id values")
+    thread_id = native_thread_id or legacy_thread_id
+    if not thread_id and not trace_id:
+        raise PipelineError("example has no source thread or trace identity")
+    return {"source_thread_id": thread_id, "source_trace_id": trace_id}
+
+
 def validate_trajectories(
     examples: list[dict[str, Any]],
     expected_count: int,
@@ -392,9 +415,10 @@ def validate_trajectories(
         seen_examples.add(example_id)
         if not isinstance(metadata, dict):
             raise PipelineError(f"example {example_id} has no metadata object")
-        thread_id = metadata.get("source_thread_id")
-        if not isinstance(thread_id, str) or not thread_id:
-            raise PipelineError(f"example {example_id} has no source_thread_id")
+        try:
+            _source_identity(example)
+        except PipelineError as exc:
+            raise PipelineError(f"example {example_id}: {exc}") from exc
         if metadata.get("trajectory_format") != "messages":
             raise PipelineError(f"example {example_id} is not in trajectory messages format")
         if metadata.get("conversation_scope") != "root":
@@ -461,6 +485,7 @@ def prepare_sft_rows(
     _validate_reasoning_policy(reasoning_policy)
     rows = []
     for source_index, example in enumerate(examples):
+        identity = _source_identity(example)
         messages = []
         for source in example["inputs"]["messages"]:
             converted = convert_message(source, reasoning_policy=reasoning_policy, model=model)
@@ -477,7 +502,7 @@ def prepare_sft_rows(
             "messages": messages,
             "_source": {
                 "example_id": example["id"],
-                "source_thread_id": example["metadata"]["source_thread_id"],
+                **identity,
                 "source_index": source_index,
                 "metadata": copy.deepcopy(example["metadata"]),
             },
@@ -493,6 +518,13 @@ def prepare_sft_rows(
     return rows
 
 
+def _source_group(row: dict[str, Any]) -> tuple[str, str]:
+    source = row["_source"]
+    if source.get("source_thread_id"):
+        return ("thread", source["source_thread_id"])
+    return ("trace", source["source_trace_id"])
+
+
 def split_rows(
     rows: list[dict[str, Any]],
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
@@ -503,10 +535,14 @@ def split_rows(
     if validation_fraction + test_fraction > 1:
         raise PipelineError("validation and test fractions cannot total more than one")
 
-    ranked_threads = sorted(
-        {row["_source"]["source_thread_id"] for row in rows},
-        key=lambda thread_id: hashlib.sha256(
-            f"{SPLIT_SEED}:{thread_id}".encode()
+    ranked_groups = sorted(
+        {_source_group(row) for row in rows},
+        key=lambda group: hashlib.sha256(
+            (
+                f"{SPLIT_SEED}:{group[1]}"
+                if group[0] == "thread"
+                else f"{SPLIT_SEED}:trace:{group[1]}"
+            ).encode()
         ).hexdigest(),
     )
     train_fraction = 1 - validation_fraction - test_fraction
@@ -514,32 +550,29 @@ def split_rows(
         fraction > 0
         for fraction in (train_fraction, validation_fraction, test_fraction)
     )
-    if len(ranked_threads) < required_partitions:
-        raise PipelineError("not enough source threads for the requested non-zero fractions")
+    if len(ranked_groups) < required_partitions:
+        raise PipelineError("not enough source thread or trace groups for the requested non-zero fractions")
 
     validation_count = 0
     if validation_fraction > 0:
-        validation_count = max(1, round(len(ranked_threads) * validation_fraction))
+        validation_count = max(1, round(len(ranked_groups) * validation_fraction))
         validation_count = min(
             validation_count,
-            len(ranked_threads) - int(train_fraction > 0) - int(test_fraction > 0),
+            len(ranked_groups) - int(train_fraction > 0) - int(test_fraction > 0),
         )
     test_count = 0
     if test_fraction > 0:
-        test_count = max(1, round(len(ranked_threads) * test_fraction))
+        test_count = max(1, round(len(ranked_groups) * test_fraction))
         test_count = min(
             test_count,
-            len(ranked_threads) - validation_count - int(train_fraction > 0),
+            len(ranked_groups) - validation_count - int(train_fraction > 0),
         )
-    validation_threads = set(ranked_threads[:validation_count])
-    test_threads = set(ranked_threads[validation_count : validation_count + test_count])
-    held_out_threads = validation_threads | test_threads
-    train = [
-        row for row in rows
-        if row["_source"]["source_thread_id"] not in held_out_threads
-    ]
-    validation = [row for row in rows if row["_source"]["source_thread_id"] in validation_threads]
-    test = [row for row in rows if row["_source"]["source_thread_id"] in test_threads]
+    validation_groups = set(ranked_groups[:validation_count])
+    test_groups = set(ranked_groups[validation_count : validation_count + test_count])
+    held_out_groups = validation_groups | test_groups
+    train = [row for row in rows if _source_group(row) not in held_out_groups]
+    validation = [row for row in rows if _source_group(row) in validation_groups]
+    test = [row for row in rows if _source_group(row) in test_groups]
     return train, validation, test
 
 
@@ -582,13 +615,13 @@ def _validate_split_isolation(
 ) -> None:
     partitions = {"train": train, "validation": validation, "test": test}
     for left_index, (left_name, left_rows) in enumerate(partitions.items()):
-        left_threads = {row["_source"]["source_thread_id"] for row in left_rows}
+        left_groups = {_source_group(row) for row in left_rows}
         left_content = {_trajectory_content_hash(row) for row in left_rows}
         for right_name, right_rows in list(partitions.items())[left_index + 1 :]:
-            right_threads = {row["_source"]["source_thread_id"] for row in right_rows}
-            if overlap := left_threads & right_threads:
+            right_groups = {_source_group(row) for row in right_rows}
+            if overlap := left_groups & right_groups:
                 raise PipelineError(
-                    f"source thread overlap between {left_name} and {right_name}: {sorted(overlap)[0]}"
+                    f"source group overlap between {left_name} and {right_name}: {sorted(overlap)[0]}"
                 )
             right_content = {_trajectory_content_hash(row) for row in right_rows}
             if left_content & right_content:
@@ -667,7 +700,11 @@ def prepare_dataset(
             "examples": expected_count,
         },
         "split": {
-            "method": "sha256(seed:source_thread_id)",
+            "method": (
+                "sha256(seed:source_thread_id)"
+                if all(row["_source"].get("source_thread_id") for row in rows)
+                else "sha256(seed:source_thread_id; seed:trace:source_trace_id fallback)"
+            ),
             "seed": SPLIT_SEED,
             "validation_fraction": validation_fraction,
             "test_fraction": test_fraction,

@@ -41,10 +41,11 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         raise PipelineError(f"cannot read valid JSONL from {path}: {exc}") from exc
 
 
-def _run(command: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(command: list[str], *, capture: bool = False, input: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         check=True,
         text=True,
         capture_output=capture,
+        input=input,
     )

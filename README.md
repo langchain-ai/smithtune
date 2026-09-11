@@ -23,6 +23,38 @@ Configure credentials in your environment:
 | Baseten training | `BASETEN_API_KEY` |
 | Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
 
+## Create a dataset from traces
+
+Select root traces from a project using LangSmith's existing filter syntax:
+
+```bash
+python pipeline.py dataset select \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))' \
+  --scope thread --limit 100 --seed 42 \
+  --output data/selection.json
+
+python pipeline.py dataset create \
+  --selection data/selection.json --name my-sft-dataset
+```
+
+`select` previews matches and saves IDs. The time window includes the start and excludes the end.
+`--scope trace` creates one example per trace; `--scope thread` imports each matched thread's full
+trajectory, including turns outside the window. Roots without a thread ID are excluded in thread
+scope and counted in the preview. Sampling happens after deduplication; omit `--limit` to keep all.
+
+`create` imports the saved selection into a new dataset and prints its ID for `prepare` below.
+Thread imports stay server-side. Trace imports pass messages through local memory without saving
+trajectory files. Messages, including recorded system prompts, are preserved. IDs are fixed by
+the selection file; source content can still change before import.
+
+An existing selection, receipt, or dataset name is rejected. Imports stop on the first error;
+`data/selection.import.json` records confirmed examples and any pending write. A timeout can leave
+the last write's outcome unknown. Inspect the partial dataset before starting a new attempt with
+a new selection path and dataset name. Automatic retry/resume and appending are not supported.
+These commands require current LangSmith run-query, trajectory, and thread-import APIs.
+
 ## Prepare data
 
 For trajectories with tools, capture the tool schemas and system prompt from a representative main-model `llm` run. Review the contract before using it.
@@ -48,7 +80,8 @@ python pipeline.py prepare \
   --model-profile qwen3p8-27b
 ```
 
-- Default split: 80% training, 10% validation, 10% replay test, grouped by source thread.
+- Default split: 80% training, 10% validation, 10% replay test, grouped by source thread or standalone trace.
+- SFT trains on all supported assistant messages, including earlier turns.
 - Reasoning is omitted by default. Use `--reasoning-policy preserve` with a supported model and renderer to retain it.
 - Unsupported content fails validation; examples over the preparation context limit are rejected without truncation.
 
@@ -69,6 +102,7 @@ python pipeline.py train \
 ```
 
 The best checkpoint is selected by validation loss and recorded in `runs/$run_id/result.json`.
+Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 

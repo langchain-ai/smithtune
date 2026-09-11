@@ -19,3 +19,5 @@ fireworks-cookbook/
 data/
 data-*/
 runs/
+.superpowers/
+docs/superpowers/
