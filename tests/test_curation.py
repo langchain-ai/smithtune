@@ -331,6 +331,8 @@ def test_select_create_download_prepare(tmp_path):
         return SimpleNamespace(stdout=json.dumps(api.examples[offset:offset + limit]))
     data_dir = tmp_path / "data"
     dataset.download_dataset(uid(100), imported["dataset_id"], data_dir / "raw", runner=download)
+    from test_example_tools import write_empty_tool_snapshot
+    write_empty_tool_snapshot(data_dir, api.examples, imported["dataset_id"], uid(100))
     manifest = dataset.prepare_dataset(uid(100), imported["dataset_id"], DEFAULT_MODEL, data_dir,
                                        fetch=False, check_render=False)
     assert [manifest["split"][key] for key in ("train", "validation", "test")] == [8, 1, 1]

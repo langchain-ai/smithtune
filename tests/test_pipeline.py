@@ -47,7 +47,7 @@ def example(index: int, messages: list[dict] | None = None, thread: str | None =
     }
 
 
-def write_raw(root: Path, examples: list[dict], dataset_id: str = "dataset-id") -> None:
+def write_raw(root: Path, examples: list[dict], dataset_id: str = "dataset-id", *, workspace_id: str = "workspace-id") -> None:
     raw = root / "raw"
     raw.mkdir()
     (raw / "examples.json").write_text(json.dumps(examples), encoding="utf-8")
@@ -57,6 +57,12 @@ def write_raw(root: Path, examples: list[dict], dataset_id: str = "dataset-id") 
         json.dumps({"id": dataset_id, "name": "test", "example_count": len(examples)}),
         encoding="utf-8",
     )
+
+    if not any(part.get("type") == "tool_call" for ex in examples
+               for msg in ex["inputs"]["messages"] if isinstance(msg["content"], list)
+               for part in msg["content"]):
+        from test_example_tools import write_empty_tool_snapshot
+        write_empty_tool_snapshot(root, examples, dataset_id, workspace_id)
 
 
 def write_manifest(

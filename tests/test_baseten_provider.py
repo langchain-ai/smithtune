@@ -1827,6 +1827,9 @@ def _write_raw_dataset(root: Path, *, count: int) -> None:
         "id": "dataset-id", "name": "alternate-model-test", "example_count": count,
     }))
 
+    from test_example_tools import write_empty_tool_snapshot
+    write_empty_tool_snapshot(root, examples)
+
 
 def _write_prepared_dataset(root: Path) -> None:
     prepared = root / "prepared"

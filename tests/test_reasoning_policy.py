@@ -115,7 +115,7 @@ def test_prepare_manifest_and_replay_use_same_policy(tmp_path, monkeypatch, poli
     source = trajectory()
     # Include an opaque-only reasoning message to exercise omission under preserve.
     source["inputs"]["messages"].insert(2, message("ai", [reasoning("")], "opaque-only"))
-    write_raw(tmp_path, [source])
+    write_raw(tmp_path, [source], workspace_id="workspace")
     original_bytes = (tmp_path / "raw" / "examples.json").read_bytes()
     manifest = dataset.prepare_dataset(
         "workspace", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path,
@@ -157,7 +157,7 @@ def test_prepare_manifest_and_replay_use_same_policy(tmp_path, monkeypatch, poli
 def test_cli_and_provider_pass_preparation_policy(tmp_path, monkeypatch, provider, policy):
     source = example(0, [message("human", "question", "u"),
                          message("ai", [reasoning(), {"type": "text", "text": "answer"}], "a")])
-    write_raw(tmp_path, [source])
+    write_raw(tmp_path, [source], workspace_id="workspace")
     argv = ["pipeline.py", "prepare", "--provider", provider.name,
             "--workspace-id", "workspace", "--dataset-id", "dataset-id",
             "--data-dir", str(tmp_path), "--validation-fraction", "0", "--test-fraction", "0",

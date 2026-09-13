@@ -253,6 +253,11 @@ def load_inference_contract(path: Path) -> InferenceContract:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ContractError(f"cannot read valid inference contract JSON from {path}: {exc}") from exc
+    return parse_inference_contract(payload)
+
+
+def parse_inference_contract(payload: Any) -> InferenceContract:
+    """Validate a saved contract, including its schema and content hashes."""
     if not isinstance(payload, Mapping):
         raise ContractError("inference contract must be an object")
     if payload.get("schema_version") != 1:
@@ -352,9 +357,11 @@ def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str,
 
 def contract_from_runs(
     runs: Sequence[Mapping[str, Any]], *, workspace_id: str,
-    source_run_id: str, thread_id: str,
+    source_run_id: str | None = None, thread_id: str | None = None,
 ) -> dict[str, Any]:
     """Combine the recorded function tools from every LLM call in a thread."""
+    if not runs and source_run_id is None:
+        raise ContractError("no LLM runs were returned for the source trajectory")
     tools: dict[str, dict[str, Any]] = {}
     tool_sources: dict[str, str] = {}
     source_run = None
@@ -387,6 +394,27 @@ def contract_from_runs(
                 )
             tools[name] = tool
             tool_sources[name] = run_id
+    if source_run_id is None:
+        # Automatic example capture carries schemas only; no one call's replay
+        # settings should become authoritative for the whole conversation.
+        tool_list = [tools[name] for name in sorted(tools)]
+        tool_hash = json_sha256(tool_list)
+        return {
+            "schema_version": 1,
+            "format": "main_model_inference_contract",
+            "tools": tool_list,
+            "tools_sha256": tool_hash,
+            "inference_settings": {},
+            "contract_sha256": json_sha256({
+                "schema_version": 1, "tools_sha256": tool_hash, "inference_settings": {},
+            }),
+            "provenance": {
+                "source_workspace_id": workspace_id,
+                "source_thread_id": thread_id,
+                "source_run_ids": sorted(run["id"] for run in runs),
+                "source_trace_ids": sorted({run["trace_id"] for run in runs}),
+            },
+        }
     if source_run is None:
         raise ContractError(f"source LLM run {source_run_id} was not returned in the thread scan")
     if not tools:
