@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from dataclasses import fields
 from pathlib import Path
 
@@ -25,21 +26,21 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    curate = sub.add_parser("dataset", help="select threads and create a conversation trajectory dataset")
+    curate = sub.add_parser("dataset", help="create a conversation trajectory dataset from project filters")
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
-    select = curate_sub.add_parser("select", help="filter root traces and save their containing thread IDs",
-                                   description="Select whole conversations through matching root traces. Imports include turns outside the time window.")
-    select.add_argument("--workspace-id", required=True)
-    select.add_argument("--project-id", required=True)
-    select.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
-    select.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
-    select.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
-    select.add_argument("--limit", type=int, help="sample at most this many distinct threads")
-    select.add_argument("--seed", type=int, default=42)
-    select.add_argument("--output", type=Path, required=True)
-    create = curate_sub.add_parser("create", help="import saved whole threads server-side into a new LangSmith dataset")
-    create.add_argument("--selection", type=Path, required=True)
-    create.add_argument("--name", required=True)
+    create = curate_sub.add_parser(
+        "create", help="filter root traces and import their whole conversations into a new dataset",
+        description="Create a dataset from whole conversations selected through matching root traces. Imports include turns outside the time window.",
+    )
+    create.add_argument("--workspace-id", required=True)
+    create.add_argument("--project-id", required=True)
+    create.add_argument("--name", required=True, help="name for the new LangSmith dataset")
+    create.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
+    create.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
+    create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
+    create.add_argument("--limit", type=int, help="sample at most this many distinct threads; default: all matches")
+    create.add_argument("--seed", type=int, default=42, help="sampling seed (default: 42)")
+    create.add_argument("--output", type=Path, help="selection file path; default: an automatic path under data/selections; import receipt saved alongside it")
 
     capture_contract = sub.add_parser(
         "capture-contract",
@@ -232,15 +233,12 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "dataset":
-            if args.dataset_command == "select":
-                value = curation.select_dataset(
-                    workspace_id=args.workspace_id, project_id=args.project_id,
-                    start_time=args.start_time, end_time=args.end_time,
-                    output=args.output, filter=args.filter,
-                    limit=args.limit, seed=args.seed,
-                )
-            else:
-                value = curation.create_dataset(selection=args.selection, name=args.name)
+            print("Selecting conversations and creating dataset...", file=sys.stderr)
+            value = curation.create_dataset(
+                workspace_id=args.workspace_id, project_id=args.project_id,
+                start_time=args.start_time, end_time=args.end_time, name=args.name,
+                filter=args.filter, limit=args.limit, seed=args.seed, output=args.output,
+            )
         elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(
                 args.workspace_id,

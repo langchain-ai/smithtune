@@ -69,7 +69,7 @@ class API:
 
 
 def select(tmp_path, api, **overrides):
-    return curation.select_dataset(**{
+    return curation._select_dataset(**{
         "workspace_id": uid(100), "project_id": uid(101),
         "start_time": "2026-09-01T00:00:00Z", "end_time": "2026-09-08T00:00:00Z",
         "output": tmp_path / "selection.json", "runner": api,
@@ -129,7 +129,7 @@ def test_empty_selection_and_overwrite_fail_before_writes(tmp_path, roots):
     with pytest.raises(PipelineError, match="already exists"):
         select(tmp_path, api)
     with pytest.raises(PipelineError, match="empty selections"):
-        curation.create_dataset(selection=tmp_path / "selection.json", name="new", runner=api)
+        curation._import_selection(selection=tmp_path / "selection.json", name="new", runner=api)
     assert len(api.calls) == 1
     assert not (tmp_path / "selection.import.json").exists()
 
@@ -148,7 +148,7 @@ def test_create_imports_saved_threads_server_side(tmp_path):
     select(tmp_path, api)
     api.calls.clear()
     api.pages = [[root(3, "b")]]
-    result = curation.create_dataset(selection=tmp_path / "selection.json", name="new", runner=api)
+    result = curation._import_selection(selection=tmp_path / "selection.json", name="new", runner=api)
     assert result["example_count"] == 1
     assert api.calls == [
         ("/api/v1/datasets", {"name": "new", "data_type": "kv"}),
@@ -165,7 +165,7 @@ def test_create_imports_saved_threads_server_side(tmp_path):
     assert "What is 17" not in json.dumps(receipt)
     calls = len(api.calls)
     with pytest.raises(PipelineError, match="new writable path"):
-        curation.create_dataset(selection=tmp_path / "selection.json", name="again", runner=api)
+        curation._import_selection(selection=tmp_path / "selection.json", name="again", runner=api)
     assert len(api.calls) == calls
 
 
@@ -177,7 +177,7 @@ def test_partial_failure_has_receipt_and_never_retries(tmp_path):
             raise subprocess.CalledProcessError(1, "langsmith", stderr="request timed out; private message")
     api.failure = fail
     with pytest.raises(PipelineError, match="confirmed=1") as error:
-        curation.create_dataset(selection=tmp_path / "selection.json", name="new", runner=api)
+        curation._import_selection(selection=tmp_path / "selection.json", name="new", runner=api)
     assert "private message" not in str(error.value)
     assert "outcome may be unknown" in str(error.value)
     assert sum(path.endswith("thread-imports") for path, _ in api.calls) == 2
@@ -198,7 +198,7 @@ def test_saved_v1_thread_selection_remains_compatible(tmp_path):
         "matches": [root(1, "existing-thread")], "selected_ids": ["existing-thread"],
     }))
     api = API()
-    result = curation.create_dataset(selection=path, name="new", runner=api)
+    result = curation._import_selection(selection=path, name="new", runner=api)
     assert result["example_count"] == 1
     assert api.calls[-1][1]["thread_ids"] == ["existing-thread"]
     assert len(api.calls) == 2
@@ -219,7 +219,7 @@ def test_non_thread_selection_fails_before_any_write(tmp_path, scope):
     path.write_text(json.dumps(saved))
     api.calls.clear()
     with pytest.raises(PipelineError, match="only thread selections.*regenerate"):
-        curation.create_dataset(selection=path, name="new", runner=api)
+        curation._import_selection(selection=path, name="new", runner=api)
     assert api.calls == []
     assert not (tmp_path / "selection.import.json").exists()
 
@@ -235,7 +235,7 @@ def test_unconfirmed_thread_import_stops_and_records_pending_write(tmp_path, res
         result = api(command, **kwargs)
         return SimpleNamespace(stdout=json.dumps(response)) if command[2].endswith("thread-imports") else result
     with pytest.raises(PipelineError, match="outcome may be unknown"):
-        curation.create_dataset(selection=tmp_path / "selection.json", name="new", runner=runner)
+        curation._import_selection(selection=tmp_path / "selection.json", name="new", runner=runner)
     assert sum(path.endswith("thread-imports") for path, _ in api.calls) == 1
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
     assert receipt["status"] == "failed"
@@ -251,7 +251,7 @@ def test_existing_dataset_name_and_unknown_dataset_write(tmp_path):
         raise subprocess.CalledProcessError(1, "langsmith", stderr="Error: HTTP 409")
     api.failure = fail
     with pytest.raises(PipelineError, match="dataset name already exists"):
-        curation.create_dataset(selection=tmp_path / "selection.json", name="existing", runner=api)
+        curation._import_selection(selection=tmp_path / "selection.json", name="existing", runner=api)
     assert len(api.calls) == 2
     assert json.loads((tmp_path / "selection.import.json").read_text())["dataset_name"] == "existing"
 
@@ -264,7 +264,7 @@ def test_saved_selection_rejects_unknown_ids(tmp_path):
     saved["selected_ids"] = ["not-a-match"]
     path.write_text(json.dumps(saved))
     with pytest.raises(PipelineError, match="belong"):
-        curation.create_dataset(selection=path, name="new", runner=api)
+        curation._import_selection(selection=path, name="new", runner=api)
     assert len(api.calls) == 1
 
 
@@ -284,30 +284,35 @@ def test_api_uses_stdin_and_run_passes_it_to_subprocess(monkeypatch):
 
 
 def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
-    args = ["dataset", "select", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", "2026-09-01T00:00:00Z", "--end-time", "2026-09-08T00:00:00Z",
-            "--output", str(tmp_path / "selection.json")]
+    args = ["dataset", "create", "--workspace-id", uid(100), "--project-id", uid(101),
+            "--name", "new", "--start-time", "2026-09-01T00:00:00Z", "--end-time", "2026-09-08T00:00:00Z"]
     parsed = pipeline._parser().parse_args(args)
-    assert parsed.seed == 42 and parsed.limit is None
-    calls = []
-    monkeypatch.setattr(curation, "select_dataset", lambda **kwargs: calls.append(kwargs) or {"selected_examples": 3})
-    monkeypatch.setattr(sys, "argv", ["pipeline.py", *args])
+    assert parsed.seed == 42 and parsed.limit is None and parsed.output is None
+    api = API([[root(1, "a"), root(2, "a"), root(3, "b")]])
+    create_dataset = curation.create_dataset
+    monkeypatch.setattr(curation, "DEFAULT_SELECTION_DIR", tmp_path / "selections")
+    monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: create_dataset(**kwargs, runner=api))
+    monkeypatch.setattr(sys, "argv", ["pipeline.py", *args, "--filter", 'has(tags, "reviewed")', "--limit", "1", "--seed", "17"])
     pipeline.main()
-    assert "scope" not in calls[0]
-    assert calls[0]["output"] == tmp_path / "selection.json"
-    assert json.loads(capsys.readouterr().out)["selected_examples"] == 3
-    monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: calls.append(kwargs) or {"dataset_id": uid(200)})
-    monkeypatch.setattr(sys, "argv", ["pipeline.py", "dataset", "create", "--selection", "data/selection.json", "--name", "new"])
-    pipeline.main()
-    assert calls[-1] == {"selection": Path("data/selection.json"), "name": "new"}
-    assert json.loads(capsys.readouterr().out)["dataset_id"] == uid(200)
-    for scope in ("trace", "thread"):
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert "Selecting conversations" in captured.err
+    assert result["dataset_id"] == uid(200) and result["example_count"] == 1
+    assert result["matching_roots"] == 3 and result["distinct_threads"] == 2
+    assert "preview" not in result
+    saved = json.loads(Path(result["selection"]).read_text())
+    assert saved["query"]["seed"] == 17 and saved["query"]["limit"] == 1
+    assert saved["query"]["filter"] == 'has(tags, "reviewed")'
+    assert api.calls[-1][1]["thread_ids"] == saved["selected_ids"]
+    assert Path(result["receipt"]).exists()
+    assert pipeline._parser().parse_args([*args, "--output", str(tmp_path / "custom.json")]).output == tmp_path / "custom.json"
+    for obsolete in (["dataset", "select"], [*args, "--selection", "saved.json"], [*args, "--scope", "trace"]):
         with pytest.raises(SystemExit) as error:
-            pipeline._parser().parse_args([*args, "--scope", scope])
+            pipeline._parser().parse_args(obsolete)
         assert error.value.code == 2
 
 
-def test_select_create_download_prepare(tmp_path):
+def test_create_download_prepare(tmp_path):
     api = API([[root(i, f"thread-{(i + 1) // 2}") for i in range(1, 21)]])
     def source_messages(path, body):
         if path.endswith("thread-imports"):
@@ -315,8 +320,7 @@ def test_select_create_download_prepare(tmp_path):
             api.messages = [{"role": "human", "content": f"Question {identity}"},
                             {"role": "ai", "content": f"Answer {identity}"}]
     api.failure = source_messages
-    select(tmp_path, api)
-    imported = curation.create_dataset(selection=tmp_path / "selection.json", name="new", runner=api)
+    imported = create(tmp_path, api)
     assert imported["example_count"] == 10
     def download(command, *, capture=False):
         if command[1:3] == ["dataset", "get"]:
@@ -341,3 +345,70 @@ def test_select_create_download_prepare(tmp_path):
     assert all(row["messages"][0]["role"] == "user" for row in rows)
     source_rows = dataset.prepare_sft_rows(api.examples)
     assert all(row["_source"]["source_thread_id"] for row in source_rows)
+
+
+
+def create(tmp_path, api, **overrides):
+    return curation.create_dataset(**{
+        "workspace_id": uid(100), "project_id": uid(101), "name": "new",
+        "start_time": "2026-09-01T00:00:00Z", "end_time": "2026-09-08T00:00:00Z",
+        "output": tmp_path / "selection.json", "runner": api, **overrides,
+    })
+
+
+def test_create_freezes_paginated_selection_before_import(tmp_path):
+    api = API([[root(1, "a"), root(2, "a")], [root(3, "b"), root(4)]])
+    def source_changes(path, body):
+        if path == "/api/v1/datasets":
+            saved = json.loads((tmp_path / "selection.json").read_text())
+            assert saved["selected_ids"] == ["a", "b"]
+            api.pages = [[root(5, "new-thread")]]
+    api.failure = source_changes
+    result = create(tmp_path, api)
+    assert result["example_count"] == 2
+    assert result["excluded_unthreaded_roots"] == 1
+    assert [body["thread_ids"] for path, body in api.calls if path.endswith("thread-imports")] == [["a"], ["b"]]
+    assert sum(path == "/api/v2/runs/query" for path, _ in api.calls) == 2
+    assert all(ex["inputs"]["messages"] == api.messages for ex in api.examples)
+
+
+@pytest.mark.parametrize("roots", [[], [root(1), root(2)]])
+def test_create_with_no_threads_does_not_create_empty_dataset(tmp_path, roots):
+    api = API([roots])
+    with pytest.raises(PipelineError, match="no conversation threads matched.*no dataset was created"):
+        create(tmp_path, api)
+    assert [path for path, _ in api.calls] == ["/api/v2/runs/query"]
+    assert (tmp_path / "selection.json").exists()
+    assert not (tmp_path / "selection.import.json").exists()
+
+
+def test_create_default_paths_are_unique(tmp_path, monkeypatch):
+    monkeypatch.setattr(curation, "DEFAULT_SELECTION_DIR", tmp_path)
+    first = create(tmp_path, API([[root(1, "a")]]), output=None)
+    second = create(tmp_path, API([[root(1, "a")]]), name="another", output=None)
+    assert first["selection"] != second["selection"]
+    assert first["receipt"] != second["receipt"]
+    for result in (first, second):
+        assert Path(result["selection"]).parent == tmp_path
+        assert json.loads(Path(result["receipt"]).read_text())["status"] == "complete"
+
+
+def test_create_validates_name_before_querying(tmp_path):
+    api = API([[root(1, "a")]])
+    with pytest.raises(PipelineError, match="name must be a nonempty string"):
+        create(tmp_path, api, name=" ")
+    assert api.calls == []
+
+
+def test_create_failure_reports_partial_dataset_and_saved_receipt(tmp_path):
+    api = API([[root(1, "a"), root(2, "b")]])
+    def fail(path, body):
+        if path.endswith("thread-imports") and body["thread_ids"] == ["b"]:
+            raise subprocess.CalledProcessError(1, "langsmith", stderr="timeout")
+    api.failure = fail
+    with pytest.raises(PipelineError, match="confirmed=1.*source=b.*receipt="):
+        create(tmp_path, api)
+    receipt = json.loads((tmp_path / "selection.import.json").read_text())
+    assert receipt["status"] == "failed" and receipt["dataset_id"] == uid(200)
+    assert receipt["example_ids"] == [uid(300)]
+    assert sum(path.endswith("thread-imports") for path, _ in api.calls) == 2
