@@ -25,37 +25,28 @@ Configure credentials in your environment:
 
 ## Create a dataset from conversations
 
-Select whole conversations (threads) by filtering trace root runs in a project:
+Create a dataset directly from a tracing project and filters:
 
 ```bash
-python pipeline.py dataset select \
-  --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))' \
-  --limit 100 --seed 42 \
-  --output data/selection.json
-
 python pipeline.py dataset create \
-  --selection data/selection.json --name my-sft-dataset
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --name my-sft-dataset \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
 
-`select` applies LangSmith filters to root runs within the time window (start inclusive, end exclusive),
-previews matches, and saves their thread IDs. A matching root selects its entire thread, including
-earlier turns and turns outside the window. Roots without a thread ID are excluded and counted
-in the preview. Threads are deduplicated before sampling; `--limit` counts threads, and omitting
-it keeps all matching threads.
+The command filters trace root runs, deduplicates their threads, and imports one complete
+conversation per dataset example, entirely server-side. It prints the dataset ID for `prepare`.
+Recorded messages are preserved, including earlier turns and turns outside the filter window.
 
-`create` imports one full conversation per example into a new dataset, entirely server-side,
-and prints its ID for `prepare` below. Messages, including recorded system prompts, are preserved.
-The selection file fixes the thread IDs; source content can still change before import.
-Existing thread selection files still work. The `--scope` flag has been removed; old trace
-selections must be regenerated with `dataset select`.
+- The time window uses an inclusive start and exclusive end. Feedback, metadata, tag, and error filters apply to root runs.
+- All matching threads are included by default. Use `--limit 100` to sample up to 100 threads; `--seed` defaults to 42.
+- Roots without a thread ID are excluded and counted. If no threads match, no dataset is created.
+- Selected IDs and an import receipt are saved automatically under `data/selections/`. Use `--output path.json` to choose the selection file location.
 
-An existing selection, receipt, or dataset name is rejected. Imports stop on the first error;
-`data/selection.import.json` records confirmed examples and any pending write. A timeout can leave
-the last write's outcome unknown. Inspect the partial dataset before starting a new attempt with
-a new selection path and dataset name. Automatic retry/resume and appending are not supported.
-These commands require current LangSmith run-query and thread-import APIs.
+Existing dataset names are rejected. On failure, the receipt records confirmed imports and any
+pending write; inspect the partial dataset before rerunning. Imports are not automatically retried.
+This command requires current LangSmith run-query and thread-import APIs.
 
 ## Prepare data
 
@@ -173,7 +164,6 @@ See command help for model profiles, custom models, split fractions, and provide
 
 ```bash
 python pipeline.py --help
-python pipeline.py dataset select --help
 python pipeline.py dataset create --help
 python pipeline.py prepare --help
 python pipeline.py train --help

@@ -10,10 +10,13 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from artifacts import _json_dump, _load_json, _run, _utc_now
 from providers.base import PipelineError
+
+
+DEFAULT_SELECTION_DIR = Path(__file__).resolve().parent / "data" / "selections"
 
 
 def _api(workspace_id, method, path, body=None, *, runner=_run):
@@ -109,7 +112,7 @@ def _matches(values: Any) -> dict[str, dict]:
     return matches
 
 
-def select_dataset(
+def _select_dataset(
     *, workspace_id: str, project_id: str, start_time: str, end_time: str,
     output: Path, filter: str | None = None, limit: int | None = None,
     seed: int = 42, runner: Callable[..., Any] = _run,
@@ -173,7 +176,35 @@ def select_dataset(
     }
 
 
-def create_dataset(*, selection: Path, name: str, runner: Callable[..., Any] = _run) -> dict:
+def create_dataset(
+    *, workspace_id: str, project_id: str, start_time: str, end_time: str,
+    name: str, filter: str | None = None, limit: int | None = None,
+    seed: int = 42, output: Path | None = None, runner: Callable[..., Any] = _run,
+) -> dict:
+    """Filter root runs and import the selected conversations in one operation."""
+    name = _text(name, "name")
+    if output is None:
+        output = DEFAULT_SELECTION_DIR / f"{uuid4()}.json"
+    selected = _select_dataset(
+        workspace_id=workspace_id, project_id=project_id,
+        start_time=start_time, end_time=end_time, output=output,
+        filter=filter, limit=limit, seed=seed, runner=runner,
+    )
+    if selected["selected_examples"] == 0:
+        raise PipelineError(
+            "no conversation threads matched the filters; no dataset was created; "
+            f"excluded_unthreaded_roots={selected['excluded_unthreaded_roots']}; selection={output}"
+        )
+    imported = _import_selection(selection=output, name=name, runner=runner)
+    return {
+        **imported, "selection": str(output),
+        "matching_roots": selected["matching_roots"],
+        "distinct_threads": selected["distinct_threads"],
+        "excluded_unthreaded_roots": selected["excluded_unthreaded_roots"],
+    }
+
+
+def _import_selection(*, selection: Path, name: str, runner: Callable[..., Any] = _run) -> dict:
     value = _load_json(selection)
     if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] != 1:
         raise PipelineError("selection must use schema_version 1")
@@ -181,7 +212,7 @@ def create_dataset(*, selection: Path, name: str, runner: Callable[..., Any] = _
     project_id = _uuid(value.get("project_id"), "project_id")
     if value.get("scope") != "thread":
         raise PipelineError(
-            "only thread selections are supported; regenerate this selection with dataset select (without --scope)"
+            "only thread selections are supported; regenerate with dataset create and project filters"
         )
     matches = _matches(value.get("matches"))
     ids = value.get("selected_ids")
