@@ -55,14 +55,21 @@ def write_contract(path: Path, payload: dict | None = None) -> None:
     path.write_text(json.dumps(payload or contract_payload()), encoding="utf-8")
 
 
-def test_contract_builds_tool_aware_request_without_mutating_system_message(tmp_path: Path):
+@pytest.mark.parametrize("messages", [
+    [{"role": "user", "content": "find x"}],
+    [{"role": "system", "content": "different recorded policy"}, {"role": "user", "content": "find x"}],
+    [{"role": "system", "content": [{"type": "text", "text": "recorded policy"}]},
+     {"role": "system", "content": "additional instructions"}, {"role": "user", "content": "find x"}],
+])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_contract_builds_tool_aware_request_without_mutating_messages(tmp_path: Path, messages, legacy):
     path = tmp_path / "inference_contract.json"
-    write_contract(path)
+    payload = contract_payload()
+    if not legacy:
+        del payload["system_prompt"]
+    write_contract(path, payload)
     contract = inference_contract.load_inference_contract(path)
-    messages = [
-        {"role": "system", "content": "policy"},
-        {"role": "user", "content": "find x"},
-    ]
+    original = copy.deepcopy(messages)
 
     request = contract.build_fireworks_request(
         model="accounts/fireworks/models/model",
@@ -79,9 +86,11 @@ def test_contract_builds_tool_aware_request_without_mutating_system_message(tmp_
         "parallel_tool_calls": True,
         "max_tokens": 512,
     }
-    assert request["messages"][0]["content"] == "policy"
+    assert messages == original
+    assert request["messages"] == original
+    assert request["messages"] is not messages
     assert contract.tools_sha256 == TOOLS_SHA256
-    assert contract.system_prompt_sha256 == SYSTEM_PROMPT_SHA256
+    assert contract.system_prompt_sha256 == (SYSTEM_PROMPT_SHA256 if legacy else None)
     assert len(contract.contract_sha256) == 64
 
     base_request = contract.build_fireworks_request(
@@ -99,7 +108,7 @@ def test_contract_builds_tool_aware_request_without_mutating_system_message(tmp_
     }
 
 
-def test_contract_rejects_hash_mismatch_and_system_prompt_drift(tmp_path: Path):
+def test_contract_rejects_tool_hash_mismatch(tmp_path: Path):
     path = tmp_path / "inference_contract.json"
     payload = contract_payload()
     payload["tools_sha256"] = "0" * 64
@@ -108,14 +117,39 @@ def test_contract_rejects_hash_mismatch_and_system_prompt_drift(tmp_path: Path):
     with pytest.raises(inference_contract.ContractError, match="tools_sha256"):
         inference_contract.load_inference_contract(path)
 
-    write_contract(path)
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_contract_round_trip_preserves_declared_hash(tmp_path: Path, legacy):
+    payload = contract_payload()
+    semantic = {"schema_version": 1, "tools_sha256": TOOLS_SHA256,
+                "inference_settings": payload["inference_settings"]}
+    if legacy:
+        semantic["system_prompt_sha256"] = SYSTEM_PROMPT_SHA256
+    else:
+        del payload["system_prompt"]
+    payload["contract_sha256"] = inference_contract.json_sha256(semantic)
+    path = tmp_path / "contract.json"
+    write_contract(path, payload)
     contract = inference_contract.load_inference_contract(path)
-    with pytest.raises(inference_contract.ContractError, match="system prompt"):
-        contract.build_fireworks_request(
-            model="accounts/fireworks/models/model",
-            messages=[{"role": "system", "content": "different"}],
-            max_tokens=512,
-        )
+    assert contract.contract_sha256 == payload["contract_sha256"]
+    assert contract.to_dict() == payload
+    assert ("system_prompt_sha256" in contract.manifest_summary()) is legacy
+    write_contract(path, contract.to_dict())
+    assert inference_contract.load_inference_contract(path) == contract
+
+    payload["contract_sha256"] = "0" * 64
+    write_contract(path, payload)
+    with pytest.raises(inference_contract.ContractError, match="contract_sha256"):
+        inference_contract.load_inference_contract(path)
+
+
+def test_legacy_prompt_metadata_still_checks_its_own_integrity(tmp_path: Path):
+    payload = contract_payload()
+    payload["system_prompt"]["content"] = "edited without updating its hash"
+    path = tmp_path / "contract.json"
+    write_contract(path, payload)
+    with pytest.raises(inference_contract.ContractError, match="system_prompt.sha256"):
+        inference_contract.load_inference_contract(path)
 
 
 def test_contract_rejects_provider_specific_or_secret_inference_settings(tmp_path: Path):
@@ -192,7 +226,11 @@ def test_contract_validates_recorded_tool_names_and_arguments(tmp_path: Path):
         contract.validate_messages(invalid_arguments)
 
 
-def test_contract_can_be_created_from_an_approved_llm_run(tmp_path: Path):
+@pytest.mark.parametrize("inputs", [None,
+    {"messages": [{"role": "human", "content": "find x"}]},
+    {"messages": [[{"role": "system", "content": "recorded prompt must not be captured"}]]},
+])
+def test_contract_capture_does_not_require_or_copy_message_inputs(tmp_path: Path, inputs):
     run = {
         "id": "run-id",
         "trace_id": "trace-id",
@@ -200,24 +238,6 @@ def test_contract_can_be_created_from_an_approved_llm_run(tmp_path: Path):
         "name": "ChatModel",
         "run_type": "llm",
         "start_time": "2026-09-03T12:00:00Z",
-        "inputs": {
-            "messages": [
-                [
-                    {
-                        "lc": 1,
-                        "type": "constructor",
-                        "id": ["langchain", "schema", "messages", "SystemMessage"],
-                        "kwargs": {"content": "policy", "type": "system"},
-                    },
-                    {
-                        "lc": 1,
-                        "type": "constructor",
-                        "id": ["langchain", "schema", "messages", "HumanMessage"],
-                        "kwargs": {"content": "find x", "type": "human"},
-                    },
-                ]
-            ]
-        },
         "extra": {
             "metadata": {"ls_provider": "provider", "ls_model_name": "model"},
             "invocation_params": {
@@ -230,13 +250,21 @@ def test_contract_can_be_created_from_an_approved_llm_run(tmp_path: Path):
         },
     }
 
+    if inputs is not None:
+        run["inputs"] = inputs
+    original = copy.deepcopy(run)
     payload = inference_contract.contract_from_run(run, workspace_id="workspace-id")
     path = tmp_path / "captured.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     contract = inference_contract.load_inference_contract(path)
 
     assert contract.tools == tuple(TOOLS)
-    assert contract.system_prompt["content"] == "policy"
+    assert run == original
+    assert contract.system_prompt is None
+    assert contract.system_prompt_sha256 is None
+    assert "system_prompt" not in payload
+    assert "recorded prompt" not in json.dumps(payload)
+    assert contract.to_dict() == payload
     assert contract.inference_settings == {"temperature": 0.2, "top_p": 0.9}
     assert "api_key" not in json.dumps(payload)
     assert payload["provenance"] == {

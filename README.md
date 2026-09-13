@@ -59,14 +59,22 @@ These commands require current LangSmith run-query and thread-import APIs.
 
 ## Prepare data
 
-For trajectories with tools, capture the tool schemas and system prompt from a representative main-model `llm` run. Review the contract before using it.
+Preparation automatically collects tools from **all LLM runs in each example's source
+thread** (or source trace for older trace datasets). Each training row gets its own combined
+list of tool names, descriptions, and argument schemas, including tools that were available
+but never called. Tools introduced later are included from the start of that example.
 
-```bash
-python pipeline.py capture-contract \
-  --workspace-id '<workspace-id>' \
-  --run-id '<llm-run-id>' \
-  --output data/inference_contract.json
-```
+The dataset needs its source thread/trace ID and project ID. Datasets created by this CLI
+already include these. Native `source_session_id` and `source_trace_id` are also supported.
+Schemas are saved with the raw export and prepared data; `--no-fetch` reuses that snapshot,
+and replay uses the matching example's saved schemas.
+
+Preparation fails if any scanned call lists a provider built-in (such as Anthropic tool search
+or OpenAI web search), even if it was never called. Conflicting definitions for the same tool
+name within an example also fail, with the example and source run IDs.
+
+System messages come from each trajectory and are preserved during preparation and replay.
+The default Qwen renderer supports a system message only as the first message.
 
 Choose a provider and prepare your dataset:
 
@@ -78,9 +86,13 @@ python pipeline.py prepare \
   --provider "$provider" \
   --workspace-id '<workspace-id>' \
   --dataset-id '<dataset-id>' \
-  --inference-contract data/inference_contract.json \
   --model-profile qwen3p8-27b
 ```
+
+For an existing global contract, `--inference-contract path/to/contract.json` explicitly
+uses its schemas for every example and skips automatic capture. Legacy contract files with
+system-prompt metadata still work; that prompt is not injected or compared. `capture-contract`
+remains available to create a global contract from a sample thread.
 
 - Default split: 80% training, 10% validation, 10% replay test, grouped by source thread or standalone trace.
 - SFT trains on all supported assistant messages, including earlier turns.

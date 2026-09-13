@@ -51,6 +51,9 @@ def _write_raw_dataset(root, count=100):
         encoding="utf-8",
     )
 
+    from test_example_tools import write_empty_tool_snapshot
+    write_empty_tool_snapshot(root, examples)
+
 
 def test_provider_aware_commands_default_to_fireworks_and_accept_baseten():
     parser = pipeline._parser()

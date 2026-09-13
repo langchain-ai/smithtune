@@ -14,8 +14,10 @@ from artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
 from inference_contract import (
     ContractError,
     InferenceContract,
-    contract_from_run,
+    contract_from_runs,
     load_inference_contract,
+    parse_inference_contract,
+    json_sha256,
 )
 from providers.base import ModelSpec, PipelineError, ReasoningPolicy
 from rendering import validate_model_context, validate_reasoning_support
@@ -89,30 +91,62 @@ def _langsmith_page_command(
     ]
 
 
-def _langsmith_run_contract_command(workspace_id: str, run_id: str) -> list[str]:
+def _query_contract_runs(
+    workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any],
+) -> list[dict[str, Any]]:
     body = {
-        "id": [run_id],
-        "limit": 1,
-        "select": [
-            "id",
-            "trace_id",
-            "session_id",
-            "name",
-            "run_type",
-            "start_time",
-            "extra",
-            "inputs",
-        ],
+        "limit": LANGSMITH_PAGE_SIZE,
+        "select": ["id", "trace_id", "session_id", "name", "run_type", "start_time", "extra"],
+        **query,
     }
-    return [
-        "langsmith",
-        "api",
-        "runs/query",
-        "--workspace",
-        workspace_id,
-        "--body",
-        _canonical(body),
-    ]
+    runs: dict[str, dict[str, Any]] = {}
+    cursors: set[str] = set()
+    while True:
+        result = runner([
+            "langsmith", "api", "runs/query", "--workspace", workspace_id,
+            "--body", _canonical(body),
+        ], capture=True)
+        try:
+            response = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise PipelineError("LangSmith run query returned invalid JSON") from exc
+        if not isinstance(response, dict) or not isinstance(response.get("runs"), list):
+            raise PipelineError("LangSmith returned an invalid run query page")
+        for run in response["runs"]:
+            if not isinstance(run, dict) or not isinstance(run.get("id"), str) or not run["id"]:
+                raise PipelineError("LangSmith returned an invalid run")
+            if body.get("session") and run.get("session_id") not in body["session"]:
+                raise PipelineError("LangSmith returned a run from a different project")
+            if run["id"] in runs and runs[run["id"]] != run:
+                raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; capture again")
+            runs[run["id"]] = run
+        page_cursors = response.get("cursors") or {}
+        if not isinstance(page_cursors, dict):
+            raise PipelineError("LangSmith returned invalid query cursors")
+        cursor = page_cursors.get("next")
+        if cursor is None:
+            return list(runs.values())
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise PipelineError("LangSmith returned an invalid or repeated query cursor")
+        cursors.add(cursor)
+        body["cursor"] = cursor
+
+
+def _query_thread_llm_runs(
+    workspace_id: str, project_id: str, thread_id: str, *, runner: Callable[..., Any],
+) -> list[dict[str, Any]]:
+    # Child calls need not repeat their thread ID. Query each root metadata
+    # alias separately: the run API does not support OR across these joins.
+    thread_runs: dict[str, dict[str, Any]] = {}
+    for key in ("thread_id", "conversation_id", "session_id"):
+        thread_filter = f"and(eq(metadata_key,{json.dumps(key)}),eq(metadata_value,{json.dumps(thread_id)}))"
+        for run in _query_contract_runs(workspace_id, {
+            "session": [project_id], "run_type": "llm", "trace_filter": thread_filter,
+        }, runner=runner):
+            if run["id"] in thread_runs and thread_runs[run["id"]] != run:
+                raise PipelineError(f"run {run['id']} changed during the thread scan; capture again")
+            thread_runs[run["id"]] = run
+    return list(thread_runs.values())
 
 
 def capture_inference_contract(
@@ -122,26 +156,39 @@ def capture_inference_contract(
     *,
     runner: Callable[..., Any] = _run,
 ) -> dict[str, Any]:
-    """Capture schemas and prompt provenance from one approved LangSmith LLM run."""
-    result = runner(
-        _langsmith_run_contract_command(workspace_id, run_id),
-        capture=True,
-    )
-    try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise PipelineError("LangSmith run query returned invalid JSON") from exc
-    runs = response.get("runs") if isinstance(response, dict) else response
-    if not isinstance(runs, list) or len(runs) != 1 or runs[0].get("id") != run_id:
+    """Collect all function tools in the selected LLM run's conversation thread."""
+    sources = _query_contract_runs(workspace_id, {"id": [run_id], "limit": 1}, runner=runner)
+    if len(sources) != 1 or sources[0]["id"] != run_id:
         raise PipelineError(f"LangSmith did not return the requested run {run_id}")
+    source = sources[0]
+    if source.get("run_type") != "llm":
+        raise PipelineError("contract capture requires an LLM run ID inside the sample conversation")
+    project_id, trace_id = source.get("session_id"), source.get("trace_id")
+    if not isinstance(project_id, str) or not project_id or not isinstance(trace_id, str) or not trace_id:
+        raise PipelineError("source LLM run has no project or trace ID")
+    roots = _query_contract_runs(
+        workspace_id, {"session": [project_id], "id": [trace_id], "limit": 1}, runner=runner,
+    )
+    if len(roots) != 1 or roots[0]["id"] != trace_id:
+        raise PipelineError(f"LangSmith did not return the source trace root {trace_id}")
+    metadata = (roots[0].get("extra") or {}).get("metadata") or {}
+    thread_keys = ("thread_id", "conversation_id", "session_id")
+    thread_id = next((metadata[key] for key in thread_keys if isinstance(metadata.get(key), str) and metadata[key]), None)
+    if thread_id is None:
+        raise PipelineError("source trace has no thread ID; choose an LLM run from a conversation thread")
+    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, runner=runner)
     try:
-        payload = contract_from_run(runs[0], workspace_id=workspace_id)
+        payload = contract_from_runs(runs, workspace_id=workspace_id, source_run_id=run_id, thread_id=thread_id)
     except ContractError as exc:
         raise PipelineError(f"cannot capture inference contract: {exc}") from exc
+    # Only publish a usable contract after every page and every tool passes.
     _json_dump(output, payload)
     return {
         "output": str(output),
         "source_run_id": run_id,
+        "source_thread_id": thread_id,
+        "llm_run_count": len(runs),
+        "trace_count": len(payload["provenance"]["source_trace_ids"]),
         "contract_sha256": payload["contract_sha256"],
         "tools_sha256": payload["tools_sha256"],
         "tool_count": len(payload["tools"]),
@@ -375,7 +422,10 @@ def _source_identity(example: dict[str, Any]) -> dict[str, str | None]:
         metadata = {}
     native_thread_id = example.get("source_thread_id")
     legacy_thread_id = metadata.get("source_thread_id")
-    trace_id = metadata.get("source_trace_id")
+    native_trace_id = example.get("source_trace_id")
+    trace_id = metadata.get("source_trace_id") or native_trace_id
+    if native_trace_id and metadata.get("source_trace_id") and native_trace_id != trace_id:
+        raise PipelineError("example has conflicting source_trace_id values")
     for label, value in (
         ("source_thread_id", native_thread_id),
         ("metadata.source_thread_id", legacy_thread_id),
@@ -474,17 +524,102 @@ def validate_trajectories(
     )
 
 
+def capture_example_contracts(
+    workspace_id: str, examples: list[dict[str, Any]], *, runner: Callable[..., Any] = _run,
+) -> dict[str, InferenceContract]:
+    """Collect a separate union of function tools for each source trajectory."""
+    contracts: dict[str, InferenceContract] = {}
+    sources: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
+    for example in examples:
+        example_id = example["id"]
+        try:
+            identity = _source_identity(example)
+            thread_id, trace_id = identity["source_thread_id"], identity["source_trace_id"]
+            metadata = example.get("metadata") or {}
+            project_id = example.get("source_session_id") or metadata.get("source_project_id")
+            if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
+                raise PipelineError("conflicting source project IDs")
+            if project_id is None and trace_id:
+                roots = _query_contract_runs(workspace_id, {"id": [trace_id], "limit": 1}, runner=runner)
+                if len(roots) != 1 or roots[0]["id"] != trace_id:
+                    raise PipelineError(f"source trace root {trace_id} was not found")
+                project_id = roots[0].get("session_id")
+            if not isinstance(project_id, str) or not project_id:
+                raise PipelineError("missing source project ID; use source_session_id or metadata.source_project_id, or supply --inference-contract")
+            key = (project_id, thread_id, None if thread_id else trace_id)
+            if key not in sources:
+                if thread_id:
+                    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, runner=runner)
+                else:
+                    runs = _query_contract_runs(workspace_id, {
+                        "session": [project_id], "run_type": "llm",
+                        "filter": f"eq(trace_id,{json.dumps(trace_id)})",
+                    }, runner=runner)
+                    if any(run.get("trace_id") != trace_id for run in runs):
+                        raise PipelineError("LangSmith returned a run from a different trace")
+                sources[key] = contract_from_runs(runs, workspace_id=workspace_id, thread_id=thread_id)
+            payload = copy.deepcopy(sources[key])
+            payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
+            contracts[example_id] = parse_inference_contract(payload)
+        except (ContractError, PipelineError) as exc:
+            raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
+    return contracts
+
+
+def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
+    if not isinstance(payload, dict) or not payload:
+        raise PipelineError("example inference contracts must be a non-empty object")
+    try:
+        contracts = {key: parse_inference_contract(value) for key, value in payload.items()}
+    except ContractError as exc:
+        raise PipelineError(f"invalid example inference contract: {exc}") from exc
+    for key, contract in contracts.items():
+        if contract.provenance.get("source_example_id") != key:
+            raise PipelineError(f"example inference contract {key} has different source provenance")
+    return contracts
+
+
+def _example_contract_snapshot(
+    workspace_id: str, dataset_id: str, examples: list[dict[str, Any]],
+    source_sha: str, raw_dir: Path, *, fetch: bool,
+) -> dict[str, InferenceContract]:
+    path = raw_dir / "example_contracts.json"
+    identity = {"schema_version": 1, "workspace_id": workspace_id,
+                "dataset_id": dataset_id, "source_examples_sha256": source_sha}
+    if fetch:
+        contracts = capture_example_contracts(workspace_id, examples)
+        payload = {key: contract.to_dict() for key, contract in contracts.items()}
+        _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
+    if not path.exists():
+        raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
+    snapshot = _load_json(path)
+    if not isinstance(snapshot, dict) or any(snapshot.get(key) != value for key, value in identity.items()):
+        raise PipelineError("cached example inference contracts do not match this dataset export; prepare again without --no-fetch")
+    payload = snapshot.get("contracts")
+    if snapshot.get("contracts_sha256") != json_sha256(payload):
+        raise PipelineError("cached example inference contracts hash mismatch; prepare again without --no-fetch")
+    contracts = _parse_example_contracts(payload)
+    if set(contracts) != {example["id"] for example in examples}:
+        raise PipelineError("cached inference contracts do not cover every example")
+    return contracts
+
+
 def prepare_sft_rows(
     examples: list[dict[str, Any]],
     contract: InferenceContract | None = None,
     *,
+    example_contracts: dict[str, InferenceContract] | None = None,
     reasoning_policy: ReasoningPolicy = "omit",
     model: ModelSpec | None = None,
 ) -> list[dict[str, Any]]:
-    """Convert validated LangSmith trajectories to Fireworks SFT rows."""
+    """Convert validated LangSmith trajectories to provider-neutral SFT rows."""
     _validate_reasoning_policy(reasoning_policy)
     rows = []
     for source_index, example in enumerate(examples):
+        if example_contracts is not None:
+            if example["id"] not in example_contracts:
+                raise PipelineError(f"example {example['id']} has no captured tool schemas")
+            contract = example_contracts[example["id"]]
         identity = _source_identity(example)
         messages = []
         for source in example["inputs"]["messages"]:
@@ -677,9 +812,13 @@ def prepare_dataset(
     )
     expected_count = len(examples)
     audit = validate_trajectories(examples, expected_count)
-    if audit.tool_calls and inference_contract is None:
-        raise PipelineError("tool trajectories require an inference contract with canonical tool schemas")
-    rows = prepare_sft_rows(examples, inference_contract, reasoning_policy=reasoning_policy, model=model)
+    example_contracts = None
+    if inference_contract is None:
+        example_contracts = _example_contract_snapshot(
+            workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
+        )
+    rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
+                            reasoning_policy=reasoning_policy, model=model)
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
     reasoning_preserved = audit.readable_reasoning_blocks if reasoning_policy == "preserve" else 0
     rejected: list[dict[str, Any]] = []
@@ -716,7 +855,7 @@ def prepare_dataset(
         "conversion": {
             "roles": ROLE_MAP,
             "tool_calls": "StandardMessage tool_call blocks to OpenAI tool_calls",
-            "tool_schemas_added": inference_contract is not None,
+            "tool_schemas_added": inference_contract is not None or example_contracts is not None,
             "system_prompts_added": False,
             "messages_filtered": messages_removed > 0,
             "messages_removed": messages_removed,
@@ -738,6 +877,10 @@ def prepare_dataset(
     }
     if inference_contract is not None:
         manifest["inference_contract"] = inference_contract.manifest_summary()
+    if example_contracts is not None:
+        payload = {key: contract.to_dict() for key, contract in example_contracts.items()}
+        manifest["example_contracts"] = {"count": len(payload), "sha256": json_sha256(payload)}
+        _json_dump(data_dir / "prepared" / "example_contracts.json", payload)
     _jsonl_dump(data_dir / "prepared" / "train.jsonl", train)
     _jsonl_dump(data_dir / "prepared" / "validation.jsonl", validation)
     _jsonl_dump(data_dir / "prepared" / "test.jsonl", test)
@@ -810,3 +953,19 @@ def _prepared_inference_contract(
     if summary.get("contract_sha256") != contract.contract_sha256:
         raise PipelineError("prepared inference contract hash differs from the manifest")
     return contract
+
+
+
+def _prepared_example_contracts(
+    data_dir: Path, manifest: dict[str, Any],
+) -> dict[str, InferenceContract] | None:
+    summary = manifest.get("example_contracts")
+    if summary is None:
+        return None
+    payload = _load_json(data_dir / "prepared" / "example_contracts.json")
+    if not isinstance(summary, dict) or summary.get("sha256") != json_sha256(payload):
+        raise PipelineError("prepared example inference contracts hash differs from the manifest")
+    contracts = _parse_example_contracts(payload)
+    if summary.get("count") != len(contracts):
+        raise PipelineError("prepared example inference contract count differs from the manifest")
+    return contracts

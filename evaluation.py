@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
-from dataset import _canonical, _model_from_manifest, _prepared_inference_contract
+from dataset import (
+    _canonical, _model_from_manifest, _prepared_inference_contract,
+    _prepared_example_contracts,
+)
 from inference import ANTHROPIC_MODEL_PREFIX, _chat_completion, _inference_messages
 from inference_contract import ContractError, InferenceContract
 from providers.base import PipelineError
@@ -128,6 +131,18 @@ def _has_visible_action(message: dict[str, Any]) -> bool:
     return bool(message.get("tool_calls") or text.strip())
 
 
+def _case_contract(
+    case: dict[str, Any], global_contract: InferenceContract | None,
+    example_contracts: dict[str, InferenceContract] | None,
+) -> InferenceContract | None:
+    if example_contracts is None:
+        return global_contract
+    example_id = case.get("example_id")
+    if example_id not in example_contracts:
+        raise PipelineError(f"replay example {example_id} has no captured tool schemas")
+    return example_contracts[example_id]
+
+
 def prepare_replay_evaluation(
     data_dir: Path,
     output_dir: Path,
@@ -139,7 +154,8 @@ def prepare_replay_evaluation(
     if manifest.get("split", {}).get("test", 0) < 1:
         raise PipelineError("prepared dataset has no test rows")
     model = _model_from_manifest(manifest)
-    contract = _prepared_inference_contract(data_dir, manifest)
+    global_contract = _prepared_inference_contract(data_dir, manifest)
+    example_contracts = _prepared_example_contracts(data_dir, manifest)
     test_rows = _load_jsonl(data_dir / "prepared" / "test.jsonl")
     reasoning_policy = manifest.get("conversion", {}).get("reasoning_policy", "omit")
     if reasoning_policy not in ("omit", "preserve"):
@@ -153,17 +169,18 @@ def prepare_replay_evaluation(
             raise PipelineError("prepared test rows contain reasoning despite reasoning_policy='omit'; prepare again")
         validate_reasoning_support(model)
     cases = build_replay_cases(test_rows, max_points_per_trajectory)
-    if any(case["case_type"] == "tool_call" for case in cases) and contract is None:
-        raise PipelineError("tool replay cases require a prepared inference contract")
-    if contract is not None:
-        expected_tools = list(contract.tools)
-        for case in cases:
+    for case in cases:
+        contract = _case_contract(case, global_contract, example_contracts)
+        if contract is None and (case["case_type"] == "tool_call" or case["tools"]):
+            raise PipelineError("tool replay cases require a prepared inference contract")
+        if contract is not None:
+            expected_tools = list(contract.tools)
             if case.get("contract_sha256") != contract.contract_sha256:
                 raise PipelineError(f"replay case {case['id']} has a different inference contract hash")
             if case.get("tools") != expected_tools:
                 raise PipelineError(f"replay case {case['id']} has different tool schemas")
             try:
-                contract.validate_messages(case["messages"])
+                contract.validate_messages([*case["messages"], case["reference"]])
             except ContractError as exc:
                 raise PipelineError(f"replay case {case['id']} violates inference contract: {exc}") from exc
     accepted, rejected = validate_replay_context(cases, model, max_output_tokens)
@@ -185,8 +202,10 @@ def prepare_replay_evaluation(
         "judge_calibration_calls": len(_calibration_cases(accepted)) * 3,
         "judge_scoring_calls_per_model": len(accepted),
     }
-    if contract is not None:
-        plan["contract_sha256"] = contract.contract_sha256
+    if global_contract is not None:
+        plan["contract_sha256"] = global_contract.contract_sha256
+    if example_contracts is not None:
+        plan["example_contracts_sha256"] = manifest["example_contracts"]["sha256"]
     _jsonl_dump(output_dir / "cases.jsonl", accepted)
     _json_dump(output_dir / "rejected.json", rejected)
     _json_dump(output_dir / "plan.json", plan)
@@ -497,7 +516,8 @@ def run_replay_evaluation(
     )
     cases = _load_jsonl(output_dir / "cases.jsonl")
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    request_contract = _prepared_inference_contract(data_dir, manifest)
+    global_contract = _prepared_inference_contract(data_dir, manifest)
+    example_contracts = _prepared_example_contracts(data_dir, manifest)
     chat_fn = chat or _chat_completion
     calibration = calibrate_judge(cases, judge_model, chat_fn)
     _jsonl_dump(output_dir / "calibration.jsonl", calibration)
@@ -508,8 +528,14 @@ def run_replay_evaluation(
     models = [("tuned", tuned_model)]
     if base_model:
         models.insert(0, ("base", base_model))
-    contract_sha256 = request_contract.contract_sha256 if request_contract is not None else None
+    cases_by_id = {case["id"]: case for case in cases}
     for result in results:
+        saved_case = result.get("case", {})
+        current_case = cases_by_id.get(saved_case.get("id"))
+        if current_case is None or saved_case != current_case:
+            raise PipelineError("existing replay results use different cases; use a new output directory")
+        request_contract = _case_contract(current_case, global_contract, example_contracts)
+        contract_sha256 = request_contract.contract_sha256 if request_contract is not None else None
         if result.get("reasoning_policy", "omit") != plan["reasoning_policy"]:
             raise PipelineError("existing replay results use a different reasoning policy")
         if result.get("contract_sha256") != contract_sha256:
@@ -522,6 +548,8 @@ def run_replay_evaluation(
     case_order = {case["id"]: index for index, case in enumerate(cases)}
 
     def score_case(case: dict[str, Any]) -> dict[str, Any]:
+        request_contract = _case_contract(case, global_contract, example_contracts)
+        contract_sha256 = request_contract.contract_sha256 if request_contract is not None else None
         scored: dict[str, Any] = {
             "case": case,
             "reasoning_policy": plan["reasoning_policy"],
@@ -556,6 +584,7 @@ def run_replay_evaluation(
             results.sort(key=lambda result: case_order[result["case"]["id"]])
             _jsonl_dump(results_path, results)
     for result in results:
+        request_contract = _case_contract(result["case"], global_contract, example_contracts)
         for label, _ in models:
             result[label]["deterministic_metrics"] = score_replay_candidate(
                 result["case"],

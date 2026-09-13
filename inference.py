@@ -51,6 +51,7 @@ def _fireworks_chat_completion(
             )
         except ContractError as exc:
             raise PipelineError(f"cannot build Fireworks inference request: {exc}") from exc
+    body.setdefault("temperature", 0)
     request = urllib.request.Request(
         INFERENCE_URL,
         data=json.dumps(body).encode(),

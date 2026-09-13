@@ -43,10 +43,10 @@ def _parser() -> argparse.ArgumentParser:
 
     capture_contract = sub.add_parser(
         "capture-contract",
-        help="capture an inference contract from one approved LangSmith LLM run",
+        help="collect all function tools from a sample conversation; reject provider built-ins",
     )
     capture_contract.add_argument("--workspace-id", required=True)
-    capture_contract.add_argument("--run-id", required=True)
+    capture_contract.add_argument("--run-id", required=True, help="LLM run ID used to locate the sample thread; scans every LLM call in that thread")
     capture_contract.add_argument("--output", type=Path, required=True)
 
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")
@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--data-dir", type=Path, default=project / "data")
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
-    prep.add_argument("--inference-contract", type=Path)
+    prep.add_argument("--inference-contract", type=Path, help="optional global tool-schema override; by default collect tools from each example's source LLM runs")
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
         help="omit source reasoning from SFT and replay (default), or explicitly preserve readable reasoning",
@@ -79,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--requires-tool-declarations", action="store_true")
     prep.add_argument("--supports-reasoning-content", action="store_true")
     prep.add_argument("--default-lora-rank", type=int)
-    prep.add_argument("--no-fetch", action="store_true", help="use the existing raw export")
+    prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached per-example tool schemas without querying LangSmith")
     prep.add_argument("--skip-render-check", action="store_true", help=argparse.SUPPRESS)
 
     plan = sub.add_parser("plan", help="print the resolved training plan without provisioning resources")
