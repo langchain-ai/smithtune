@@ -50,6 +50,28 @@ Distribution checks run `uv pip check`; tests verify the installed upstream Git
 revision and Transformers version, and compare renderer outputs to a pinned
 reference using a deterministic test tokenizer.
 
+Baseten uses Transformers' assistant-token masks and TRL `1.13.0` training
+templates. Keep TRL pinned: its template and mask conventions are part of the
+prepared-data identity. Native annotated templates pass through unchanged;
+unrecognized unannotated templates fail preparation. The model support registry
+remains separate from upstream template coverage.
+
+The additional Baseten models use `native_rendering.py`: it calls the official
+formatter, verifies each response against its inference prompt, and coalesces
+only identical token prefixes. Keep its implementation version in the prepared
+identity when changing formatting or masks. Test model-specific stop tokens,
+empty reasoning, history changes, and Unicode against the pinned real tokenizers.
+
+CI also downloads the exact tokenizer revisions for each supported provider/model
+configuration and checks tools, reasoning, and loss masks without provisioning
+training or downloading model weights. Run those checks locally with:
+
+```bash
+SMITHTUNE_TOKENIZER_TESTS=1 uv run --no-sync pytest tests/test_tokenizer_integration.py
+```
+
+The ordinary test suite uses synthetic tokenizers and requires no Hub access.
+
 Known security tradeoff: `5.5.4` is affected by
 [CVE-2026-9856](https://osv.dev/vulnerability/GHSA-xrqw-3rrv-vx5w), fixed in
 Transformers `5.10.0`. Malicious chat-template dictionary keys can cause arbitrary

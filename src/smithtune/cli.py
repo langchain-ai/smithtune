@@ -7,7 +7,9 @@ import argparse
 import json
 import subprocess
 import sys
+import uuid
 from dataclasses import fields
+from datetime import UTC, datetime
 from pathlib import Path
 
 from smithtune import dataset
@@ -15,8 +17,16 @@ from smithtune import curation, triage
 from smithtune.triage_source import load_snapshot, source_options
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
-from smithtune.providers.baseten import BasetenRuntimeError, BasetenSFTSettings
-from smithtune.providers.fireworks import FireworksProvider, SFTSettings as FireworksSFTSettings
+from smithtune.providers.baseten import (
+    MODEL_SPECS as BASETEN_MODEL_SPECS,
+    BasetenRuntimeError,
+    BasetenSFTSettings,
+)
+from smithtune.providers.fireworks import (
+    MODEL_SPECS as FIREWORKS_MODEL_SPECS,
+    FireworksProvider,
+    SFTSettings as FireworksSFTSettings,
+)
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers import PROVIDERS, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
@@ -30,6 +40,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {get_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="report installed dependencies and configuration without network calls")
+
+    models = sub.add_parser("models", help="show supported training models")
+    models_sub = models.add_subparsers(dest="models_command", required=True)
+    models_list = models_sub.add_parser(
+        "list", help="list smithtune's supported models without network calls",
+        description="List smithtune's supported training models as JSON. No credentials or downloads are needed; live provider availability is checked during prepare and train.",
+    )
+    models_list.add_argument(
+        "--provider", choices=tuple(PROVIDERS), help="filter by provider (default: both providers)",
+    )
 
     curate = sub.add_parser("dataset", help="create a conversation trajectory dataset from project filters")
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
@@ -100,18 +120,8 @@ def _parser() -> argparse.ArgumentParser:
         "--test-fraction", type=float,
         help=f"test fraction for either provider (default: {dataset.DEFAULT_TEST_FRACTION}; use 0 for no test split)",
     )
-    prep.add_argument("--model-profile", default=ModelOptions().model_profile, help="provider model profile or custom")
-    prep.add_argument("--base-model")
-    prep.add_argument("--tokenizer-model")
-    prep.add_argument("--tokenizer-revision")
-    prep.add_argument("--renderer")
-    prep.add_argument("--max-seq-len", type=int)
-    prep.add_argument("--trainer-max-seq-len", type=int)
-    prep.add_argument("--thinking-trace-history-mode", choices=["interleaved", "preserved"])
-    prep.add_argument("--trust-remote-code", action="store_true")
-    prep.add_argument("--requires-tool-declarations", action="store_true")
-    prep.add_argument("--supports-reasoning-content", action="store_true")
-    prep.add_argument("--default-lora-rank", type=int)
+    prep.add_argument("--model", required=True, help="provider model ID or supported model alias")
+    prep.add_argument("--max-seq-len", type=int, help="lower the selected model's preparation and training context limit")
     prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached per-example tool schemas without querying LangSmith")
     prep.add_argument("--skip-render-check", action="store_true", help=argparse.SUPPRESS)
 
@@ -121,7 +131,7 @@ def _parser() -> argparse.ArgumentParser:
         help="training provider (default: %(default)s)",
     )
     plan.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
-    plan.add_argument("--run-id", default="langsmith-sft")
+    plan.add_argument("--run-id", default="langsmith-sft", help="label for this preview (default: %(default)s); not reserved for training")
 
     training = sub.add_parser("train", help="run paid serverless SFT after plan approval")
     training.add_argument(
@@ -129,8 +139,8 @@ def _parser() -> argparse.ArgumentParser:
         help="training provider (default: %(default)s)",
     )
     training.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
-    training.add_argument("--run-dir", type=Path, required=True)
-    training.add_argument("--run-id", required=True)
+    training.add_argument("--run-dir", type=Path, help="output directory (default: ./runs/<run-id>); must be new or empty")
+    training.add_argument("--run-id", help="run name (default: generated from the UTC timestamp and a random suffix)")
     training.add_argument("--init-from-checkpoint")
     training.add_argument("--confirm", action="store_true")
 
@@ -268,6 +278,23 @@ def main(argv: list[str] | None = None) -> None:
             value = diagnose()
         elif args.command == "skill":
             value = triage.export_skill(args.output)
+        elif args.command == "models":
+            profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
+            value = {
+                "source": "smithtune_support_registry",
+                "live_availability_checked": False,
+                "models": [
+                    {
+                        "provider": provider,
+                        "alias": alias,
+                        "model_id": model.base_model,
+                        "training_context_limit": model.training_context_limit,
+                    }
+                    for provider, specs in sorted(profiles.items())
+                    if args.provider is None or args.provider == provider
+                    for alias, model in sorted(specs.items())
+                ],
+            }
         elif args.command == "dataset":
             if args.dataset_command == "triage":
                 source_fields = (args.workspace_id, args.project_id, args.start_time, args.end_time)
@@ -326,14 +353,24 @@ def main(argv: list[str] | None = None) -> None:
             value = provider.plan(args.data_dir, args.run_id, _settings_from_args(args))
         elif args.command == "train":
             provider = get_provider(args.provider)
-            value = provider.train(
+            run_id = args.run_id
+            if run_id is None:
+                run_id = f"sft-{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:12]}"
+            run_dir = args.run_dir
+            if run_dir is None:
+                if run_id in {"", ".", ".."} or "/" in run_id or "\\" in run_id:
+                    raise PipelineError("run ID must be a single directory name when --run-dir is omitted")
+                run_dir = Path.cwd() / "runs" / run_id
+            print(f"Run ID: {run_id}\nRun directory: {run_dir.resolve()}", file=sys.stderr)
+            result = provider.train(
                 args.data_dir,
-                args.run_dir,
-                args.run_id,
+                run_dir,
+                run_id,
                 _settings_from_args(args),
                 confirm=args.confirm,
                 init_from_checkpoint=args.init_from_checkpoint,
             )
+            value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
         elif args.command == "promote":
             FireworksProvider().promote(args.run_dir, args.output_model_id, confirm=args.confirm)
             value = {"status": "promoted", "output_model_id": args.output_model_id}
