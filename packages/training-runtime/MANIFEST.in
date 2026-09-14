@@ -1,0 +1,3 @@
+include upstream.json
+include NOTICE
+recursive-include src/training *.yaml *.json *.html *.md LICENSE

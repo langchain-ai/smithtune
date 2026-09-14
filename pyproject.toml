@@ -1,23 +1,39 @@
+[build-system]
+requires = ["setuptools>=77,<83"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "smithtune"
 version = "0.1.0"
 description = "Prepare LangSmith trajectories for Fireworks SFT and Baseten Loops training."
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "fireworks-training-cookbook==0.1.0",
+  "smithtune-training-runtime==0.1.0",
+  "fireworks-ai[training]==1.2.11",
+  "baseten-loops==0.21.0",
   "jsonschema==4.26.0",
 ]
 
+[project.scripts]
+smithtune = "smithtune.cli:main"
+
+[project.urls]
+Repository = "https://github.com/langchain-ai/smithtune"
+Issues = "https://github.com/langchain-ai/smithtune/issues"
+
 [project.optional-dependencies]
-baseten = ["baseten-loops==0.21.0"]
 test = ["pytest==9.1.1"]
 
-[tool.uv]
-# The pinned Fireworks cookbook requires a version affected by CVE-2026-9856.
-override-dependencies = ["transformers==5.10.4"]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["smithtune*"]
+
+[tool.uv.workspace]
+members = ["packages/training-runtime"]
 
 [tool.uv.sources]
-fireworks-training-cookbook = { path = "fireworks-cookbook/training", editable = true }
+smithtune-training-runtime = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-q"

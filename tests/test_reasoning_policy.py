@@ -6,13 +6,13 @@ from dataclasses import asdict, replace
 
 import pytest
 
-import dataset
-import evaluation
-import inference
-import pipeline
-from models import resolve_prepared_model
-from providers import baseten, fireworks
-from providers.base import ModelOptions, PipelineError
+from smithtune import dataset
+from smithtune import evaluation
+from smithtune import inference
+from smithtune import cli as pipeline
+from smithtune.models import resolve_prepared_model
+from smithtune.providers import baseten, fireworks
+from smithtune.providers.base import ModelOptions, PipelineError
 from test_pipeline import example, loaded_contract, message, write_raw
 
 
@@ -230,7 +230,7 @@ def test_real_qwen_renderer_applies_policy_to_history_and_supervised_tokens(tmp_
     from training.renderer import get_renderer
     from training.utils import parse_train_on_what, render_messages_to_datums
     from training.utils.supervised import build_tool_prefixed_messages
-    from rendering import SFT_TARGET_POLICY
+    from smithtune.rendering import SFT_TARGET_POLICY
 
     tokenizer = CharacterTokenizer()
     renderer = get_renderer("qwen3_8_preserved", tokenizer)

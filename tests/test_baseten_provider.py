@@ -11,9 +11,9 @@ import urllib.error
 
 import pytest
 
-import dataset
-from providers import baseten
-from providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
+from smithtune import dataset
+from smithtune.providers import baseten
+from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
 
 
 class FakeModelInput:

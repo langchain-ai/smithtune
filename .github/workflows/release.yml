@@ -1,0 +1,75 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested distributions to PyPI
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  runtime:
+    if: inputs.publish
+    needs: checks
+    runs-on: ubuntu-24.04
+    environment: pypi-runtime
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Select runtime artifacts
+        run: |
+          mkdir runtime-dist
+          mv dist/smithtune_training_runtime-* runtime-dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: runtime-dist/
+          skip-existing: true
+
+  smithtune:
+    if: inputs.publish
+    needs: runtime
+    runs-on: ubuntu-24.04
+    environment: pypi-smithtune
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f
+        with:
+          mode: firewall-free
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Verify published runtime content
+        run: python scripts/verify_published_runtime.py
+      - name: Verify customer dependency resolution from PyPI
+        run: |
+          uv venv --python 3.12 /tmp/smithtune-release
+          sfw uv pip install --python /tmp/smithtune-release/bin/python dist/smithtune-*.whl
+          uv pip check --python /tmp/smithtune-release/bin/python
+          cd /tmp
+          /tmp/smithtune-release/bin/smithtune --version
+          /tmp/smithtune-release/bin/python -I -c 'from training.recipes import sft_loop; import baseten.loops'
+      - name: Select CLI artifacts
+        run: |
+          mkdir cli-dist
+          mv dist/smithtune-* cli-dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: cli-dist/

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import inference_contract
+from smithtune import inference_contract
 
 
 TOOLS = [

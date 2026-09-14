@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import dataset
-import inference_contract
-import pipeline
-from providers.base import PipelineError
+from smithtune import dataset
+from smithtune import inference_contract
+from smithtune import cli as pipeline
+from smithtune.providers.base import PipelineError
 
 
 def tool(name):

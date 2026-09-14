@@ -1,0 +1,41 @@
+"""Fireworks-owned renderer API and cookbook-local model renderers.
+
+The pinned renderer implementation and registry live in the targeted behavior
+snapshot under ``training._vendor``.  This package is the stable public owner:
+it re-exports that API, then imports each Fireworks-local renderer so all custom
+models register into the same registry.
+
+Importing this package eagerly imports every contained renderer module so
+the registrations take effect.
+
+The ``_*_split`` modules re-register upstream renderer names with local
+subclasses that mix in ``DisaggregateMultiTurnMixin``, so multi-turn
+ALL_ASSISTANT_MESSAGES SFT works for upstream renderers whose chat
+templates strip historical thinking but ship without a
+``build_supervised_examples`` override. They run last so the override
+shadows the upstream registration.
+"""
+
+from training._vendor.tinker_cookbook_0_4_3.exceptions import RendererError as RendererError
+from training._vendor.tinker_cookbook_0_4_3.renderers import *  # noqa: F403
+
+from training.renderer import deepseek_v4 as _deepseek_v4  # noqa: F401  (registers "deepseek_v4")
+from training.renderer import gemma4 as _gemma4  # noqa: F401  (registers "gemma4")
+from training.renderer import glm5 as _glm5  # noqa: F401  (registers "glm5")
+from training.renderer import kimi_k26 as _kimi_k26  # noqa: F401  (registers Kimi K2.5/2.6)
+from training.renderer import kimi_k27_code as _kimi_k27_code  # noqa: F401  (registers "kimi_k27_code")
+from training.renderer import kimi_k3 as _kimi_k3  # noqa: F401  (registers "kimi_k3")
+from training.renderer import minimax_m2 as _minimax_m2  # noqa: F401  (registers "minimax_m2")
+from training.renderer import minimax_m3 as _minimax_m3  # noqa: F401  (registers "minimax_m3")
+from training.renderer import mistral as _mistral  # noqa: F401  (registers "mistral")
+from training.renderer import muse_glimmer as _muse_glimmer  # noqa: F401  (registers "muse_glimmer")
+from training.renderer import qwen2_5 as _qwen2_5  # noqa: F401  (registers "qwen2_5")
+
+# Local overrides for upstream renderers that need disaggregate-per-user-turn
+# multi-turn SFT support (no upstream ``build_supervised_examples`` override).
+from training.renderer import _qwen3_split as _qwen3_split  # noqa: F401
+from training.renderer import _deepseek_v3_split as _deepseek_v3_split  # noqa: F401
+from training.renderer import _kimi_k25_split as _kimi_k25_split  # noqa: F401
+from training.renderer import _nemotron3_split as _nemotron3_split  # noqa: F401
+from training.renderer import _gpt_oss_split as _gpt_oss_split  # noqa: F401
+from training.renderer import _gemma4_split as _gemma4_split  # noqa: F401
