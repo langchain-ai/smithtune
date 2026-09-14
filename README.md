@@ -157,12 +157,18 @@ training catalog for shared-pool availability and context; its inference
 `supportsServerless` flag does not establish training availability. An unverified
 model fails with a compatibility error even if the provider supports it elsewhere.
 
-Baseten renders with the official Hugging Face chat template and a validated
-Qwen assistant-mask adapter. Fireworks renders with its pinned training cookbook.
-Both preserve the all-assistant training policy. Preparation records the exact
-tokenizer commit, official template hash, and rendering implementation in
-`prepared/manifest.json`; training rejects a changed template or implementation.
-Old Baseten data prepared with a Fireworks renderer must be prepared again.
+Baseten loads the official Hugging Face tokenizer and uses native assistant-mask
+annotations when available, or a maintained training template from pinned TRL.
+The supported Qwen template trains on assistant text, tool calls, retained
+reasoning, thinking markers (including empty thinking blocks), and the end-of-turn
+token and newline. User messages, tool results, and role headers are context only.
+The training template must preserve the official template's rendered text.
+Fireworks renders and masks with its pinned training cookbook. Both target all
+supported assistant messages. Preparation records the exact tokenizer commit,
+official template hash when present, and rendering implementation (including TRL's version for
+Baseten) in `prepared/manifest.json`; training rejects a changed implementation.
+Kimi's Python formatter is identified by its pinned tokenizer and cookbook commits.
+Baseten data prepared with an earlier renderer must be prepared again.
 `--no-fetch` reuses the LangSmith export and tool schemas; provider preflight and
 tokenizer resolution still run. These checks do not provision training resources.
 

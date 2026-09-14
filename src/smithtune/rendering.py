@@ -24,7 +24,7 @@ def rendering_version(model: ModelSpec) -> str:
         if model.provider == "baseten":
             from smithtune.hf_rendering import HF_RENDERING_VERSION
 
-            implementation = HF_RENDERING_VERSION
+            implementation = f"{HF_RENDERING_VERSION};trl={metadata.version('trl')}"
         else:
             distribution = metadata.distribution("fireworks-training-cookbook")
             source = json.loads(distribution.read_text("direct_url.json") or "{}")
@@ -59,9 +59,13 @@ def load_training_renderer(model: ModelSpec) -> Any:
     return get_renderer(renderer_name, tokenizer)
 
 
-def _tokenizer_template_hash(tokenizer: Any) -> str:
+def _tokenizer_template_hash(tokenizer: Any, *, allow_missing: bool = False) -> str:
     from smithtune.hf_rendering import template_sha256
 
+    if allow_missing and getattr(tokenizer, "chat_template", None) is None:
+        # Python-backed formatters are identified by the tokenizer commit and
+        # cookbook revision; there is no Jinja template to fingerprint.
+        return ""
     try:
         template = tokenizer.get_chat_template()
     except (AttributeError, ValueError) as exc:
@@ -90,7 +94,10 @@ def resolve_rendering_model(model: ModelSpec) -> ModelSpec:
     renderer = load_training_renderer(model)
     return replace(
         model,
-        template_sha256=_tokenizer_template_hash(renderer.tokenizer),
+        template_sha256=_tokenizer_template_hash(
+            renderer.tokenizer,
+            allow_missing=model.provider == "fireworks" and model.renderer == "kimi_k3",
+        ),
         rendering_version=rendering_version(model),
     )
 
@@ -118,7 +125,7 @@ def validate_reasoning_support(model: ModelSpec) -> None:
         raise PipelineError(
             f"model {model.name} does not support reasoning content; use reasoning_policy='omit'"
         )
-    if resolved_renderer_name(model) not in {"qwen3_8_preserved", "kimi_k3", "hf_qwen3_8_preserved"}:
+    if resolved_renderer_name(model) not in {"qwen3_8_preserved", "kimi_k3", "hf_assistant"}:
         raise PipelineError(
             f"renderer {model.renderer} has no verified reasoning-content adapter; "
             "use reasoning_policy='omit'"

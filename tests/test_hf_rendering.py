@@ -6,22 +6,20 @@ import copy
 import json
 import sys
 from dataclasses import replace
-from pathlib import Path
+from importlib import resources
 from types import SimpleNamespace
-from typing import ClassVar
 
 import pytest
-from jinja2 import nodes
-from jinja2.ext import Extension
-from jinja2.sandbox import ImmutableSandboxedEnvironment
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 from smithtune import hf_rendering, rendering
-from smithtune.hf_rendering import HFRenderer, assistant_mask_template, template_sha256
+from smithtune.hf_rendering import HFRenderer, template_sha256
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import PipelineError
 
 
-TEMPLATE = (Path(__file__).parent / "fixtures/qwen3p8-chat-template.jinja").read_text()
+TEMPLATE = resources.files("trl").joinpath("chat_templates/qwen3_8.jinja").read_text()
 TOOLS = [{"type": "function", "function": {
     "name": "weather", "description": "Look up weather.",
     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
@@ -40,76 +38,43 @@ MESSAGES = [
 ]
 
 
-class GenerationMarkers(Extension):
-    """Expose Jinja generation spans for a deterministic character-token oracle."""
-
-    tags: ClassVar[set[str]] = {"generation"}
-
-    def parse(self, parser):
-        lineno = next(parser.stream).lineno
-        body = parser.parse_statements(["name:endgeneration"], drop_needle=True)
-        return nodes.CallBlock(self.call_method("mark"), [], [], body).set_lineno(lineno)
-
-    def mark(self, caller):
-        return "\ue000" + caller() + "\ue001"
+def _tokenizer(template=TEMPLATE):
+    """Exercise real mask generation without downloading model assets."""
+    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+    specials = ["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
+    backend = Tokenizer(models.BPE(vocab={char: i for i, char in enumerate(alphabet + specials)}, merges=[]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+    backend.decoder = decoders.ByteLevel()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend, additional_special_tokens=specials, chat_template=template,
+    )
 
 
-class CharacterChatTokenizer:
-    """Render the actual Jinja template, with one token per character for assertions."""
-
-    def get_chat_template(self):
-        return TEMPLATE
-
-    def apply_chat_template(self, messages, *, chat_template, tokenize, **kwargs):
-        def fail(message):
-            raise ValueError(message)
-
-        env = ImmutableSandboxedEnvironment(extensions=[GenerationMarkers])
-        env.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
-        env.globals["raise_exception"] = fail
-        marked = env.from_string(chat_template).render(messages=messages, **kwargs)
-        chars, masks = [], []
-        active = 0
-        for char in marked:
-            if char == "\ue000":
-                active = 1
-            elif char == "\ue001":
-                active = 0
-            else:
-                chars.append(char)
-                masks.append(active)
-        text = "".join(chars)
-        if not tokenize:
-            return text
-        ids = list(map(ord, text))
-        return {"input_ids": ids, "assistant_masks": masks} if kwargs.get("return_dict") else ids
-
-
-def _loss_spans(datum):
+def _loss_spans(datum, tokenizer=None):
+    tokenizer = tokenizer or _tokenizer()
     spans = []
-    text = "".join(map(chr, datum.token_ids))
     start = None
     for index, weight in enumerate([*datum.token_weights, 0]):
         if weight and start is None:
             start = index
         elif not weight and start is not None:
-            spans.append(text[start:index])
+            spans.append(tokenizer.decode(datum.token_ids[start:index]))
             start = None
     return spans
 
 
-def test_tools_reasoning_and_all_assistant_turns_keep_existing_loss_policy():
+def test_tools_reasoning_and_all_assistant_turns_use_upstream_loss_policy():
     original = copy.deepcopy(MESSAGES)
-    renderer = HFRenderer(baseten.DEFAULT_MODEL, CharacterChatTokenizer())
+    renderer = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer())
     datums = renderer.render(MESSAGES, TOOLS)
     assert len(datums) == 1
     assert _loss_spans(datums[0]) == [
-        "Look it up.\n</think>\n\n<tool_call>\n<function=weather>\n"
-        "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call><|im_end|>",
-        "It is sunny.<|im_end|>",
-        "I would need another forecast.<|im_end|>",
+        "<think>\nLook it up.\n</think>\n\n<tool_call>\n<function=weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call><|im_end|>\n",
+        "<think>\n\n</think>\n\nIt is sunny.<|im_end|>\n",
+        "<think>\n\n</think>\n\nI would need another forecast.<|im_end|>\n",
     ]
-    rendered = "".join(map(chr, datums[0].token_ids))
+    rendered = _tokenizer().decode(datums[0].token_ids)
     assert "# Tools" in rendered and "Sunny" in rendered and "Be precise." in rendered
     assert original == MESSAGES
 
@@ -123,15 +88,15 @@ def test_native_text_parity_and_masks_for_message_variants(content, reasoning):
     messages = [{"role": "user", "content": "Question"}, {"role": "assistant", "content": content}]
     if reasoning is not None:
         messages[-1]["reasoning_content"] = reasoning
-    tokenizer = CharacterChatTokenizer()
+    tokenizer = _tokenizer()
     datum = HFRenderer(baseten.DEFAULT_MODEL, tokenizer).render(messages)[0]
     expected = tokenizer.apply_chat_template(
         messages, chat_template=TEMPLATE, tokenize=False,
         add_generation_prompt=False, preserve_thinking=True,
     )
-    assert "".join(map(chr, datum.token_ids)) == expected
+    assert tokenizer.decode(datum.token_ids) == expected
     assert len(_loss_spans(datum)) == 1
-    assert _loss_spans(datum)[0].endswith("<|im_end|>")
+    assert _loss_spans(datum)[0].endswith("<|im_end|>\n")
 
 
 def test_parallel_tool_calls_and_results_remain_one_trajectory():
@@ -141,7 +106,7 @@ def test_parallel_tool_calls_and_results_remain_one_trajectory():
     }})
     messages.append({"role": "tool", "tool_call_id": "call-2", "content": "Rain"})
     messages.append({"role": "assistant", "content": "Forecasts retrieved."})
-    datums = HFRenderer(baseten.DEFAULT_MODEL, CharacterChatTokenizer()).render(messages, TOOLS)
+    datums = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer()).render(messages, TOOLS)
     assert len(datums) == 1
     spans = _loss_spans(datums[0])
     assert len(spans) == 2
@@ -150,13 +115,25 @@ def test_parallel_tool_calls_and_results_remain_one_trajectory():
     assert not any("Sunny" in span or "Rain" in span for span in spans)
 
 
-def test_template_structure_changes_fail_without_guessing_loss_boundaries():
-    with pytest.raises(PipelineError, match="no verified assistant-mask adapter"):
-        assistant_mask_template(TEMPLATE.replace("message.role", "message['role']"))
+def test_unrecognized_unannotated_template_is_rejected():
+    tokenizer = _tokenizer(TEMPLATE.replace("message.role", "message['role']"))
+    with pytest.raises(PipelineError, match="no supported assistant-mask template"):
+        HFRenderer(baseten.DEFAULT_MODEL, tokenizer)
+
+
+def test_native_generation_annotations_need_no_replacement():
+    template = """{% for message in messages %}
+{% if message.role == 'assistant' %}{% generation %}{{ message.content }}{% endgeneration %}
+{% else %}{{ message.content }}{% endif %}{% endfor %}"""
+    tokenizer = _tokenizer(template)
+    renderer = HFRenderer(baseten.DEFAULT_MODEL, tokenizer)
+    assert renderer.mask_template == template
+    datum = renderer.render([{"role": "user", "content": "Question"}, {"role": "assistant", "content": "Answer"}])[0]
+    assert _loss_spans(datum, tokenizer) == ["Answer"]
 
 
 def test_annotated_template_cannot_change_the_training_text():
-    renderer = HFRenderer(baseten.DEFAULT_MODEL, CharacterChatTokenizer())
+    renderer = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer())
     renderer.mask_template += "different"
     with pytest.raises(PipelineError, match="changed the native"):
         renderer.render(MESSAGES, TOOLS)
@@ -164,7 +141,7 @@ def test_annotated_template_cannot_change_the_training_text():
 
 def test_template_fingerprint_mismatch_fails_before_rendering():
     with pytest.raises(PipelineError, match="differs from the prepared manifest"):
-        HFRenderer(replace(baseten.DEFAULT_MODEL, template_sha256="0" * 64), CharacterChatTokenizer())
+        HFRenderer(replace(baseten.DEFAULT_MODEL, template_sha256="0" * 64), _tokenizer())
 
 
 @pytest.mark.parametrize("arguments", ["invalid-json", "[]", "null", 3])
@@ -172,11 +149,11 @@ def test_invalid_tool_arguments_are_rejected(arguments):
     messages = copy.deepcopy(MESSAGES)
     messages[2]["tool_calls"][0]["function"]["arguments"] = arguments
     with pytest.raises(PipelineError, match="JSON object"):
-        HFRenderer(baseten.DEFAULT_MODEL, CharacterChatTokenizer()).render(messages, TOOLS)
+        HFRenderer(baseten.DEFAULT_MODEL, _tokenizer()).render(messages, TOOLS)
 
 
 def test_baseten_preparation_and_datum_conversion_share_native_renderer(monkeypatch):
-    native = HFRenderer(baseten.DEFAULT_MODEL, CharacterChatTokenizer())
+    native = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer())
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: native)
     row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "example", "source_thread_id": "thread"}}
     token_datum = native.render(MESSAGES, TOOLS)[0]
@@ -202,12 +179,11 @@ def test_baseten_preparation_and_datum_conversion_share_native_renderer(monkeypa
 
 def test_native_loading_has_no_fireworks_dependency(monkeypatch):
     calls = []
-    tokenizer = CharacterChatTokenizer()
+    tokenizer = _tokenizer()
     monkeypatch.setitem(sys.modules, "training", None)
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
-        AutoTokenizer=SimpleNamespace(from_pretrained=lambda *args, **kwargs: calls.append((args, kwargs)) or tokenizer),
-        PreTrainedConfig=lambda: "generic-config",
-    ))
+    import transformers
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: calls.append((args, kwargs)) or tokenizer)
+    monkeypatch.setattr(transformers, "PreTrainedConfig", lambda: "generic-config")
     model = baseten.DEFAULT_MODEL
     renderer = rendering.load_training_renderer(model)
     assert renderer.render(MESSAGES, TOOLS)
@@ -222,7 +198,7 @@ def test_resolution_pins_branch_once_and_records_template_identity(monkeypatch):
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=lambda: SimpleNamespace(
         model_info=lambda repo, **kwargs: calls.append((repo, kwargs)) or SimpleNamespace(sha=sha),
     )))
-    monkeypatch.setattr(rendering, "load_training_renderer", lambda model: SimpleNamespace(tokenizer=CharacterChatTokenizer()))
+    monkeypatch.setattr(rendering, "load_training_renderer", lambda model: SimpleNamespace(tokenizer=_tokenizer()))
     monkeypatch.setattr(rendering, "rendering_version", lambda model: "native-version")
     model = replace(baseten.DEFAULT_MODEL, tokenizer_revision="main")
     resolved = rendering.resolve_rendering_model(model)
@@ -250,7 +226,7 @@ def test_native_prepare_persists_resolved_identity_and_whole_trajectories(monkey
     def tokenizer(model):
         assert calls and calls[0] == "capability"
         calls.append("tokenizer")
-        return CharacterChatTokenizer()
+        return _tokenizer()
 
     monkeypatch.setattr(hf_rendering, "load_tokenizer", tokenizer)
     monkeypatch.setattr(rendering, "rendering_version", lambda model: "native-version")
@@ -280,6 +256,28 @@ def test_implementation_drift_fails_before_loading_tokenizer(monkeypatch):
         rendering.load_training_renderer(replace(baseten.DEFAULT_MODEL, rendering_version="prepared-version"))
 
 
+def test_trl_version_change_requires_repreparation(monkeypatch):
+    version = rendering.metadata.version
+    prepared = replace(baseten.DEFAULT_MODEL, rendering_version=rendering.rendering_version(baseten.DEFAULT_MODEL))
+    assert "trl=1.13.0" in prepared.rendering_version
+    monkeypatch.setattr(rendering.metadata, "version", lambda name: "next-version" if name == "trl" else version(name))
+    monkeypatch.setattr(hf_rendering, "load_tokenizer", lambda model: pytest.fail("must reject before loading"))
+    with pytest.raises(PipelineError, match="implementation differs"):
+        rendering.load_training_renderer(prepared)
+
+
+def test_only_known_python_formatter_may_omit_jinja_template(monkeypatch):
+    monkeypatch.setattr(rendering, "load_training_renderer", lambda model: SimpleNamespace(tokenizer=SimpleNamespace(chat_template=None)))
+    monkeypatch.setattr(rendering, "rendering_version", lambda model: "pinned-cookbook")
+    resolved = rendering.resolve_rendering_model(fireworks.MODEL_SPECS["kimi-k3"])
+    assert resolved.template_sha256 == ""
+    assert resolved.tokenizer_revision == fireworks.MODEL_SPECS["kimi-k3"].tokenizer_revision
+    assert resolved.rendering_version == "pinned-cookbook"
+    for model in (fireworks.DEFAULT_MODEL, baseten.DEFAULT_MODEL):
+        with pytest.raises(PipelineError, match="no usable official chat template"):
+            rendering.resolve_rendering_model(model)
+
+
 @pytest.mark.parametrize("provider", [baseten, fireworks])
 def test_provider_preflight_precedes_tokenizer_and_dataset_access(monkeypatch, tmp_path, provider):
     def unsupported(*args, **kwargs):
@@ -296,17 +294,7 @@ def test_provider_preflight_precedes_tokenizer_and_dataset_access(monkeypatch, t
 
 
 def test_real_transformers_assistant_masks_cover_unicode_and_special_tokens():
-    transformers = pytest.importorskip("transformers")
-    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
-
-    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
-    specials = ["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
-    backend = Tokenizer(models.BPE(vocab={char: i for i, char in enumerate(alphabet + specials)}, merges=[]))
-    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
-    backend.decoder = decoders.ByteLevel()
-    tokenizer = transformers.PreTrainedTokenizerFast(
-        tokenizer_object=backend, additional_special_tokens=specials, chat_template=TEMPLATE,
-    )
+    tokenizer = _tokenizer()
     messages = copy.deepcopy(MESSAGES)
     messages[-1]["content"] = "café 🐢 東京"
     datum = HFRenderer(baseten.DEFAULT_MODEL, tokenizer).render(messages, TOOLS)[0]

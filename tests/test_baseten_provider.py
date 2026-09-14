@@ -171,7 +171,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
     assert plan["config"] == {
         "tokenizer_model": "Qwen/Qwen3.8-27B",
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        "renderer": "hf_qwen3_8_preserved",
+        "renderer": "hf_assistant",
         "thinking_trace_history_mode": "preserved",
         "max_seq_len": 131_072,
         "prepared_max_seq_len": 135_590,
@@ -885,7 +885,7 @@ def test_custom_model_configuration_flows_through_preparation_and_training(
     assert plan["config"] == {
         "tokenizer_model": "Qwen/Qwen3.8-27B",
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        "renderer": "hf_qwen3_8_preserved",
+        "renderer": "hf_assistant",
         "thinking_trace_history_mode": "",
         "max_seq_len": 12,
         "prepared_max_seq_len": 13,
@@ -941,7 +941,7 @@ def test_custom_model_configuration_flows_through_preparation_and_training(
     persisted_plan = json.loads((run_dir / "plan.json").read_text())
     state = json.loads((run_dir / "run-state.json").read_text())
     renderer_identity = {
-        "renderer": "hf_qwen3_8_preserved",
+        "renderer": "hf_assistant",
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
     }
     assert persisted_plan["base_model"] == model.base_model
@@ -1612,7 +1612,7 @@ def test_render_row_enforces_the_selected_model_context_limit(
 ):
     _install_renderer_output(monkeypatch, [10, 20, 30], [0, 0, 1])
     model = replace(
-        _model(), renderer="hf_qwen3_8_preserved", max_seq_len=3,
+        _model(), renderer="hf_assistant", max_seq_len=3,
         trainer_max_seq_len=None, thinking_trace_history_mode="",
     )
 
@@ -1773,7 +1773,7 @@ def _custom_model_options() -> ModelOptions:
         base_model="Qwen/Qwen3.8-27B",
         tokenizer_model="Qwen/Qwen3.8-27B",
         tokenizer_revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        renderer="hf_qwen3_8_preserved",
+        renderer="hf_assistant",
         max_seq_len=16,
         trainer_max_seq_len=12,
         default_lora_rank=4,

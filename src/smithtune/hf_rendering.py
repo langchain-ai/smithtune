@@ -11,56 +11,12 @@ from typing import Any
 from smithtune.providers.base import ModelSpec, PipelineError
 
 
-HF_QWEN_RENDERER = "hf_qwen3_8_preserved"
-HF_RENDERING_VERSION = "smithtune-hf-qwen3.8-v1"
-
-# These are template expressions, not searches through user messages. Refuse a
-# different template structure instead of guessing where assistant loss belongs.
-_ASSISTANT_BODY = r"""        {%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}
-            {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content + '\n</think>\n\n' + content }}
-        {%- else %}
-            {{- '<|im_start|>' + message.role + '\n' + content }}
-        {%- endif %}"""
-
-_MASKED_ASSISTANT_BODY = r"""        {%- set assistant_header = '<|im_start|>' + message.role + '\n' %}
-        {%- set assistant_body = content %}
-        {%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}
-            {%- if reasoning_content %}
-                {%- set assistant_header = assistant_header + '<think>\n' %}
-                {%- set assistant_body = reasoning_content + '\n</think>\n\n' + content %}
-            {%- else %}
-                {%- set assistant_header = assistant_header + '<think>\n\n</think>\n\n' %}
-            {%- endif %}
-        {%- endif %}
-        {{- assistant_header }}
-        {%- generation %}
-        {{- assistant_body }}"""
-
-_ASSISTANT_END = r"""        {{- '<|im_end|>\n' }}
-    {%- elif message.role == "tool" %}"""
-_MASKED_ASSISTANT_END = r"""        {{- '<|im_end|>' }}
-        {%- endgeneration %}
-        {{- '\n' }}
-    {%- elif message.role == "tool" %}"""
+HF_RENDERER = "hf_assistant"
+HF_RENDERING_VERSION = "smithtune-hf-trl-v1"
 
 
 def template_sha256(template: str) -> str:
     return hashlib.sha256(template.encode("utf-8")).hexdigest()
-
-
-def assistant_mask_template(template: str) -> str:
-    """Annotate Qwen's native template without changing its emitted text."""
-    for original, replacement in (
-        (_ASSISTANT_BODY, _MASKED_ASSISTANT_BODY),
-        (_ASSISTANT_END, _MASKED_ASSISTANT_END),
-    ):
-        if template.count(original) != 1:
-            raise PipelineError(
-                "the selected Qwen chat template has no verified assistant-mask adapter; "
-                "use a supported tokenizer revision"
-            )
-        template = template.replace(original, replacement, 1)
-    return template
 
 
 @dataclass(frozen=True)
@@ -94,7 +50,7 @@ def load_tokenizer(model: ModelSpec) -> Any:
 
 
 def validate_hf_model(model: ModelSpec) -> None:
-    if model.renderer != HF_QWEN_RENDERER:
+    if model.renderer != HF_RENDERER:
         raise PipelineError(
             f"Baseten renderer {model.renderer} is not supported by the native HF path; "
             "prepare again with a supported Baseten model"
@@ -120,7 +76,17 @@ class HFRenderer:
             raise PipelineError("the selected tokenizer has no usable chat template")
         if model.template_sha256 and template_sha256(self.template) != model.template_sha256:
             raise PipelineError("tokenizer chat template differs from the prepared manifest; prepare again")
-        self.mask_template = assistant_mask_template(self.template)
+        try:
+            from trl.chat_template_utils import get_training_chat_template
+        except ImportError as exc:
+            raise PipelineError("TRL is required for Baseten rendering; run smithtune doctor") from exc
+        try:
+            self.mask_template = get_training_chat_template(tokenizer) or self.template
+        except ValueError as exc:
+            raise PipelineError(
+                "the selected chat template has no supported assistant-mask template; "
+                "prepare with a supported model and tokenizer revision"
+            ) from exc
 
     def render(self, messages: list[dict[str, Any]], tools: Any = None) -> list[TokenDatum]:
         normalized = _normalize_messages(messages)

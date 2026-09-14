@@ -90,13 +90,16 @@ def test_upstream_training_dependencies_are_importable():
     from training.recipes import sft_loop
     from fireworks.training.sdk import FireworksClient
     import baseten.loops
+    from trl.chat_template_utils import get_training_chat_template
 
     assert callable(sft_loop.main)
     assert FireworksClient is not None
     assert baseten.loops is not None
+    assert callable(get_training_chat_template)
     assert metadata.version("fireworks-training-cookbook") == "0.1.0"
     assert metadata.version("tinker-cookbook") == "0.4.3"
     assert metadata.version("transformers") == "5.5.4"
+    assert metadata.version("trl") == "1.13.0"
 
 
 def test_installed_dependencies_are_compatible():

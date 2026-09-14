@@ -13,10 +13,3 @@ replay prompts for a multi-turn conversation with tools and reasoning. It checks
 that upstream dependency updates preserve those operations without downloading a
 model tokenizer or calling a provider. It does not establish parity with a
 particular Hugging Face tokenizer revision.
-
-`qwen3p8-chat-template.jinja` is the unmodified template from Qwen's official
-`Qwen/Qwen3.8-27B` tokenizer configuration at revision
-`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`:
-https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/tokenizer_config.json
-It tests Baseten's generation annotations against the publisher's template,
-including tool calls, reasoning, Unicode, and assistant loss boundaries.

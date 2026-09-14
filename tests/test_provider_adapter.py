@@ -93,7 +93,7 @@ def test_baseten_resolves_qwen_profile(monkeypatch):
     assert model.base_model == "Qwen/Qwen3.8-27B"
     assert model.tokenizer_model == "Qwen/Qwen3.8-27B"
     assert model.tokenizer_revision == "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
-    assert model.renderer == "hf_qwen3_8_preserved"
+    assert model.renderer == "hf_assistant"
     assert model.max_seq_len == 131_072
 
 
