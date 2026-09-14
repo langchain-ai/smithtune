@@ -135,11 +135,9 @@ smithtune prepare \
   --model qwen3p8-27b
 ```
 
-`--model` accepts a supported alias or the provider's model ID. The model selects
-its compatible tokenizer and rendering implementation automatically. `--model`
-is required for preparation.
+`--model` is required and accepts an alias or provider model ID from the list below.
 
-List the models supported by your installed version of smithtune:
+List the models supported by smithtune:
 
 ```bash
 smithtune models list --provider baseten
@@ -147,12 +145,8 @@ smithtune models list --provider fireworks
 smithtune models list  # both providers
 ```
 
-The command returns JSON with each model's `provider`, `alias`, `model_id`, and
-`training_context_limit` in tokens. Pass an `alias` or `model_id` to
-`prepare --provider … --model …`. It reads smithtune's local support registry,
-requires no credentials or downloads, and does not query the providers' full
-catalogs. `live_availability_checked` is `false`; preparation and training check
-current provider availability separately.
+Only listed models are supported. Preparation and training check provider availability
+automatically and select the appropriate tokenizer and formatting.
 
 | Provider | Model alias | Provider model ID | Training context limit |
 | --- | --- | --- | --- |
@@ -165,69 +159,21 @@ current provider availability separately.
 | Fireworks serverless Training API | `deepseek-v4-flash-0731` | `accounts/fireworks/models/deepseek-v4-flash-0731` | 262,144 |
 | Fireworks serverless Training API | `muse-glimmer-30b` | `accounts/fireworks/models/muse-glimmer-30b` | 131,072 |
 
-Add `--max-seq-len 32768`, for example, to select a smaller preparation and training
-context within the selected model's supported limit. The current adapters use LoRA.
-Before downloading tokenizer assets or fetching the dataset, preparation checks
-the selected provider's training metadata with `BASETEN_API_KEY` or
-`FIREWORKS_API_KEY`. Training checks availability again before starting resources.
-Baseten's live capabilities must accommodate the selected context. Fireworks uses
-live model metadata for model/tokenizer identity and the documented serverless
-training catalog for LoRA availability and context. Neither its inference
-`supportsServerless` flag nor its Managed SFT `supervisedLoraTunable` flag
-determines serverless Training API eligibility. An unverified
-model fails with a compatibility error even if the provider supports it elsewhere.
-The Baseten profiles retain conservative context limits even where the live API
-advertises more. GLM Flash uses the documented 131,072-token configuration;
-GLM 5.3 without Flash is unsupported because its documented long-context
-configuration excludes cross-entropy loss. Availability checks and tokenizer
-tests do not constitute a completed provider training run.
+Preparation uses these defaults:
 
-Baseten loads the official Hugging Face tokenizer. Qwen3.8 uses native assistant-mask
-annotations when available, or a maintained training template from pinned TRL.
-That template trains on assistant text, tool calls, retained
-reasoning, thinking markers (including empty thinking blocks), and the end-of-turn
-token and newline. User messages, tool results, and role headers are context only.
-The training template must preserve the official template's rendered text.
-For Kimi K3, Qwen3.5-9B, and GLM 5.3 Flash, a scoped adapter calls the official
-formatter and masks the response after its native inference prompt. It verifies
-the prompt prefix and keeps its tokenization when BPE merges across the response
-boundary. Markers already supplied in the generation prompt are context only.
-Kimi's appended history delimiter is also context; GLM's next-role stop token is
-a target. These adapters have no Fireworks rendering dependency.
+- LoRA training on text and tool conversations; images are unsupported
+- 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
+- All assistant messages are training targets, including earlier turns
+- Reasoning is omitted; add `--reasoning-policy preserve` to retain it
+- Examples over the context limit are rejected without truncation; use `--max-seq-len 32768` to lower the limit
 
-Targets share a datum only while their native token prefixes remain identical.
-Qwen3.5 removes earlier reasoning when another user turn arrives, so training
-keeps those earlier targets in separate examples. Each assistant is trained once;
-source conversations remain intact in the saved dataset and never cross data splits.
-Fireworks renders and masks with its pinned training cookbook. Both target all
-supported assistant messages. Muse uses the cookbook's example splitting; DeepSeek
-does so for conversations without tools. Muse requires an explicit system message
-because its default otherwise inserts today's date and changes across runs.
-Muse rejects assistant messages combining visible text with tool calls, and tool
-calls followed immediately by another assistant message: the pinned cookbook
-cannot preserve those shapes without dropping text or changing stop tokens.
-All profiles support text and tool trajectories; vision inputs remain unsupported.
-Preparation records the exact tokenizer commit, official template hash when present,
-and rendering implementation (including TRL's version where used) in
-`prepared/manifest.json`; training rejects a changed implementation. Python
-formatters are identified by their pinned tokenizer and rendering implementation.
-Baseten data prepared with an earlier renderer must be prepared again.
-`--no-fetch` reuses the LangSmith export and tool schemas; provider preflight and
-tokenizer resolution still run. These checks do not provision training resources.
+Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
+tokenizer loading still run. To supply the same tools for every example, use
+`--inference-contract path/to/contract.json` instead of automatic tool capture.
 
-Preparation accepts only models listed by `smithtune models list`. Each supported
-model determines its tokenizer, renderer, and reasoning capabilities;
-`--max-seq-len` can lower its context limit.
-
-For an existing global contract, `--inference-contract path/to/contract.json` explicitly
-uses its schemas for every example and skips automatic capture. Legacy contract files with
-system-prompt metadata still work; that prompt is not injected or compared. `capture-contract`
-remains available to create a global contract from a sample thread.
-
-- Default split: 80% training, 10% validation, 10% replay test, grouped by source thread or standalone trace.
-- SFT trains on all supported assistant messages, including earlier turns.
-- Reasoning is omitted by default. Use `--reasoning-policy preserve` with a supported model and renderer to retain it.
-- Unsupported content fails validation; examples over the preparation context limit are rejected without truncation.
+Muse Glimmer requires an explicit system message. It rejects assistant messages
+that combine visible text with tool calls, or make tool calls immediately before
+another assistant message.
 
 ## Plan and train
 
