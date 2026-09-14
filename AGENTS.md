@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Smithtune prepares LangSmith conversation trajectories for SFT with Fireworks or Baseten.
+Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 
 ## Start here
 
@@ -12,7 +12,7 @@ Smithtune prepares LangSmith conversation trajectories for SFT with Fireworks or
 ## Choose the starting point
 
 - Tracing project: use `dataset create` with the intended workspace, project, time window, and root-run filters, then pass the returned dataset ID to `prepare`.
-- Existing trajectory dataset: start at `prepare`; source thread/trace and project information is needed for automatic tool capture.
+- Existing dataset: start at `prepare`; source thread/trace and project information is needed for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
 - Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.
 - Use LangSmith API filter expressions from the README and linked syntax reference.
