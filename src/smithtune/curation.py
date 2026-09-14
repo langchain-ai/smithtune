@@ -7,9 +7,10 @@ import random
 import re
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import UUID, uuid4
 
 from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
@@ -60,7 +61,7 @@ def _time(value: str) -> str:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             raise ValueError
-        return parsed.astimezone(timezone.utc).isoformat()
+        return parsed.astimezone(UTC).isoformat()
     except (ValueError, AttributeError) as exc:
         raise PipelineError("timestamps must be ISO 8601 with a timezone") from exc
 

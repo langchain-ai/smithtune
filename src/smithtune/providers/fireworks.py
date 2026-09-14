@@ -9,15 +9,17 @@ import re
 import uuid
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
     _model_from_manifest,
+    _prepared_split,
     prepare_dataset,
 )
 from smithtune.inference_contract import InferenceContract
@@ -204,7 +206,7 @@ def _epoch_checkpoints(job_id: str) -> dict[str, str]:
             row
             for row in rows
             if row.get("promotable")
-            and row.get("name", "").rstrip("/").rsplit("/", 1)[-1].startswith(run_id)
+            and (row.get("name") or "").rstrip("/").rsplit("/", 1)[-1].startswith(run_id)
         ),
         key=lambda row: row.get("createTime", ""),
         reverse=True,
@@ -290,6 +292,7 @@ class FireworksProvider:
                 "--microbatch-token-budget, --max-spend-usd, --hourly-rate-usd, --replicas, "
                 "--spend-reserve-fraction, and --max-dropped-training-rows are Baseten-only"
             )
+        defaults = SFTSettings()
         settings = SFTSettings(
             max_epochs=options.max_epochs,
             early_stopping_patience=options.early_stopping_patience,
@@ -298,8 +301,8 @@ class FireworksProvider:
             batch_size=options.batch_size,
             seed=options.seed,
             lora_rank=options.lora_rank,
-            lora_alpha=32 if options.lora_alpha is None else options.lora_alpha,
-            pipeline_depth=4 if options.pipeline_depth is None else options.pipeline_depth,
+            lora_alpha=defaults.lora_alpha if options.lora_alpha is None else options.lora_alpha,
+            pipeline_depth=defaults.pipeline_depth if options.pipeline_depth is None else options.pipeline_depth,
         )
         settings.validate()
         return settings
@@ -341,9 +344,15 @@ class FireworksProvider:
     ) -> dict[str, Any]:
         settings.validate()
         manifest = _load_json(data_dir / "prepared" / "manifest.json")
+        if not isinstance(manifest, dict):
+            raise PipelineError("prepared manifest is not an object")
+        split = _prepared_split(manifest)
         for partition in ("train", "validation"):
-            if manifest.get("split", {}).get(partition, 0) < 1:
+            if split[partition] < 1:
                 raise PipelineError(f"prepared dataset has no {partition} rows")
+        source = manifest.get("langsmith")
+        if not isinstance(source, dict):
+            raise PipelineError("prepared manifest has no LangSmith source summary")
         model = resolve_prepared_model(manifest, MODEL_SPECS, provider="fireworks", allow_legacy=True)
         _validate_model(model)
         lora_rank = settings.lora_rank or model.default_lora_rank
@@ -353,10 +362,10 @@ class FireworksProvider:
             "training_api": TRAINING_BASE_URL,
             "base_model": model.base_model,
             "dataset": {
-                "source_rows": manifest["langsmith"]["examples"],
-                "train_rows": manifest["split"]["train"],
-                "validation_rows": manifest["split"]["validation"],
-                "test_rows": manifest["split"]["test"],
+                "source_rows": source.get("examples"),
+                "train_rows": split["train"],
+                "validation_rows": split["validation"],
+                "test_rows": split["test"],
             },
             "cookbook": {
                 "commit": COOKBOOK_COMMIT,

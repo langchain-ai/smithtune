@@ -5,10 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
 from smithtune.inference_contract import (
@@ -423,19 +425,21 @@ def _source_identity(example: dict[str, Any]) -> dict[str, str | None]:
     native_thread_id = example.get("source_thread_id")
     legacy_thread_id = metadata.get("source_thread_id")
     native_trace_id = example.get("source_trace_id")
-    trace_id = metadata.get("source_trace_id") or native_trace_id
-    if native_trace_id and metadata.get("source_trace_id") and native_trace_id != trace_id:
-        raise PipelineError("example has conflicting source_trace_id values")
+    legacy_trace_id = metadata.get("source_trace_id")
     for label, value in (
         ("source_thread_id", native_thread_id),
         ("metadata.source_thread_id", legacy_thread_id),
-        ("metadata.source_trace_id", trace_id),
+        ("source_trace_id", native_trace_id),
+        ("metadata.source_trace_id", legacy_trace_id),
     ):
         if value is not None and (not isinstance(value, str) or not value):
             raise PipelineError(f"example source identity {label} must be a non-empty string")
     if native_thread_id and legacy_thread_id and native_thread_id != legacy_thread_id:
         raise PipelineError("example has conflicting source_thread_id values")
+    if native_trace_id and legacy_trace_id and native_trace_id != legacy_trace_id:
+        raise PipelineError("example has conflicting source_trace_id values")
     thread_id = native_thread_id or legacy_thread_id
+    trace_id = legacy_trace_id or native_trace_id
     if not thread_id and not trace_id:
         raise PipelineError("example has no source thread or trace identity")
     return {"source_thread_id": thread_id, "source_trace_id": trace_id}
@@ -480,8 +484,11 @@ def validate_trajectories(
         messages = inputs.get("messages") if isinstance(inputs, dict) else None
         if not isinstance(messages, list) or not messages:
             raise PipelineError(f"example {example_id} has no messages")
-        for message in messages:
-            _validate_source_message(message)
+        for position, message in enumerate(messages):
+            try:
+                _validate_source_message(message)
+            except PipelineError as exc:
+                raise PipelineError(f"example {example_id} message {position}: {exc}") from exc
         if not any(message["role"] == "ai" for message in messages):
             raise PipelineError(f"example {example_id} has no assistant training target")
         call_count, result_count = _validate_tool_pairs(messages, example_id, native=True)
@@ -622,8 +629,11 @@ def prepare_sft_rows(
             contract = example_contracts[example["id"]]
         identity = _source_identity(example)
         messages = []
-        for source in example["inputs"]["messages"]:
-            converted = convert_message(source, reasoning_policy=reasoning_policy, model=model)
+        for position, source in enumerate(example["inputs"]["messages"]):
+            try:
+                converted = convert_message(source, reasoning_policy=reasoning_policy, model=model)
+            except PipelineError as exc:
+                raise PipelineError(f"example {example['id']} message {position}: {exc}") from exc
             had_reasoning = isinstance(source["content"], list) and any(
                 part["type"] == "reasoning" for part in source["content"]
             )
@@ -681,6 +691,10 @@ def split_rows(
         ).hexdigest(),
     )
     train_fraction = 1 - validation_fraction - test_fraction
+    if math.isclose(train_fraction, 0, abs_tol=1e-9):
+        # Fractions that sum to one can leave a floating-point remainder that
+        # would otherwise force a one-group training partition.
+        train_fraction = 0.0
     required_partitions = sum(
         fraction > 0
         for fraction in (train_fraction, validation_fraction, test_fraction)
@@ -900,6 +914,20 @@ def _model_from_manifest(manifest: dict[str, Any]) -> ModelSpec:
         return ModelSpec(**manifest["model"])
     except (KeyError, TypeError) as exc:
         raise PipelineError("prepared manifest has no valid model profile") from exc
+
+
+def _prepared_split(manifest: dict[str, Any]) -> dict[str, int]:
+    """Return the prepared manifest's split row counts after validating them."""
+    split = manifest.get("split")
+    if not isinstance(split, dict):
+        raise PipelineError("prepared manifest has no valid split counts")
+    counts: dict[str, int] = {}
+    for partition in ("train", "validation", "test"):
+        count = split.get(partition)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise PipelineError(f"prepared manifest has an invalid {partition} row count")
+        counts[partition] = count
+    return counts
 
 
 def _require_prepared_provider(

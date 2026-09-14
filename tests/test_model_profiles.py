@@ -42,6 +42,13 @@ def test_model_rejects_invalid_trainer_limits(limit):
         model.validate()
 
 
+@pytest.mark.parametrize("mode", [None, 5, ["preserved"]])
+def test_model_rejects_non_string_thinking_history_mode(mode):
+    model = replace(fireworks.DEFAULT_MODEL, thinking_trace_history_mode=mode)
+    with pytest.raises(PipelineError, match="thinking_trace_history_mode must be a string"):
+        model.validate()
+
+
 def test_legacy_baseten_profile_restores_its_configured_trainer_limit():
     model = asdict(baseten.DEFAULT_MODEL)
     del model["trainer_max_seq_len"]

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import fields, replace
-from typing import Any, Mapping
+from typing import Any
 
 from smithtune.dataset import _require_prepared_provider
 from smithtune.providers.base import ModelOptions, ModelSpec, PipelineError

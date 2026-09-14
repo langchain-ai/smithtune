@@ -7,14 +7,15 @@ import hashlib
 import json
 import os
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
 from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
-    _prepared_example_contracts,
+    _prepared_example_contracts, _prepared_split,
 )
 from smithtune.inference import ANTHROPIC_MODEL_PREFIX, _chat_completion, _inference_messages
 from smithtune.inference_contract import ContractError, InferenceContract
@@ -151,13 +152,18 @@ def prepare_replay_evaluation(
 ) -> dict[str, Any]:
     """Build model-ready replay cases from the untouched test split."""
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    if manifest.get("split", {}).get("test", 0) < 1:
+    if not isinstance(manifest, dict):
+        raise PipelineError("prepared manifest is not an object")
+    if _prepared_split(manifest)["test"] < 1:
         raise PipelineError("prepared dataset has no test rows")
     model = _model_from_manifest(manifest)
     global_contract = _prepared_inference_contract(data_dir, manifest)
     example_contracts = _prepared_example_contracts(data_dir, manifest)
     test_rows = _load_jsonl(data_dir / "prepared" / "test.jsonl")
-    reasoning_policy = manifest.get("conversion", {}).get("reasoning_policy", "omit")
+    conversion = manifest.get("conversion", {})
+    if not isinstance(conversion, dict):
+        raise PipelineError("prepared manifest has an invalid conversion summary")
+    reasoning_policy = conversion.get("reasoning_policy", "omit")
     if reasoning_policy not in ("omit", "preserve"):
         raise PipelineError("prepared manifest has an invalid reasoning policy")
     has_reasoning = any(
@@ -540,9 +546,14 @@ def run_replay_evaluation(
             raise PipelineError("existing replay results use a different reasoning policy")
         if result.get("contract_sha256") != contract_sha256:
             raise PipelineError("existing replay results use a different inference contract")
-        if result.get("judge_model") != judge_model or any(
-            result.get(label, {}).get("model") != model for label, model in models
-        ):
+        # Require the same model set, not just the requested labels, so a run
+        # without --base-model cannot silently reuse paired base results.
+        saved_models = {
+            label: result[label].get("model")
+            for label in ("base", "tuned")
+            if isinstance(result.get(label), dict)
+        }
+        if result.get("judge_model") != judge_model or saved_models != dict(models):
             raise PipelineError("existing replay results use different models")
     completed = {result["case"]["id"] for result in results}
     case_order = {case["id"]: index for index, case in enumerate(cases)}

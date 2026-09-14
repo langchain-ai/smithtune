@@ -65,6 +65,8 @@ class ModelSpec:
             raise PipelineError("requires_tool_declarations and trust_remote_code must be boolean")
         if not isinstance(self.supports_reasoning_content, bool):
             raise PipelineError("supports_reasoning_content must be boolean")
+        if not isinstance(self.thinking_trace_history_mode, str):
+            raise PipelineError("thinking_trace_history_mode must be a string")
 
 
 @dataclass(frozen=True)

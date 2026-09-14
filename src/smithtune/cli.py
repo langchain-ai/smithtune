@@ -14,7 +14,7 @@ from smithtune import dataset
 from smithtune import curation
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
-from smithtune.providers.baseten import BasetenSFTSettings
+from smithtune.providers.baseten import BasetenRuntimeError, BasetenSFTSettings
 from smithtune.providers.fireworks import FireworksProvider, SFTSettings as FireworksSFTSettings
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers import PROVIDERS, get_provider
@@ -318,7 +318,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             FireworksProvider().undeploy(args.account_id, args.deployment_id, confirm=args.confirm)
             value = {"status": "deleted", "deployment_id": args.deployment_id}
-    except (PipelineError, subprocess.CalledProcessError) as exc:
+    except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
     print(json.dumps(value, indent=2, sort_keys=True))
 
