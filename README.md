@@ -15,17 +15,8 @@ smithtune doctor
 smithtune --help
 ```
 
-For an existing local checkout, see [Contributing](CONTRIBUTING.md).
-
-uv manages an isolated environment and can provision Python 3.12. No repository
-checkout or environment activation is needed. It fetches smithtune and the pinned
-Fireworks cookbook automatically. Both providers and their Python dependencies
-are included. GitHub access and Git are needed during installation. Uninstall
-with `uv tool uninstall smithtune`.
-
-To upgrade, repeat the installation command with `--upgrade`. For a reproducible
-release, append a tag or full commit SHA as `@<ref>` to the Git URL. A release tag
-must exist before it can be installed. There is no PyPI publication step.
+No local GPU or repository checkout is required. To upgrade, repeat the install
+command with `--upgrade`.
 
 Install these companion tools for the operations you use:
 
@@ -34,19 +25,11 @@ Install these companion tools for the operations you use:
 | [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Dataset creation, contract capture, and fetching data during preparation |
 | [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) | Fireworks deployment and undeployment |
 
-Follow their official installation/authentication instructions and ensure their
-commands are on `PATH`. `smithtune doctor` reports installation versions, tool
-availability, and whether credential variables are set. It makes no network calls,
-does not validate credentials, and never prints their values. Missing prerequisites
-only affect operations that need them.
+Follow each tool's installation and authentication instructions, then run
+`smithtune doctor` to check local setup. It does not validate credentials.
 
-Run smithtune from a writable working directory of your choice. Data defaults to
-`./data/`; use `--data-dir` to select a different location. The training runtime
-includes PyTorch, so installation is substantial, but no local GPU is required.
-Preparation can download model tokenizer files into the Hugging Face cache.
-Public tokenizer repositories such as Qwen's can be downloaded without a Hugging
-Face token. Gated or private repositories require an authorized `HF_TOKEN` or an
-existing Hugging Face login. Only tokenizer assets are needed, not model weights.
+Run from a writable directory. Data defaults to `./data/`; use `--data-dir` to
+choose another location.
 
 Configure credentials in your environment:
 
@@ -59,23 +42,12 @@ Configure credentials in your environment:
 
 ## Using with a coding agent
 
-Agents working in this checkout can use [AGENTS.md](AGENTS.md); Claude loads the
-same guidance through `CLAUDE.md`.
-
-Give your agent the following prompt, replacing the placeholders:
+Give your agent this prompt, replacing the placeholders:
 
 ```text
-Help me use smithtune for this task: <desired outcome and provider>.
-My starting point is <tracing project, trajectory dataset, or prepared data>,
-with these source IDs or paths: <workspace/project/dataset IDs or data directory>.
-
-Read the operating guidance and workflow documentation:
-https://github.com/langchain-ai/smithtune/blob/main/AGENTS.md
-https://github.com/langchain-ai/smithtune/blob/main/README.md
-
-Check setup with smithtune doctor and the relevant command's --help, then
-start from the data I already have. Ask for any missing source information.
-Use the documented workflow and keep paid operations within what I authorize.
+Help me <task> with smithtune using <provider>.
+My data: <workspace/project/dataset IDs or prepared-data directory>.
+Follow https://github.com/langchain-ai/smithtune/blob/main/AGENTS.md.
 ```
 
 ## Create a dataset from conversations
@@ -90,38 +62,23 @@ smithtune dataset create \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
 
-The command filters trace root runs, deduplicates their threads, and imports one complete
-conversation per dataset example, entirely server-side. It prints the dataset ID for `prepare`.
-Recorded messages are preserved, including earlier turns and turns outside the filter window.
+Each example contains a whole conversation, including turns outside the filter
+window. Use the returned dataset ID in `prepare`.
 
-- `--filter` accepts [LangSmith API filter expressions](https://docs.langchain.com/langsmith/trace-query-syntax). The example selects root runs with correctness feedback of at least 0.9.
-- The time window uses an inclusive start and exclusive end. Feedback, metadata, tag, and error filters apply to root runs.
-- All matching threads are included by default. Use `--limit 100` to sample up to 100 threads; `--seed` defaults to 42.
-- Roots without a thread ID are excluded and counted. If no threads match, no dataset is created.
-- Selected IDs and an import receipt are saved automatically under `data/selections/`. Use `--output path.json` to choose the selection file location.
-
-Existing dataset names are rejected. On failure, the receipt records confirmed imports and any
-pending write; inspect the partial dataset before rerunning. Imports are not automatically retried.
-This command requires current LangSmith run-query and thread-import APIs.
+- Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
+- All matching threads are included; use `--limit 100` to sample up to 100
+- Choose a new dataset name. If an import fails, inspect its receipt in `data/selections/` before retrying
 
 ## Prepare data
 
-Preparation automatically collects tools from **all LLM runs in each example's source
-thread** (or source trace for older trace datasets). Each training row gets its own combined
-list of tool names, descriptions, and argument schemas, including tools that were available
-but never called. Tools introduced later are included from the start of that example.
+Preparation collects each conversation's tools, including tools that were never
+called. Tools added mid-run appear from the start of the training example.
+Provider built-ins (such as tool search) and conflicting definitions of the same
+tool are unsupported.
 
-The dataset needs its source thread/trace ID and project ID. Datasets created by this CLI
-already include these. Native `source_session_id` and `source_trace_id` are also supported.
-Schemas are saved with the raw export and prepared data; `--no-fetch` reuses that snapshot,
-and replay uses the matching example's saved schemas.
-
-Preparation fails if any scanned call lists a provider built-in (such as Anthropic tool search
-or OpenAI web search), even if it was never called. Conflicting definitions for the same tool
-name within an example also fail, with the example and source run IDs.
-
-System messages come from each trajectory and are preserved during preparation and replay.
-The default Qwen renderer supports a system message only as the first message.
+Existing datasets need source thread/trace and project IDs; CLI-created datasets
+include these automatically. Recorded system messages are preserved; the default
+Qwen renderer requires them at the start.
 
 Choose a provider and model, then prepare your dataset:
 
@@ -189,13 +146,9 @@ smithtune train \
   --confirm
 ```
 
-Training generates a run ID such as `sft-20260914-213000-a1b2c3d4e5f6` and writes
-artifacts to `./runs/<run-id>`. It prints the ID and output directory before
-training starts and includes `run_id` and `run_dir` in the final JSON output.
-Use `--run-id my-sft` to choose a name, `--run-dir ./my-output` to choose a folder,
-or both. The output directory must be new or empty. A plan is a preview and does
-not reserve a run ID or save settings for training; repeat any customized
-training settings on both commands.
+Training prints a generated run ID and saves artifacts to `./runs/<run-id>`.
+Override either with `--run-id` or `--run-dir`; the folder must be new or empty.
+Repeat customized training settings on both `plan` and `train`.
 
 The best checkpoint is selected by validation loss and recorded in `<run-dir>/result.json`.
 Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
@@ -250,19 +203,5 @@ smithtune undeploy \
   --confirm
 ```
 
-## Options and tests
-
-Data defaults to `data/` in your current working directory; the examples above
-save checkpoints and reports under `runs/`. Those directories are ignored by
-Git in this repository. No artifacts are written into the installed package.
-See command help for supported model selection, split fractions, and provider-specific training settings.
-
-```bash
-smithtune --help
-smithtune dataset create --help
-smithtune prepare --help
-smithtune train --help
-smithtune --version
-```
-
-See [Contributing](CONTRIBUTING.md) for development, tests, and releases.
+Use `smithtune <command> --help` for more options. See [Contributing](CONTRIBUTING.md)
+for local development, tests, and releases.
