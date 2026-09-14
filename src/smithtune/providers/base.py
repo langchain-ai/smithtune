@@ -104,20 +104,10 @@ class CommonSFTSettings:
 
 @dataclass(frozen=True)
 class ModelOptions:
-    """Unresolved model options; each provider validates its own support."""
+    """Select a supported provider model and optionally lower its context limit."""
 
     model_profile: str | None = None
-    base_model: str | None = None
-    tokenizer_model: str | None = None
-    tokenizer_revision: str | None = None
-    renderer: str | None = None
     max_seq_len: int | None = None
-    trainer_max_seq_len: int | None = None
-    thinking_trace_history_mode: str | None = None
-    trust_remote_code: bool = False
-    requires_tool_declarations: bool = False
-    default_lora_rank: int | None = None
-    supports_reasoning_content: bool = False
     model: str | None = None
 
 

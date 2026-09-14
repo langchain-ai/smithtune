@@ -100,36 +100,6 @@ def test_baseten_resolves_qwen_profile(monkeypatch):
 def test_provider_specific_training_options_are_rejected(monkeypatch):
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     parser = pipeline._parser()
-    baseten_prepare = parser.parse_args(
-        [
-            "prepare",
-            "--model",
-            "qwen3p8-27b",
-            "--provider",
-            "baseten",
-            "--workspace-id",
-            "workspace-id",
-            "--dataset-id",
-            "dataset-id",
-            "--default-lora-rank",
-            "16",
-        ]
-    )
-    baseten_zero_rank = parser.parse_args(
-        [
-            "prepare",
-            "--model",
-            "qwen3p8-27b",
-            "--provider",
-            "baseten",
-            "--workspace-id",
-            "workspace-id",
-            "--dataset-id",
-            "dataset-id",
-            "--default-lora-rank",
-            "0",
-        ]
-    )
     baseten = parser.parse_args(
         ["plan", "--provider", "baseten", "--lora-alpha", "32"]
     )
@@ -137,10 +107,6 @@ def test_provider_specific_training_options_are_rejected(monkeypatch):
         ["plan", "--provider", "fireworks", "--max-spend-usd", "75"]
     )
 
-    with pytest.raises(PipelineError, match="custom model fields"):
-        get_provider(baseten_prepare.provider).model_from_options(pipeline._model_options(baseten_prepare))
-    with pytest.raises(PipelineError, match="custom model fields"):
-        get_provider(baseten_zero_rank.provider).model_from_options(pipeline._model_options(baseten_zero_rank))
     with pytest.raises(PipelineError, match="Fireworks-only"):
         pipeline._settings_from_args(baseten)
     with pytest.raises(PipelineError, match="Baseten-only"):

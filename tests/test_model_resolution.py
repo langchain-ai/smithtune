@@ -61,7 +61,6 @@ def test_programmatic_profile_default_stays_compatible(provider):
     (ModelOptions(model="qwen3p8-27b", model_profile="qwen3p8-27b"), "choose either"),
     (ModelOptions(model="unknown"), "rendering configuration"),
     (ModelOptions(model_profile=""), "unknown fireworks model profile"),
-    (ModelOptions(model="qwen3p8-27b", tokenizer_model="other/tokenizer"), "custom model fields"),
 ])
 def test_model_selection_rejects_ambiguous_or_unsupported_options(options, message):
     with pytest.raises(PipelineError, match=message):
@@ -88,7 +87,7 @@ def test_cli_passes_explicit_model_choice(choice, monkeypatch):
 
 @pytest.mark.parametrize("provider", [baseten, fireworks])
 @pytest.mark.parametrize("selector", ["model", "model_profile"])
-def test_context_can_be_lowered_without_custom_tokenizer_options(provider, selector):
+def test_context_can_be_lowered_for_supported_models(provider, selector):
     options = ModelOptions(**{selector: "qwen3p8-27b"}, max_seq_len=4096)
     model = resolve_model_options(options, provider.MODEL_SPECS, provider=provider.DEFAULT_MODEL.provider)
     assert model.max_seq_len == model.training_context_limit == 4096

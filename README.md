@@ -167,7 +167,7 @@ current provider availability separately.
 | Fireworks serverless Training API | `muse-glimmer-30b` | `accounts/fireworks/models/muse-glimmer-30b` | 131,072 |
 
 Add `--max-seq-len 32768`, for example, to select a smaller preparation and training
-context without configuring a custom tokenizer. The current adapters use LoRA.
+context within the selected model's supported limit. The current adapters use LoRA.
 Before downloading tokenizer assets or fetching the dataset, preparation checks
 the selected provider's training metadata with `BASETEN_API_KEY` or
 `FIREWORKS_API_KEY`. Training checks availability again before starting resources.
@@ -216,9 +216,9 @@ Baseten data prepared with an earlier renderer must be prepared again.
 `--no-fetch` reuses the LangSmith export and tool schemas; provider preflight and
 tokenizer resolution still run. These checks do not provision training resources.
 
-Advanced `--model-profile custom` configurations remain available, but still need
-verified provider training support and a supported rendering implementation.
-An arbitrary Hugging Face model or renderer name does not establish compatibility.
+Preparation accepts only models listed by `smithtune models list`. Each supported
+model determines its tokenizer, renderer, and reasoning capabilities;
+`--max-seq-len` can lower its context limit.
 
 For an existing global contract, `--inference-contract path/to/contract.json` explicitly
 uses its schemas for every example and skips automatic capture. Legacy contract files with
@@ -302,7 +302,7 @@ smithtune undeploy \
 Data defaults to `data/` in your current working directory; the examples above
 save checkpoints and reports under `runs/`. Those directories are ignored by
 Git in this repository. No artifacts are written into the installed package.
-See command help for model profiles, custom models, split fractions, and provider-specific training settings.
+See command help for supported model selection, split fractions, and provider-specific training settings.
 
 ```bash
 smithtune --help

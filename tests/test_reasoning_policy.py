@@ -12,7 +12,7 @@ from smithtune import inference
 from smithtune import cli as pipeline
 from smithtune.models import resolve_prepared_model
 from smithtune.providers import baseten, fireworks
-from smithtune.providers.base import ModelOptions, PipelineError
+from smithtune.providers.base import PipelineError
 from test_pipeline import example, loaded_contract, message, write_raw
 
 
@@ -207,10 +207,7 @@ def test_legacy_manifest_keeps_conservative_capability_and_trainer_limit():
     assert resolved.trainer_max_seq_len == baseten.DEFAULT_MODEL.trainer_max_seq_len
 
 
-def test_custom_reasoning_capability_is_explicit_and_boolean():
-    assert ModelOptions().supports_reasoning_content is False
-    with pytest.raises(PipelineError, match="custom model fields"):
-        baseten.BasetenProvider().model_from_options(ModelOptions(supports_reasoning_content=True))
+def test_reasoning_capability_must_be_boolean():
     with pytest.raises(PipelineError, match="must be boolean"):
         replace(baseten.DEFAULT_MODEL, supports_reasoning_content="yes").validate()
 

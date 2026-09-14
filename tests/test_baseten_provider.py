@@ -5,13 +5,12 @@ import hashlib
 import io
 import json
 from pathlib import Path
-import random
 from types import SimpleNamespace
 import urllib.error
 
 import pytest
 
-from smithtune import dataset, rendering
+from smithtune import dataset
 from smithtune.providers import baseten
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
 
@@ -203,23 +202,6 @@ def test_baseten_provider_owns_its_model_profile():
 def test_model_resolution_rejects_unsupported_profiles(profile: str):
     with pytest.raises(PipelineError, match="unknown|unsupported"):
         baseten.BasetenProvider().model_from_options(ModelOptions(model_profile=profile))
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "base_model",
-        "tokenizer_model",
-        "tokenizer_revision",
-        "renderer",
-        "max_seq_len",
-    ],
-)
-def test_model_resolution_requires_complete_custom_model_fields(field: str):
-    options = replace(_custom_model_options(), **{field: None})
-
-    with pytest.raises(PipelineError, match="missing|required"):
-        baseten.BasetenProvider().model_from_options(options)
 
 
 def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options():
@@ -790,181 +772,6 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
     assert json.loads((run_dir / "run-state.json").read_text())["status"] == "completed"
     assert len(json.loads((run_dir / "epochs.json").read_text())) == 3
     assert json.loads((run_dir / "result.json").read_text()) == result
-
-
-def test_custom_model_configuration_flows_through_preparation_and_training(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    _write_raw_dataset(tmp_path, count=8)
-    renderer = object()
-    renderer_calls = []
-    rendering_calls = []
-
-    def load_renderer(model):
-        renderer_calls.append(model)
-        return renderer
-
-    def render(row, model, **kwargs):
-        rendering_calls.append({"row": row, "model": model, **kwargs})
-        index = int(row["messages"][0]["content"].split()[-1])
-        return [SimpleNamespace(
-            token_ids=[100 * index + position for position in range(13)],
-            token_weights=[0] * 12 + [1],
-        )]
-
-    monkeypatch.setattr(baseten, "resolve_rendering_model", lambda model: model)
-    monkeypatch.setattr(baseten, "load_training_renderer", load_renderer)
-    monkeypatch.setattr(rendering, "load_training_renderer", load_renderer)
-    monkeypatch.setattr(baseten, "render_row_tokens", render)
-    monkeypatch.setattr(rendering, "render_row_tokens", render)
-    trainer = FakeTrainer(validation_losses=[1.0, 1.0])
-    service = FakeService(trainer)
-    management = FakeManagement(inactive=[True])
-    capability_calls = []
-    trained_indices = []
-    original_forward_backward = trainer.forward_backward
-
-    def forward_backward(batch):
-        trained_indices.extend(datum.model_input.to_ints()[0] // 100 for datum in batch)
-        assert all(len(datum.model_input.to_ints()) == 12 for datum in batch)
-        return original_forward_backward(batch)
-
-    def capability_resolver(base_model, context_limit):
-        capability_calls.append((base_model, context_limit))
-        return baseten.BasetenModelCapability(base_model, context_limit)
-
-    trainer.forward_backward = forward_backward
-    provider = _provider(
-        service,
-        management,
-        capability_resolver=capability_resolver,
-        render_fn=baseten.render_row,
-        renderer_factory=None,
-        monotonic=lambda: 0.0,
-    )
-    model_options = _custom_model_options()
-    model = provider.model_from_options(model_options)
-    settings = provider.settings_from_options(TrainingOptions(
-        max_epochs=1,
-        learning_rate=2e-4,
-        batch_size=2,
-        early_stopping_patience=2,
-        early_stopping_min_delta=0.05,
-        seed=7,
-        replicas=2,
-        max_spend_usd=75.0,
-        hourly_rate_usd=30.0,
-        spend_reserve_fraction=0.2,
-        max_dropped_training_rows=0,
-    ))
-
-    manifest = provider.prepare(
-        "workspace-id",
-        "dataset-id",
-        tmp_path,
-        model_options=model_options,
-        validation_fraction=0.25,
-        test_fraction=0.125,
-        fetch=False,
-    )
-    plan = provider.plan(tmp_path, "alternate-run", settings)
-    assert settings.lora_rank is None
-    assert settings.microbatch_token_budget is None
-    assert manifest["model"] == asdict(model)
-    assert manifest["audit"]["max_context_tokens"] == 13
-    assert manifest["split"]["validation_fraction"] == 0.25
-    assert manifest["split"]["test_fraction"] == 0.125
-    assert plan["base_model"] == "Qwen/Qwen3.8-27B"
-    assert plan["model"] == asdict(model)
-    assert plan["dataset"] == {
-        "source_rows": 8,
-        "train_rows": 5,
-        "validation_rows": 2,
-        "test_rows": 1,
-    }
-    assert plan["config"] == {
-        "tokenizer_model": "Qwen/Qwen3.8-27B",
-        "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        "renderer": "hf_assistant",
-        "thinking_trace_history_mode": "",
-        "max_seq_len": 12,
-        "prepared_max_seq_len": 13,
-        "lora_rank": 4,
-        "learning_rate": 2e-4,
-        "microbatch_token_budget": 16,
-        "effective_batch_size": 2,
-        "max_epochs": 1,
-        "early_stopping_patience": 2,
-        "early_stopping_min_delta": 0.05,
-        "seed": 7,
-        "replicas": 2,
-        "max_dropped_training_rows": 0,
-        "capacity": "dedicated",
-        "with_sampler": False,
-    }
-    assert plan["budget"]["spend_reserve_fraction"] == 0.2
-    assert plan["budget"]["maximum_active_seconds"] == 7_200.0
-    assert capability_calls == [(model.base_model, 12)]
-    assert service.create_calls == []
-
-    run_dir = tmp_path / "run"
-    result = _train(provider, tmp_path, settings, run_id="alternate-run")
-
-    assert result["status"] == "completed"
-    assert capability_calls == [(model.base_model, 12)] * 2
-    assert renderer_calls == [model] * 2
-    assert len(rendering_calls) == 15
-    assert all(call["renderer"] is renderer for call in rendering_calls)
-    assert all("include_loss_mask" not in call for call in rendering_calls[:8])
-    assert all(call["include_loss_mask"] for call in rendering_calls[8:])
-    assert all(call["reduction"] == "none" for call in rendering_calls[8:])
-    assert service.create_calls == [{
-        "base_model": "Qwen/Qwen3.8-27B",
-        "rank": 4,
-        "replicas": 2,
-        "seed": 7,
-        "max_seq_len": 12,
-        "with_sampler": False,
-        "name": "alternate-run",
-    }]
-    train_rows = [json.loads(line) for line in (tmp_path / "prepared/train.jsonl").read_text().splitlines()]
-    expected_order = [int(row["_source"]["example_id"].split("-")[-1]) for row in train_rows]
-    random.Random(7).shuffle(expected_order)
-    assert trained_indices == expected_order
-    assert trainer.forward_backward_sizes == [1] * 5
-    assert trainer.forward_sizes == [1] * 2
-    assert len(trainer.optimizer_params) == 3
-    assert all(params.values == {"learning_rate": 2e-4} for params in trainer.optimizer_params)
-    assert result["budget"]["maximum_active_seconds"] == 7_200.0
-    assert result["budget"]["spend_reserve_fraction"] == 0.2
-
-    persisted_plan = json.loads((run_dir / "plan.json").read_text())
-    state = json.loads((run_dir / "run-state.json").read_text())
-    renderer_identity = {
-        "renderer": "hf_assistant",
-        "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-    }
-    assert persisted_plan["base_model"] == model.base_model
-    assert persisted_plan["model"] == asdict(model)
-    assert state["model_identity"] == result["model_identity"] == asdict(model)
-    assert state["model_sha256"] == result["model_sha256"]
-    assert persisted_plan["config"] == plan["config"]
-    assert state["configuration"] == plan["config"] == result["configuration"]
-    assert state["source_dataset_identity"]["examples"] == 8
-    assert state["split"] == result["split"] == persisted_plan["dataset"]
-    assert state["renderer_identity"] == result["renderer_identity"] == renderer_identity
-    for key, value in (
-        ("model_sha256", asdict(model)),
-        ("renderer_sha256", renderer_identity),
-        ("settings_sha256", {
-            "model": plan["model"], "config": plan["config"], "budget": plan["budget"],
-        }),
-    ):
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-        assert state[key] == hashlib.sha256(encoded).hexdigest()
-    assert json.loads((run_dir / "result.json").read_text()) == result
-    assert trainer.closed is True
-    assert management.deactivated == ["baseten-run-1"]
 
 
 def test_audit_hashes_distinguish_base_models_with_identical_rendering_and_settings(
@@ -1576,9 +1383,8 @@ def test_render_row_shifts_assistant_loss_tokens(monkeypatch: pytest.MonkeyPatch
     assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0, 1.0, 0.0]
 
 
-@pytest.mark.parametrize("use_custom_model", [False, True])
 def test_render_row_loads_the_selected_native_renderer(
-    monkeypatch: pytest.MonkeyPatch, use_custom_model: bool
+    monkeypatch: pytest.MonkeyPatch,
 ):
     rendering_calls = []
 
@@ -1593,11 +1399,7 @@ def test_render_row_loads_the_selected_native_renderer(
         baseten, "load_training_renderer",
         lambda model: calls.append(model) or renderer,
     )
-    model = (
-        baseten.BasetenProvider().model_from_options(_custom_model_options())
-        if use_custom_model
-        else _model()
-    )
+    model = _model()
     row = _row()
     baseten.render_row(row, model, loops_types=FAKE_LOOPS_TYPES)
 
@@ -1765,20 +1567,6 @@ def _row() -> dict:
 
 def _model() -> ModelSpec:
     return replace(baseten.DEFAULT_MODEL, tokenizer_revision="revision")
-
-
-def _custom_model_options() -> ModelOptions:
-    return ModelOptions(
-        model_profile="custom",
-        base_model="Qwen/Qwen3.8-27B",
-        tokenizer_model="Qwen/Qwen3.8-27B",
-        tokenizer_revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        renderer="hf_assistant",
-        max_seq_len=16,
-        trainer_max_seq_len=12,
-        default_lora_rank=4,
-        requires_tool_declarations=True,
-    )
 
 
 def _datum(length: int, source_id: int | None = None) -> FakeDatum:

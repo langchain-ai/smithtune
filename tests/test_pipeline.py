@@ -19,7 +19,6 @@ from smithtune import evaluation as replay
 from smithtune import inference as inference_transport
 from smithtune import inference_contract
 from smithtune import cli as pipeline
-from smithtune.providers import get_provider
 from smithtune import rendering
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import ModelSpec, PipelineError
@@ -1473,44 +1472,6 @@ def test_judge_retries_an_invalid_response():
 
     assert result["pass"] is True
     assert len(calls) == 2
-
-
-def test_builtin_and_custom_model_resolution(monkeypatch):
-    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
-    parser = pipeline._parser()
-    source = ["--workspace-id", "workspace-id", "--dataset-id", "dataset-id"]
-    built_in = parser.parse_args(["prepare", *source, "--model-profile", "kimi-k3"])
-    custom = parser.parse_args(
-        [
-            "prepare", *source, "--model-profile", "custom",
-            "--base-model", "accounts/fireworks/models/model-x",
-            "--tokenizer-model", "org/model-x", "--tokenizer-revision", "abc123",
-            "--renderer", "model_x", "--max-seq-len", "4096",
-            "--requires-tool-declarations",
-        ]
-    )
-    assert get_provider(built_in.provider).model_from_options(pipeline._model_options(built_in)).max_seq_len == 196_608
-    assert get_provider(custom.provider).model_from_options(pipeline._model_options(custom)).base_model.endswith("model-x")
-    assert get_provider(custom.provider).model_from_options(pipeline._model_options(custom)).requires_tool_declarations is True
-
-
-def test_tool_declaration_flag_is_only_valid_for_custom_profiles(monkeypatch):
-    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
-    args = pipeline._parser().parse_args(
-        [
-            "prepare",
-            "--workspace-id",
-            "workspace-id",
-            "--dataset-id",
-            "dataset-id",
-            "--model-profile",
-            "qwen3p8-27b",
-            "--requires-tool-declarations",
-        ]
-    )
-
-    with pytest.raises(PipelineError, match="custom model fields"):
-        get_provider(args.provider).model_from_options(pipeline._model_options(args))
 
 
 def test_prepare_rows_rejects_recorded_calls_outside_the_contract(tmp_path: Path):
