@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 from pathlib import Path
-import random
 from types import SimpleNamespace
 import urllib.error
 
@@ -161,7 +160,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
     assert plan["run_id"] == "approved-run"
     assert plan["provider"] == "baseten"
     assert plan["base_model"] == "Qwen/Qwen3.8-27B"
-    assert plan["model"] == asdict(baseten.DEFAULT_MODEL)
+    assert plan["model"] == asdict(replace(baseten.DEFAULT_MODEL, max_seq_len=262_144))
     assert plan["dataset"] == {
         "source_rows": 100,
         "train_rows": 90,
@@ -171,7 +170,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
     assert plan["config"] == {
         "tokenizer_model": "Qwen/Qwen3.8-27B",
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        "renderer": "qwen3_8_preserved",
+        "renderer": "hf_assistant",
         "thinking_trace_history_mode": "preserved",
         "max_seq_len": 131_072,
         "prepared_max_seq_len": 135_590,
@@ -196,30 +195,12 @@ def test_baseten_provider_owns_its_model_profile():
     assert model == baseten.MODEL_SPECS["qwen3p8-27b"]
     assert model.base_model == "Qwen/Qwen3.8-27B"
     assert model.provider == "baseten"
-    assert model.max_seq_len == 262_144
+    assert model.max_seq_len == 131_072
 
 
-@pytest.mark.parametrize("profile", ["unknown"])
-def test_model_resolution_rejects_unsupported_profiles(profile: str):
-    with pytest.raises(PipelineError, match="unknown|unsupported"):
-        baseten.BasetenProvider().model_from_options(ModelOptions(model_profile=profile))
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "base_model",
-        "tokenizer_model",
-        "tokenizer_revision",
-        "renderer",
-        "max_seq_len",
-    ],
-)
-def test_model_resolution_requires_complete_custom_model_fields(field: str):
-    options = replace(_custom_model_options(), **{field: None})
-
-    with pytest.raises(PipelineError, match="missing|required"):
-        baseten.BasetenProvider().model_from_options(options)
+def test_model_resolution_rejects_unsupported_models():
+    with pytest.raises(PipelineError, match="no supported baseten rendering configuration"):
+        baseten.BasetenProvider().model_from_options(ModelOptions(model="unknown"))
 
 
 def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options():
@@ -295,8 +276,14 @@ def test_preparation_delegates_with_baseten_policy(
         return manifest
 
     monkeypatch.setattr(dataset, "prepare_dataset", prepare_dataset)
+    monkeypatch.setattr(baseten, "resolve_rendering_model", lambda model: model)
+    capability_calls = []
 
-    result = baseten.BasetenProvider().prepare(
+    def capability_resolver(model, length):
+        capability_calls.append((model, length))
+        return baseten.BasetenModelCapability(model, 131_072)
+
+    result = baseten.BasetenProvider(capability_resolver=capability_resolver).prepare(
         "workspace-id",
         "dataset-id",
         tmp_path,
@@ -309,6 +296,7 @@ def test_preparation_delegates_with_baseten_policy(
     )
 
     assert result is manifest
+    assert capability_calls == [("Qwen/Qwen3.8-27B", 131_072)]
     assert calls == [
         (
             (
@@ -337,12 +325,12 @@ def test_preparation_rejects_invalid_model_before_fetching_data(
 
     monkeypatch.setattr(dataset, "prepare_dataset", unexpected_prepare)
 
-    with pytest.raises(PipelineError, match="unknown|unsupported"):
+    with pytest.raises(PipelineError, match="no supported baseten rendering configuration"):
         baseten.BasetenProvider().prepare(
             "workspace-id",
             "dataset-id",
             tmp_path,
-            model_options=ModelOptions(model_profile="unknown"),
+            model_options=ModelOptions(model="unknown"),
         )
 
 
@@ -783,191 +771,6 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
     assert json.loads((run_dir / "run-state.json").read_text())["status"] == "completed"
     assert len(json.loads((run_dir / "epochs.json").read_text())) == 3
     assert json.loads((run_dir / "result.json").read_text()) == result
-
-
-def test_custom_model_configuration_flows_through_preparation_and_training(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    import training.renderer
-    import training.utils.tokenizers
-
-    _write_raw_dataset(tmp_path, count=8)
-    tokenizer = object()
-    renderer = object()
-    tokenizer_calls = []
-    renderer_calls = []
-    rendering_calls = []
-
-    def load_tokenizer(model, revision, **kwargs):
-        tokenizer_calls.append((model, revision, kwargs))
-        return tokenizer
-
-    def get_renderer(name, selected_tokenizer):
-        renderer_calls.append((name, selected_tokenizer))
-        return renderer
-
-    def render(messages, **kwargs):
-        rendering_calls.append(kwargs)
-        index = int(messages[0]["content"].split()[-1])
-        return SimpleNamespace(
-            token_ids=[100 * index + position for position in range(13)],
-            token_weights=[0] * 12 + [1],
-        )
-
-    monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", load_tokenizer)
-    monkeypatch.setattr(training.renderer, "get_renderer", get_renderer)
-    _install_renderer_output(monkeypatch, render=render)
-    trainer = FakeTrainer(validation_losses=[1.0, 1.0])
-    service = FakeService(trainer)
-    management = FakeManagement(inactive=[True])
-    capability_calls = []
-    trained_indices = []
-    original_forward_backward = trainer.forward_backward
-
-    def forward_backward(batch):
-        trained_indices.extend(datum.model_input.to_ints()[0] // 100 for datum in batch)
-        assert all(len(datum.model_input.to_ints()) == 12 for datum in batch)
-        return original_forward_backward(batch)
-
-    def capability_resolver(base_model, context_limit):
-        capability_calls.append((base_model, context_limit))
-        return baseten.BasetenModelCapability(base_model, context_limit)
-
-    trainer.forward_backward = forward_backward
-    provider = _provider(
-        service,
-        management,
-        capability_resolver=capability_resolver,
-        render_fn=baseten.render_row,
-        renderer_factory=None,
-        monotonic=lambda: 0.0,
-    )
-    model_options = _custom_model_options()
-    model = provider.model_from_options(model_options)
-    settings = provider.settings_from_options(TrainingOptions(
-        max_epochs=1,
-        learning_rate=2e-4,
-        batch_size=2,
-        early_stopping_patience=2,
-        early_stopping_min_delta=0.05,
-        seed=7,
-        replicas=2,
-        max_spend_usd=75.0,
-        hourly_rate_usd=30.0,
-        spend_reserve_fraction=0.2,
-        max_dropped_training_rows=0,
-    ))
-
-    manifest = provider.prepare(
-        "workspace-id",
-        "dataset-id",
-        tmp_path,
-        model_options=model_options,
-        validation_fraction=0.25,
-        test_fraction=0.125,
-        fetch=False,
-    )
-    plan = provider.plan(tmp_path, "alternate-run", settings)
-    assert settings.lora_rank is None
-    assert settings.microbatch_token_budget is None
-    assert manifest["model"] == asdict(model)
-    assert manifest["audit"]["max_context_tokens"] == 13
-    assert manifest["split"]["validation_fraction"] == 0.25
-    assert manifest["split"]["test_fraction"] == 0.125
-    assert plan["base_model"] == "other/alternate-model"
-    assert plan["model"] == asdict(model)
-    assert plan["dataset"] == {
-        "source_rows": 8,
-        "train_rows": 5,
-        "validation_rows": 2,
-        "test_rows": 1,
-    }
-    assert plan["config"] == {
-        "tokenizer_model": "other/alternate-tokenizer",
-        "tokenizer_revision": "pinned-alternate-revision",
-        "renderer": "alternate_renderer",
-        "thinking_trace_history_mode": "",
-        "max_seq_len": 12,
-        "prepared_max_seq_len": 13,
-        "lora_rank": 4,
-        "learning_rate": 2e-4,
-        "microbatch_token_budget": 16,
-        "effective_batch_size": 2,
-        "max_epochs": 1,
-        "early_stopping_patience": 2,
-        "early_stopping_min_delta": 0.05,
-        "seed": 7,
-        "replicas": 2,
-        "max_dropped_training_rows": 0,
-        "capacity": "dedicated",
-        "with_sampler": False,
-    }
-    assert plan["budget"]["spend_reserve_fraction"] == 0.2
-    assert plan["budget"]["maximum_active_seconds"] == 7_200.0
-    assert capability_calls == []
-    assert service.create_calls == []
-
-    run_dir = tmp_path / "run"
-    result = _train(provider, tmp_path, settings, run_id="alternate-run")
-
-    assert result["status"] == "completed"
-    assert capability_calls == [("other/alternate-model", 12)]
-    assert tokenizer_calls == [
-        ("other/alternate-tokenizer", "pinned-alternate-revision", {"trust_remote_code": True})
-    ] * 2
-    assert renderer_calls == [("alternate_renderer", tokenizer)] * 2
-    assert len(rendering_calls) == 15
-    assert all(call["renderer"] is renderer for call in rendering_calls)
-    assert all(call["reduction"] == "mean" for call in rendering_calls[:8])
-    assert all(call["include_loss_mask"] for call in rendering_calls[8:])
-    assert all(call["reduction"] == "none" for call in rendering_calls[8:])
-    assert service.create_calls == [{
-        "base_model": "other/alternate-model",
-        "rank": 4,
-        "replicas": 2,
-        "seed": 7,
-        "max_seq_len": 12,
-        "with_sampler": False,
-        "name": "alternate-run",
-    }]
-    train_rows = [json.loads(line) for line in (tmp_path / "prepared/train.jsonl").read_text().splitlines()]
-    expected_order = [int(row["_source"]["example_id"].split("-")[-1]) for row in train_rows]
-    random.Random(7).shuffle(expected_order)
-    assert trained_indices == expected_order
-    assert trainer.forward_backward_sizes == [1] * 5
-    assert trainer.forward_sizes == [1] * 2
-    assert len(trainer.optimizer_params) == 3
-    assert all(params.values == {"learning_rate": 2e-4} for params in trainer.optimizer_params)
-    assert result["budget"]["maximum_active_seconds"] == 7_200.0
-    assert result["budget"]["spend_reserve_fraction"] == 0.2
-
-    persisted_plan = json.loads((run_dir / "plan.json").read_text())
-    state = json.loads((run_dir / "run-state.json").read_text())
-    renderer_identity = {
-        "renderer": "alternate_renderer",
-        "tokenizer_revision": "pinned-alternate-revision",
-    }
-    assert persisted_plan["base_model"] == model.base_model
-    assert persisted_plan["model"] == asdict(model)
-    assert state["model_identity"] == result["model_identity"] == asdict(model)
-    assert state["model_sha256"] == result["model_sha256"]
-    assert persisted_plan["config"] == plan["config"]
-    assert state["configuration"] == plan["config"] == result["configuration"]
-    assert state["source_dataset_identity"]["examples"] == 8
-    assert state["split"] == result["split"] == persisted_plan["dataset"]
-    assert state["renderer_identity"] == result["renderer_identity"] == renderer_identity
-    for key, value in (
-        ("model_sha256", asdict(model)),
-        ("renderer_sha256", renderer_identity),
-        ("settings_sha256", {
-            "model": plan["model"], "config": plan["config"], "budget": plan["budget"],
-        }),
-    ):
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-        assert state[key] == hashlib.sha256(encoded).hexdigest()
-    assert json.loads((run_dir / "result.json").read_text()) == result
-    assert trainer.closed is True
-    assert management.deactivated == ["baseten-run-1"]
 
 
 def test_audit_hashes_distinguish_base_models_with_identical_rendering_and_settings(
@@ -1579,39 +1382,30 @@ def test_render_row_shifts_assistant_loss_tokens(monkeypatch: pytest.MonkeyPatch
     assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0, 1.0, 0.0]
 
 
-@pytest.mark.parametrize("use_custom_model", [False, True])
-def test_render_row_loads_the_selected_tokenizer_and_renderer(
-    monkeypatch: pytest.MonkeyPatch, use_custom_model: bool
+def test_render_row_loads_the_selected_native_renderer(
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    import training.renderer
-    import training.utils.tokenizers
+    rendering_calls = []
 
-    _install_renderer_output(monkeypatch, [10, 20, 30], [0, 0, 1])
-    captured = {}
+    def render(row, model, **kwargs):
+        rendering_calls.append((row, model, kwargs))
+        return SimpleNamespace(token_ids=[10, 20, 30], token_weights=[0, 0, 1])
+
+    _install_renderer_output(monkeypatch, render=render)
+    calls = []
+    renderer = object()
     monkeypatch.setattr(
-        training.utils.tokenizers,
-        "load_tokenizer",
-        lambda model, revision, **kwargs: captured.update(
-            model=model, revision=revision, **kwargs
-        ) or object(),
+        baseten, "load_training_renderer",
+        lambda model: calls.append(model) or renderer,
     )
-    monkeypatch.setattr(
-        training.renderer,
-        "get_renderer",
-        lambda name, tokenizer: captured.update(name=name, tokenizer=tokenizer) or object(),
-    )
+    model = _model()
+    row = _row()
+    baseten.render_row(row, model, loops_types=FAKE_LOOPS_TYPES)
 
-    model = (
-        baseten.BasetenProvider().model_from_options(_custom_model_options())
-        if use_custom_model
-        else _model()
-    )
-    baseten.render_row(_row(), model, loops_types=FAKE_LOOPS_TYPES)
-
-    assert captured["name"] == model.renderer
-    assert captured["model"] == model.tokenizer_model
-    assert captured["revision"] == model.tokenizer_revision
-    assert captured["trust_remote_code"] == model.trust_remote_code
+    assert calls == [model]
+    assert rendering_calls == [(row, model, {
+        "renderer": renderer, "include_loss_mask": True, "reduction": "none",
+    })]
 
 
 def test_render_row_enforces_the_selected_model_context_limit(
@@ -1619,7 +1413,7 @@ def test_render_row_enforces_the_selected_model_context_limit(
 ):
     _install_renderer_output(monkeypatch, [10, 20, 30], [0, 0, 1])
     model = replace(
-        _model(), renderer="alternate_renderer", max_seq_len=3,
+        _model(), renderer="hf_assistant", max_seq_len=3,
         trainer_max_seq_len=None, thinking_trace_history_mode="",
     )
 
@@ -1636,20 +1430,18 @@ def test_render_row_enforces_the_selected_model_context_limit(
         )
 
 
-def test_render_row_preserves_tool_declarations_and_masks_role_boundaries(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_render_row_preserves_tool_declarations_and_masks_role_boundaries():
     calls: list[dict] = []
 
-    def render(messages, **kwargs):
-        calls.append({"messages": messages, **kwargs})
+    def render(messages, *, tools):
+        calls.append({"messages": messages, "tools": tools})
         # system | user | assistant tool call | tool result | assistant text
-        return SimpleNamespace(
+        return [SimpleNamespace(
             token_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9],
             token_weights=[0, 0, 1, 1, 0, 0, 0, 1, 1],
-        )
+        )]
 
-    _install_renderer_output(monkeypatch, render=render)
+    renderer = SimpleNamespace(render=render)
     row = _row()
     row["messages"] = [
         {"role": "system", "content": "You may use tools."},
@@ -1660,16 +1452,10 @@ def test_render_row_preserves_tool_declarations_and_masks_role_boundaries(
     ]
 
     datum = baseten.render_row(
-        row, _model(), loops_types=FAKE_LOOPS_TYPES, renderer=object()
+        row, _model(), loops_types=FAKE_LOOPS_TYPES, renderer=renderer
     )[0]
 
-    assert len(calls) == 1
-    assert calls[0]["messages"] == row["messages"]
-    assert calls[0]["renderer"] is not None
-    assert calls[0]["train_on_what"].value == "all_assistant_messages"
-    assert calls[0]["tools"] == row["tools"]
-    assert calls[0]["include_loss_mask"] is True
-    assert calls[0]["reduction"] == "none"
+    assert calls == [{"messages": row["messages"], "tools": row["tools"]}]
     assert datum.loss_fn_inputs["target_tokens"].data == [
         -100,
         3,
@@ -1683,20 +1469,20 @@ def test_render_row_preserves_tool_declarations_and_masks_role_boundaries(
     assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0]
 
 
-def test_render_row_enforces_262144_token_ceiling_without_truncation(
+def test_render_row_enforces_131072_token_ceiling_without_truncation(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    _install_renderer_output(monkeypatch, list(range(262_144)), [0] * 262_143 + [1])
+    _install_renderer_output(monkeypatch, list(range(131_072)), [0] * 131_071 + [1])
 
     accepted = baseten.render_row(
         _row(), _model(), loops_types=FAKE_LOOPS_TYPES, renderer=object()
     )
 
     assert len(accepted) == 1
-    assert len(accepted[0].model_input.to_ints()) == 262_143
+    assert len(accepted[0].model_input.to_ints()) == 131_071
 
-    _install_renderer_output(monkeypatch, list(range(262_145)), [0] * 262_144 + [1])
-    with pytest.raises(baseten.BasetenDataError, match="262,144"):
+    _install_renderer_output(monkeypatch, list(range(131_073)), [0] * 131_072 + [1])
+    with pytest.raises(baseten.BasetenDataError, match="131,072"):
         baseten.render_row(
             _row(), _model(), loops_types=FAKE_LOOPS_TYPES, renderer=object()
         )
@@ -1759,12 +1545,15 @@ def test_project_metadata_and_readme_describe_baseten_training_artifacts():
 
 
 def _install_renderer_output(monkeypatch: pytest.MonkeyPatch, tokens=None, weights=None, render=None) -> None:
-    import training.utils
-
     if render is None:
         def render(*args, **kwargs):
             return SimpleNamespace(token_ids=tokens, token_weights=weights)
-    monkeypatch.setattr(training.utils, "render_messages_to_datums", render)
+
+    def render_row_tokens(*args, **kwargs):
+        result = render(*args, **kwargs)
+        return result if isinstance(result, list) else [result]
+
+    monkeypatch.setattr(baseten, "render_row_tokens", render_row_tokens)
 
 
 def _row() -> dict:
@@ -1777,20 +1566,6 @@ def _row() -> dict:
 
 def _model() -> ModelSpec:
     return replace(baseten.DEFAULT_MODEL, tokenizer_revision="revision")
-
-
-def _custom_model_options() -> ModelOptions:
-    return ModelOptions(
-        model_profile="custom",
-        base_model="other/alternate-model",
-        tokenizer_model="other/alternate-tokenizer",
-        tokenizer_revision="pinned-alternate-revision",
-        renderer="alternate_renderer",
-        max_seq_len=16,
-        trainer_max_seq_len=12,
-        default_lora_rank=4,
-        trust_remote_code=True,
-    )
 
 
 def _datum(length: int, source_id: int | None = None) -> FakeDatum:
@@ -1835,7 +1610,8 @@ def _write_raw_dataset(root: Path, *, count: int) -> None:
 def _write_prepared_dataset(root: Path) -> None:
     prepared = root / "prepared"
     prepared.mkdir()
-    model = baseten.MODEL_SPECS["qwen3p8-27b"]
+    # Prepared artifacts can retain a larger preparation context than the trainer.
+    model = replace(baseten.DEFAULT_MODEL, max_seq_len=262_144)
     manifest = {
         "langsmith": {
             "workspace_id": "workspace-id",

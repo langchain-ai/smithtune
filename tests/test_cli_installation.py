@@ -22,7 +22,12 @@ def test_module_entrypoint_and_version_outside_checkout(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-def test_help_does_not_import_training_sdks_or_access_network(tmp_path):
+@pytest.mark.parametrize("argv", [
+    ["--help"], ["models", "list", "--help"],
+    ["models", "list"], ["models", "list", "--provider", "baseten"],
+    ["models", "list", "--provider", "fireworks"],
+])
+def test_discovery_does_not_import_training_sdks_or_access_network(tmp_path, argv):
     script = '''
 import builtins
 import socket
@@ -36,18 +41,46 @@ def no_network(*args, **kwargs):
 builtins.__import__ = guarded_import
 socket.create_connection = no_network
 from smithtune.cli import main
-main(['--help'])
 '''
+    script += f"main({argv!r})\n"
     result = subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
-    assert "usage: smithtune" in result.stdout
+    if "--help" in argv:
+        assert "usage: smithtune" in result.stdout
+    else:
+        from smithtune.providers import get_provider
+        from smithtune.providers.base import ModelOptions
+
+        report = json.loads(result.stdout)
+        assert report["source"] == "smithtune_support_registry"
+        assert report["live_availability_checked"] is False
+        expected_providers = {argv[-1]} if "--provider" in argv else {"baseten", "fireworks"}
+        assert {model["provider"] for model in report["models"]} == expected_providers
+        for model in report["models"]:
+            adapter = get_provider(model["provider"])
+            by_alias = adapter.model_from_options(ModelOptions(model=model["alias"]))
+            by_id = adapter.model_from_options(ModelOptions(model=model["model_id"]))
+            assert by_alias == by_id
+            assert model["training_context_limit"] == by_alias.training_context_limit
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("argv", [
+    ["models"], ["models", "unknown"], ["models", "list", "--provider", "unknown"],
+])
+def test_invalid_models_command_fails_during_argument_parsing(argv, capsys):
+    with pytest.raises(SystemExit) as failure:
+        cli.main(argv)
+    assert failure.value.code == 2
+    assert "error:" in capsys.readouterr().err
 
 
 def test_default_and_explicit_data_paths_follow_invocation(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "get_version", lambda: "0.1.0")
     monkeypatch.chdir(tmp_path)
     for command in ("prepare", "plan", "train", "eval-plan", "evaluate"):
         extras = {
-            "prepare": ["--workspace-id", "w", "--dataset-id", "d"],
+            "prepare": ["--workspace-id", "w", "--dataset-id", "d", "--model", "qwen3p8-27b"],
             "plan": [],
             "train": ["--run-dir", "runs/test", "--run-id", "test"],
             "eval-plan": ["--output-dir", "replay"],

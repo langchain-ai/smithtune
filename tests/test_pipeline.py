@@ -13,13 +13,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from smithtune import artifacts
+from smithtune import artifacts, capabilities
 from smithtune import dataset as dataset_ops
 from smithtune import evaluation as replay
 from smithtune import inference as inference_transport
 from smithtune import inference_contract
 from smithtune import cli as pipeline
-from smithtune.providers import get_provider
 from smithtune import rendering
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import ModelSpec, PipelineError
@@ -241,14 +240,13 @@ def test_tool_call_conversion_preserves_ids_and_arguments():
 
 def test_baseten_rendering_constructs_native_loops_data(monkeypatch: pytest.MonkeyPatch):
     from baseten.loops import Datum, ModelInput, TensorData
-    import training.utils
 
     monkeypatch.setattr(
-        training.utils,
-        "render_messages_to_datums",
-        lambda *args, **kwargs: SimpleNamespace(
+        baseten,
+        "render_row_tokens",
+        lambda *args, **kwargs: [SimpleNamespace(
             token_ids=[10, 20, 30, 40, 50], token_weights=[0, 0, 1, 1, 0]
-        ),
+        )],
     )
     model = baseten.DEFAULT_MODEL
     row = {"messages": [{"role": "user", "content": "Hello"}], "tools": []}
@@ -639,7 +637,8 @@ def test_prepare_accepts_a_test_only_dataset(tmp_path: Path):
     assert manifest["langsmith"]["dataset_id"] == "test-dataset"
 
 
-def test_prepare_cli_accepts_one_dataset_and_fraction_controls():
+def test_prepare_cli_accepts_one_dataset_and_fraction_controls(monkeypatch):
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     parser = pipeline._parser()
     args = parser.parse_args(
         [
@@ -648,6 +647,7 @@ def test_prepare_cli_accepts_one_dataset_and_fraction_controls():
             "workspace-id",
             "--dataset-id",
             "source-dataset",
+            "--model", "qwen3p8-27b",
             "--validation-fraction",
             "0",
             "--test-fraction",
@@ -1409,7 +1409,8 @@ def test_inference_transport_reports_failures_as_pipeline_errors(
         inference_transport._chat_completion(model, [{"role": "user", "content": "hi"}], 16)
 
 
-def test_claude_sonnet_5_is_the_default_judge():
+def test_claude_sonnet_5_is_the_default_judge(monkeypatch):
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     args = pipeline._parser().parse_args(
         ["evaluate", "--output-dir", "evaluation", "--tuned-model", "tuned"]
     )
@@ -1471,42 +1472,6 @@ def test_judge_retries_an_invalid_response():
 
     assert result["pass"] is True
     assert len(calls) == 2
-
-
-def test_builtin_and_custom_model_resolution():
-    parser = pipeline._parser()
-    source = ["--workspace-id", "workspace-id", "--dataset-id", "dataset-id"]
-    built_in = parser.parse_args(["prepare", *source, "--model-profile", "kimi-k3"])
-    custom = parser.parse_args(
-        [
-            "prepare", *source, "--model-profile", "custom",
-            "--base-model", "accounts/fireworks/models/model-x",
-            "--tokenizer-model", "org/model-x", "--tokenizer-revision", "abc123",
-            "--renderer", "model_x", "--max-seq-len", "4096",
-            "--requires-tool-declarations",
-        ]
-    )
-    assert get_provider(built_in.provider).model_from_options(pipeline._model_options(built_in)).max_seq_len == 196_608
-    assert get_provider(custom.provider).model_from_options(pipeline._model_options(custom)).base_model.endswith("model-x")
-    assert get_provider(custom.provider).model_from_options(pipeline._model_options(custom)).requires_tool_declarations is True
-
-
-def test_tool_declaration_flag_is_only_valid_for_custom_profiles():
-    args = pipeline._parser().parse_args(
-        [
-            "prepare",
-            "--workspace-id",
-            "workspace-id",
-            "--dataset-id",
-            "dataset-id",
-            "--model-profile",
-            "qwen3p8-27b",
-            "--requires-tool-declarations",
-        ]
-    )
-
-    with pytest.raises(PipelineError, match="custom model fields"):
-        get_provider(args.provider).model_from_options(pipeline._model_options(args))
 
 
 def test_prepare_rows_rejects_recorded_calls_outside_the_contract(tmp_path: Path):
@@ -1709,6 +1674,17 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
 def test_mocked_training_runs_recipe_by_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from training.recipes import sft_loop
 
+    metadata_calls = []
+    renderer_calls = []
+
+    def model_capability(model, context):
+        metadata_calls.append((model, context))
+        return capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
+
+    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", model_capability)
+    monkeypatch.setattr(
+        fireworks, "load_training_renderer", lambda model: renderer_calls.append(model) or object(),
+    )
     data_dir = tmp_path / "data"
     write_manifest(data_dir)
     losses = iter([1.0, 0.7, 0.8])
@@ -1739,6 +1715,8 @@ def test_mocked_training_runs_recipe_by_epoch(tmp_path: Path, monkeypatch: pytes
         init_from_checkpoint=None,
     )
     assert len(configs) == 3
+    assert metadata_calls == [(fireworks.DEFAULT_MODEL.base_model, 131_072)]
+    assert renderer_calls == [fireworks.DEFAULT_MODEL]
     assert configs[1].init_from_checkpoint == "account/run-job-1/step-1"
     assert configs[0].base_model == fireworks.DEFAULT_MODEL.base_model
     assert result["best"]["job_id"] == "job-2"

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.capabilities import preflight_model
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
@@ -32,7 +33,7 @@ from smithtune.providers.base import (
     ReasoningPolicy,
     TrainingOptions,
 )
-from smithtune.rendering import SFT_TARGET_POLICY
+from smithtune.rendering import SFT_TARGET_POLICY, load_training_renderer, resolve_rendering_model
 
 
 TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
@@ -62,6 +63,26 @@ MODEL_SPECS = {
         supports_reasoning_content=True,
         max_seq_len=196_608,
         trust_remote_code=True,
+        requires_tool_declarations=True,
+    ),
+    "deepseek-v4-flash-0731": ModelSpec(
+        name="deepseek-v4-flash-0731",
+        base_model="accounts/fireworks/models/deepseek-v4-flash-0731",
+        tokenizer_model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        tokenizer_revision="7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+        renderer="deepseek_v4",
+        max_seq_len=262_144,
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+    ),
+    "muse-glimmer-30b": ModelSpec(
+        name="muse-glimmer-30b",
+        base_model="accounts/fireworks/models/muse-glimmer-30b",
+        tokenizer_model="meta-models/Muse-Glimmer-30B",
+        tokenizer_revision="a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+        renderer="muse_glimmer",
+        max_seq_len=131_072,
+        supports_reasoning_content=True,
         requires_tool_declarations=True,
     ),
 }
@@ -321,10 +342,11 @@ class FireworksProvider:
         fetch: bool = True,
         check_render: bool = True,
     ) -> dict[str, Any]:
+        model = resolve_rendering_model(preflight_model(self.model_from_options(model_options)))
         return prepare_dataset(
             workspace_id,
             dataset_id,
-            self.model_from_options(model_options),
+            model,
             data_dir,
             inference_contract=inference_contract,
             reasoning_policy=reasoning_policy,
@@ -414,6 +436,9 @@ class FireworksProvider:
         plan = self.plan(data_dir, run_id, settings)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
+        model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
+        preflight_model(model)
+        load_training_renderer(model)
         try:
             from training.recipes import sft_loop
             from training.utils import RunnerConfig, WandBConfig
@@ -425,9 +450,6 @@ class FireworksProvider:
         run_dir.mkdir(parents=True, exist_ok=True)
         _set_skill_session()
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
-        model = _model_from_manifest(
-            _load_json(data_dir / "prepared" / "manifest.json")
-        )
         lora_rank = settings.lora_rank or model.default_lora_rank
         _json_dump(run_dir / "plan.json", plan)
         _write_run_md(

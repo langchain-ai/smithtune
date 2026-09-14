@@ -6,13 +6,13 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from smithtune import dataset
+from smithtune import capabilities, dataset, rendering
 from smithtune import evaluation
 from smithtune import inference
 from smithtune import cli as pipeline
 from smithtune.models import resolve_prepared_model
 from smithtune.providers import baseten, fireworks
-from smithtune.providers.base import ModelOptions, PipelineError
+from smithtune.providers.base import PipelineError
 from test_pipeline import example, loaded_contract, message, write_raw
 
 
@@ -155,11 +155,32 @@ def test_prepare_manifest_and_replay_use_same_policy(tmp_path, monkeypatch, poli
 @pytest.mark.parametrize("provider", [fireworks.FireworksProvider(), baseten.BasetenProvider()])
 @pytest.mark.parametrize("policy", ["omit", "preserve"])
 def test_cli_and_provider_pass_preparation_policy(tmp_path, monkeypatch, provider, policy):
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
+    capability_calls = []
+    rendering_calls = []
+
+    def fireworks_capability(model, context):
+        capability_calls.append((model, context))
+        return capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
+
+    def baseten_capability(model, context):
+        capability_calls.append((model, context))
+        return baseten.BasetenModelCapability(model, 131_072)
+
+    def resolve_rendering(model):
+        rendering_calls.append(model)
+        return model
+
+    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", fireworks_capability)
+    monkeypatch.setattr(baseten, "fetch_model_capability", baseten_capability)
+    adapter_module = fireworks if provider.name == "fireworks" else baseten
+    monkeypatch.setattr(adapter_module, "resolve_rendering_model", resolve_rendering)
+    monkeypatch.setattr(rendering, "resolved_renderer_name", lambda model: model.renderer)
     source = example(0, [message("human", "question", "u"),
                          message("ai", [reasoning(), {"type": "text", "text": "answer"}], "a")])
     write_raw(tmp_path, [source], workspace_id="workspace")
     argv = ["pipeline.py", "prepare", "--provider", provider.name,
-            "--workspace-id", "workspace", "--dataset-id", "dataset-id",
+            "--model", "qwen3p8-27b", "--workspace-id", "workspace", "--dataset-id", "dataset-id",
             "--data-dir", str(tmp_path), "--validation-fraction", "0", "--test-fraction", "0",
             "--no-fetch", "--skip-render-check"]
     if policy == "preserve":
@@ -168,6 +189,8 @@ def test_cli_and_provider_pass_preparation_policy(tmp_path, monkeypatch, provide
     pipeline.main()
     manifest = json.loads((tmp_path / "prepared" / "manifest.json").read_text())
     rows = [json.loads(line) for line in (tmp_path / "prepared" / "train.jsonl").read_text().splitlines()]
+    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, 131_072)]
+    assert rendering_calls == [adapter_module.DEFAULT_MODEL]
     assert manifest["conversion"]["reasoning_policy"] == policy
     assert ("reasoning_content" in rows[0]["messages"][1]) == (policy == "preserve")
 
@@ -184,10 +207,7 @@ def test_legacy_manifest_keeps_conservative_capability_and_trainer_limit():
     assert resolved.trainer_max_seq_len == baseten.DEFAULT_MODEL.trainer_max_seq_len
 
 
-def test_custom_reasoning_capability_is_explicit_and_boolean():
-    assert ModelOptions().supports_reasoning_content is False
-    with pytest.raises(PipelineError, match="custom model fields"):
-        baseten.BasetenProvider().model_from_options(ModelOptions(supports_reasoning_content=True))
+def test_reasoning_capability_must_be_boolean():
     with pytest.raises(PipelineError, match="must be boolean"):
         replace(baseten.DEFAULT_MODEL, supports_reasoning_content="yes").validate()
 
