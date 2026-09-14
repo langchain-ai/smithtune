@@ -64,13 +64,14 @@ smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --filter 'feedback.correctness.score:>=0.9'
+  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
 
 The command filters trace root runs, deduplicates their threads, and imports one complete
 conversation per dataset example, entirely server-side. It prints the dataset ID for `prepare`.
 Recorded messages are preserved, including earlier turns and turns outside the filter window.
 
+- `--filter` accepts [LangSmith API filter expressions](https://docs.langchain.com/langsmith/trace-query-syntax). The example selects root runs with correctness feedback of at least 0.9.
 - The time window uses an inclusive start and exclusive end. Feedback, metadata, tag, and error filters apply to root runs.
 - All matching threads are included by default. Use `--limit 100` to sample up to 100 threads; `--seed` defaults to 42.
 - Roots without a thread ID are excluded and counted. If no threads match, no dataset is created.
