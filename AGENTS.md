@@ -12,6 +12,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 ## Choose the starting point
 
 - Tracing project: use `dataset create` with the intended workspace, project, time window, and root-run filters, then pass the returned dataset ID to `prepare`.
+- To judge which traces to use for SFT, use `dataset triage --dry-run`, then the same command with `--confirm` when paid judging is authorized. Use `dataset create --triage-dir` to import accepted saved conversations. The packaged skill is available through `skill export`.
 - Existing dataset: start at `prepare`; source thread/trace and project information is needed for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
 - Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.
@@ -32,6 +33,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 ## Preserve the data behavior
 
 - Dataset creation imports whole conversations, including earlier turns and turns outside the selection window.
+- Triage labels individual traces, but training import requires every trace in a saved conversation to pass. Judge errors stay incomplete; they are not quality votes. Do not refetch or edit messages after judging. Use saved tool schemas from triage.
 - Preparation preserves recorded messages and gathers each example's tool union from all its source LLM runs. Automatic capture is the normal path; a global inference contract is an explicit override.
 - Provider built-ins and conflicting definitions of the same tool within an example fail preparation, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.

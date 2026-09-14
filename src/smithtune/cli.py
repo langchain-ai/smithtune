@@ -11,7 +11,8 @@ from dataclasses import fields
 from pathlib import Path
 
 from smithtune import dataset
-from smithtune import curation
+from smithtune import curation, triage
+from smithtune.triage_source import source_options
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
 from smithtune.providers.baseten import BasetenRuntimeError, BasetenSFTSettings
@@ -36,15 +37,42 @@ def _parser() -> argparse.ArgumentParser:
         "create", help="filter root traces and import their whole conversations into a new dataset",
         description="Create a dataset from whole conversations selected through matching root traces. Imports include turns outside the time window.",
     )
-    create.add_argument("--workspace-id", required=True)
-    create.add_argument("--project-id", required=True)
+    create.add_argument("--workspace-id")
+    create.add_argument("--project-id")
     create.add_argument("--name", required=True, help="name for the new LangSmith dataset")
-    create.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
-    create.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
+    create.add_argument("--start-time", help="inclusive root start time, with timezone")
+    create.add_argument("--end-time", help="exclusive root start time, with timezone")
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
     create.add_argument("--limit", type=int, help="sample at most this many distinct threads; default: all matches")
     create.add_argument("--seed", type=int, default=42, help="sampling seed (default: 42)")
     create.add_argument("--output", type=Path, help="selection file path; default: an automatic path under data/selections; import receipt saved alongside it")
+
+    create.add_argument("--triage-dir", type=Path, help="import frozen all-pass conversations from a completed triage run")
+    create.add_argument("--confirm", action="store_true", help="confirm dataset creation from triage labels")
+
+    triage_cmd = curate_sub.add_parser("triage", help="label project traces keep/drop for SFT with one or more judges")
+    triage_cmd.add_argument("--workspace-id", required=True)
+    triage_cmd.add_argument("--project-id", required=True)
+    triage_cmd.add_argument("--start-time", required=True)
+    triage_cmd.add_argument("--end-time", required=True)
+    triage_cmd.add_argument("--filter", help="root-run filter; selected threads expand to all their turns")
+    triage_cmd.add_argument("--limit", type=int, default=100, help="maximum selected root traces before thread expansion (default: 100)")
+    triage_cmd.add_argument("--seed", type=int, default=42)
+    triage_cmd.add_argument("--output-dir", type=Path, required=True)
+    triage_cmd.add_argument("--config", type=Path, help="JSON judge slots and selection rules; default: one Anthropic gateway judge")
+    triage_cmd.add_argument("--runner", choices=("api", "deepagent"), default="api")
+    triage_cmd.add_argument("--concurrency", type=int, default=4)
+    triage_cmd.add_argument("--max-input-chars", type=int, default=200_000)
+    triage_cmd.add_argument("--max-output-tokens", type=int, default=4096)
+    triage_cmd.add_argument("--attempts", type=int, default=3)
+    approval = triage_cmd.add_mutually_exclusive_group(required=True)
+    approval.add_argument("--dry-run", action="store_true", help="freeze source evidence and show call limits without paid judging")
+    approval.add_argument("--confirm", action="store_true", help="run paid judging; reuse the same directory to resume")
+
+    skill = sub.add_parser("skill", help="export the packaged SFT selection skill for any agent")
+    skill_sub = skill.add_subparsers(dest="skill_command", required=True)
+    skill_export = skill_sub.add_parser("export")
+    skill_export.add_argument("--output", type=Path, required=True, help="parent directory for sft-trace-triage/SKILL.md")
 
     capture_contract = sub.add_parser(
         "capture-contract",
@@ -238,13 +266,28 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "doctor":
             value = diagnose()
+        elif args.command == "skill":
+            value = triage.export_skill(args.output)
         elif args.command == "dataset":
-            print("Selecting conversations and creating dataset...", file=sys.stderr)
-            value = curation.create_dataset(
-                workspace_id=args.workspace_id, project_id=args.project_id,
-                start_time=args.start_time, end_time=args.end_time, name=args.name,
-                filter=args.filter, limit=args.limit, seed=args.seed, output=args.output,
-            )
+            if args.dataset_command == "triage":
+                source = source_options(args.workspace_id, args.project_id, args.start_time, args.end_time,
+                                        filter=args.filter, limit=args.limit, seed=args.seed)
+                value = triage.run_triage(source, args.output_dir, config_path=args.config, runner_mode=args.runner,
+                                         dry_run=args.dry_run, confirm=args.confirm, concurrency=args.concurrency,
+                                         max_input_chars=args.max_input_chars, max_output_tokens=args.max_output_tokens, attempts=args.attempts)
+            elif args.triage_dir is not None:
+                if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output)) or args.seed != 42:
+                    raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")
+                value = triage.create_triaged_dataset(args.triage_dir, args.name, confirm=args.confirm)
+            else:
+                if not all((args.workspace_id, args.project_id, args.start_time, args.end_time)):
+                    raise PipelineError("dataset create requires workspace, project, start time, and end time, or --triage-dir")
+                print("Selecting conversations and creating dataset...", file=sys.stderr)
+                value = curation.create_dataset(
+                    workspace_id=args.workspace_id, project_id=args.project_id,
+                    start_time=args.start_time, end_time=args.end_time, name=args.name,
+                    filter=args.filter, limit=args.limit, seed=args.seed, output=args.output,
+                )
         elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(
                 args.workspace_id,
@@ -321,6 +364,8 @@ def main(argv: list[str] | None = None) -> None:
     except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
     print(json.dumps(value, indent=2, sort_keys=True))
+    if args.command == "dataset" and args.dataset_command == "triage" and value.get("status") == "incomplete":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

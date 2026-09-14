@@ -1,0 +1,6 @@
+{
+  "judges": [
+    {"name": "judge-1", "provider": "anthropic-gateway", "model": "claude-sonnet-5"}
+  ],
+  "rules": []
+}

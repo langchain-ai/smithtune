@@ -31,7 +31,7 @@ Install these companion tools for the operations you use:
 
 | Tool | Required for |
 | --- | --- |
-| [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Dataset creation, contract capture, and fetching data during preparation |
+| [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Trace selection, dataset creation, contract capture, and fetching data during preparation |
 | [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) | Fireworks deployment and undeployment |
 
 Follow their official installation/authentication instructions and ensure their
@@ -100,6 +100,110 @@ Recorded messages are preserved, including earlier turns and turns outside the f
 Existing dataset names are rejected. On failure, the receipt records confirmed imports and any
 pending write; inspect the partial dataset before rerunning. Imports are not automatically retried.
 This command requires current LangSmith run-query and thread-import APIs.
+
+## Select SFT traces with model judges
+
+Use `dataset triage` to label traces before creating the training dataset.
+A judge is a model that checks recorded behavior against the selection rules.
+Each trace gets `keep: 1` or `keep: 0`, a completion status, reasons, and evidence.
+This checks the training examples; `evaluate` checks the trained model.
+
+First download and save the source evidence without calling a judge:
+
+```bash
+smithtune dataset triage \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --limit 100 --output-dir data/triage --dry-run
+```
+
+Review `data/triage/plan.json`. Then repeat the same command with `--confirm`
+in place of `--dry-run` to run paid judging. The default is one
+`claude-sonnet-5` judge through the Anthropic gateway. Use `--config judges.json`
+on both commands to set 1–16 named judge slots and optional rules:
+
+```json
+{
+  "judges": [
+    {"name": "judge-1", "provider": "anthropic-gateway", "model": "claude-sonnet-5"},
+    {"name": "judge-2", "provider": "anthropic-gateway", "model": "claude-sonnet-5"},
+    {"name": "judge-3", "provider": "anthropic-gateway", "model": "claude-sonnet-5"}
+  ],
+  "rules": ["Drop answers that claim an action succeeded without evidence."]
+}
+```
+
+Each slot makes a fresh call for each trace. Slots can use the same model or
+different models. All slots must return a valid vote. A strict majority keeps
+the trace; ties drop it. An invalid or failed vote makes the label incomplete
+with `keep: 0`. It is not counted as a quality failure.
+
+| Judge provider | Credential | Endpoint |
+| --- | --- | --- |
+| `fireworks` | `FIREWORKS_API_KEY` | Official Fireworks inference API |
+| `openai` | `OPENAI_API_KEY` | Official OpenAI API |
+| `anthropic` | `SMITHTUNE_ANTHROPIC_API_KEY` | Official Anthropic API |
+| `anthropic-gateway` | `ANTHROPIC_API_KEY` or `ANTHROPIC_CUSTOM_HEADERS` | LangSmith Anthropic gateway |
+
+Use a model ID available to the selected provider. Direct Anthropic uses a
+separate variable to avoid sending the existing gateway key to another service.
+
+Selection and recovery:
+
+- The time window and `--filter` select root traces. `--limit` defaults to 100 roots, sampled with `--seed 42` before thread expansion.
+- Selected threads expand to all turns, including earlier turns outside the window. Every expanded trace is judged in its recorded context. Standalone traces are supported.
+- Messages and the full run tree are saved in `snapshot.json`. Missing pages, active traces, and unsupported message formats stop the snapshot before paid judging. Queries have a 1,000-page limit; thread expansion has a 10,000-trace limit.
+- Evidence is treated as data. Judges cannot execute recorded tools. Quotes must match an actual message or run.
+- Default limits are 4 concurrent tasks, 3 attempts per task, 200,000 input characters, and 4,096 output tokens. Use `--concurrency`, `--attempts`, `--max-input-chars`, and `--max-output-tokens` to change them. Input includes the rubric and full evidence; it is never shortened to fit.
+- Read `summary.json`, `report.md`, `labels.jsonl`, and `judgments.jsonl`. The summary includes the number of eligible training conversations. An incomplete run prints its summary and exits with status 1.
+- Repeat the same command and output directory to retry failed votes. Successful votes are reused. Source, rubric, model, runner, and input/output limits must match. Changed settings require a new output directory. One process can use the directory at a time.
+
+Create a dataset from the accepted saved conversations:
+
+```bash
+smithtune dataset create \
+  --triage-dir data/triage --name selected-sft --confirm
+```
+
+Only complete conversations whose **every trace passes** are eligible. This
+matters because preparation trains on all assistant messages in each example.
+One passing turn cannot admit a rejected turn from the same thread. Conversations
+with unsupported tool schemas are excluded and counted in the summary.
+
+The import uses the saved messages and tool schemas. It does not fetch the
+live source again. The returned dataset ID goes to `prepare` below. Preparation
+checks the saved message hash, even with `--no-fetch` or a global contract.
+Review `dataset-import.json` after a partial write; imports do not resume or
+repeat automatically. Other complete conversations can be imported while some
+labels remain incomplete. Keep an independent test set for model comparisons.
+
+### Deep Agents and the portable skill
+
+The default `--runner api` needs no agent runtime. Install the optional
+[Deep Agents](https://github.com/langchain-ai/deepagents) extra to use
+`--runner deepagent` on both triage commands:
+
+```bash
+uv tool install --upgrade --python 3.12 \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
+```
+
+Each judge task gets a fresh Deep Agent and the packaged selection skill.
+The agent can only read the supplied skill files in memory. It cannot run
+commands, write files, fetch more data, or delegate. Automatic summarization is
+disabled: an input that exceeds the provider's context limit fails the vote.
+Each attempt is limited to 12 graph steps; agent judging can cost more than one
+direct model call.
+
+Any agent that can run the CLI can use the same portable skill:
+
+```bash
+smithtune skill export --output ./skills
+```
+
+This writes `skills/sft-trace-triage/SKILL.md`, the judge rubric, and an example
+config. Point your agent at that directory or use its normal skill loader.
+The skill uses the CLI for fetching, labels, resume, and dataset creation.
 
 ## Prepare data
 

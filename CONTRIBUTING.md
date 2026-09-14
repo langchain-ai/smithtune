@@ -11,6 +11,19 @@ uv run --no-sync pytest
 uv run --no-sync ruff check
 ```
 
+For the optional Deep Agents judge runner:
+
+```bash
+sfw uv sync --locked --extra test --extra deepagents --python 3.12
+uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage.py
+```
+
+Deep Agents and its OpenAI adapter are pinned in the optional `deepagents` extra.
+Tests use the actual agent graph with a deterministic local model. They check
+skill loading, fresh task state, read-only tools, and full evidence retention.
+Provider transport tests replace HTTP requests at the service boundary; no
+test uses paid inference or creates a live deployment.
+
 `sfw` is used for contributor dependency installation. It is not a smithtune runtime
 prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.
@@ -54,6 +67,9 @@ python scripts/check_dist.py
 This builds smithtune's wheel and source distribution, installs dependencies from
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
+The default wheel is tested first, then the optional Deep Agents extra. Both
+distributions must include the portable skill and support `skill export` outside
+the checkout.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves
