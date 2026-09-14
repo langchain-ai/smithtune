@@ -140,6 +140,21 @@ smithtune prepare \
 its compatible tokenizer and rendering implementation automatically. The legacy
 `--model-profile` option is also accepted; one model selector is required.
 
+List the models supported by your installed version of smithtune:
+
+```bash
+smithtune models list --provider baseten
+smithtune models list --provider fireworks
+smithtune models list  # both providers
+```
+
+The command returns JSON with each model's `provider`, `alias`, `model_id`, and
+`training_context_limit` in tokens. Pass an `alias` or `model_id` to
+`prepare --provider … --model …`. It reads smithtune's local support registry,
+requires no credentials or downloads, and does not query the providers' full
+catalogs. `live_availability_checked` is `false`; preparation and training check
+current provider availability separately.
+
 | Provider | Model alias | Provider model ID | Training context limit |
 | --- | --- | --- | --- |
 | Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 131,072 |

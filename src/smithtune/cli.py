@@ -14,8 +14,16 @@ from smithtune import dataset
 from smithtune import curation
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
-from smithtune.providers.baseten import BasetenRuntimeError, BasetenSFTSettings
-from smithtune.providers.fireworks import FireworksProvider, SFTSettings as FireworksSFTSettings
+from smithtune.providers.baseten import (
+    MODEL_SPECS as BASETEN_MODEL_SPECS,
+    BasetenRuntimeError,
+    BasetenSFTSettings,
+)
+from smithtune.providers.fireworks import (
+    MODEL_SPECS as FIREWORKS_MODEL_SPECS,
+    FireworksProvider,
+    SFTSettings as FireworksSFTSettings,
+)
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers import PROVIDERS, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
@@ -29,6 +37,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {get_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="report installed dependencies and configuration without network calls")
+
+    models = sub.add_parser("models", help="show supported training models")
+    models_sub = models.add_subparsers(dest="models_command", required=True)
+    models_list = models_sub.add_parser(
+        "list", help="list smithtune's supported models without network calls",
+        description="List smithtune's supported training models as JSON. No credentials or downloads are needed; live provider availability is checked during prepare and train.",
+    )
+    models_list.add_argument(
+        "--provider", choices=tuple(PROVIDERS), help="filter by provider (default: both providers)",
+    )
 
     curate = sub.add_parser("dataset", help="create a conversation trajectory dataset from project filters")
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
@@ -240,6 +258,23 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "doctor":
             value = diagnose()
+        elif args.command == "models":
+            profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
+            value = {
+                "source": "smithtune_support_registry",
+                "live_availability_checked": False,
+                "models": [
+                    {
+                        "provider": provider,
+                        "alias": alias,
+                        "model_id": model.base_model,
+                        "training_context_limit": model.training_context_limit,
+                    }
+                    for provider, specs in sorted(profiles.items())
+                    if args.provider is None or args.provider == provider
+                    for alias, model in sorted(specs.items())
+                ],
+            }
         elif args.command == "dataset":
             print("Selecting conversations and creating dataset...", file=sys.stderr)
             value = curation.create_dataset(
