@@ -7,7 +7,9 @@ import argparse
 import json
 import subprocess
 import sys
+import uuid
 from dataclasses import fields
+from datetime import UTC, datetime
 from pathlib import Path
 
 from smithtune import dataset
@@ -101,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
         help="training provider (default: %(default)s)",
     )
     plan.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
-    plan.add_argument("--run-id", default="langsmith-sft")
+    plan.add_argument("--run-id", default="langsmith-sft", help="label for this preview (default: %(default)s); not reserved for training")
 
     training = sub.add_parser("train", help="run paid serverless SFT after plan approval")
     training.add_argument(
@@ -109,8 +111,8 @@ def _parser() -> argparse.ArgumentParser:
         help="training provider (default: %(default)s)",
     )
     training.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
-    training.add_argument("--run-dir", type=Path, required=True)
-    training.add_argument("--run-id", required=True)
+    training.add_argument("--run-dir", type=Path, help="output directory (default: ./runs/<run-id>); must be new or empty")
+    training.add_argument("--run-id", help="run name (default: generated from the UTC timestamp and a random suffix)")
     training.add_argument("--init-from-checkpoint")
     training.add_argument("--confirm", action="store_true")
 
@@ -301,14 +303,24 @@ def main(argv: list[str] | None = None) -> None:
             value = provider.plan(args.data_dir, args.run_id, _settings_from_args(args))
         elif args.command == "train":
             provider = get_provider(args.provider)
-            value = provider.train(
+            run_id = args.run_id
+            if run_id is None:
+                run_id = f"sft-{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:12]}"
+            run_dir = args.run_dir
+            if run_dir is None:
+                if run_id in {"", ".", ".."} or "/" in run_id or "\\" in run_id:
+                    raise PipelineError("run ID must be a single directory name when --run-dir is omitted")
+                run_dir = Path.cwd() / "runs" / run_id
+            print(f"Run ID: {run_id}\nRun directory: {run_dir.resolve()}", file=sys.stderr)
+            result = provider.train(
                 args.data_dir,
-                args.run_dir,
-                args.run_id,
+                run_dir,
+                run_id,
                 _settings_from_args(args),
                 confirm=args.confirm,
                 init_from_checkpoint=args.init_from_checkpoint,
             )
+            value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
         elif args.command == "promote":
             FireworksProvider().promote(args.run_dir, args.output_model_id, confirm=args.confirm)
             value = {"status": "promoted", "output_model_id": args.output_model_id}

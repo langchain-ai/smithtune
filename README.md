@@ -127,7 +127,6 @@ Choose a provider and model, then prepare your dataset:
 
 ```bash
 provider=fireworks # or baseten
-run_id=my-sft
 
 smithtune prepare \
   --provider "$provider" \
@@ -235,18 +234,24 @@ remains available to create a global contract from a sample thread.
 Review the plan before running `train`. Training is billed by the provider and requires `--confirm`.
 
 ```bash
-smithtune plan --provider "$provider" --run-id "$run_id"
+smithtune plan --provider "$provider"
 ```
 
 ```bash
 smithtune train \
   --provider "$provider" \
-  --run-id "$run_id" \
-  --run-dir "runs/$run_id" \
   --confirm
 ```
 
-The best checkpoint is selected by validation loss and recorded in `runs/$run_id/result.json`.
+Training generates a run ID such as `sft-20260914-213000-a1b2c3d4e5f6` and writes
+artifacts to `./runs/<run-id>`. It prints the ID and output directory before
+training starts and includes `run_id` and `run_dir` in the final JSON output.
+Use `--run-id my-sft` to choose a name, `--run-dir ./my-output` to choose a folder,
+or both. The output directory must be new or empty. A plan is a preview and does
+not reserve a run ID or save settings for training; repeat any customized
+training settings on both commands.
+
+The best checkpoint is selected by validation loss and recorded in `<run-dir>/result.json`.
 Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
@@ -257,14 +262,16 @@ Promote the selected checkpoint, then deploy it. The endpoint incurs charges unt
 
 ```bash
 account_id='<fireworks-account-id>'
+run_id='<run-id printed by train>'
+run_dir='<run-dir printed by train>'
 
 smithtune promote \
-  --run-dir "runs/$run_id" \
+  --run-dir "$run_dir" \
   --output-model-id "$run_id" \
   --confirm
 
 smithtune deploy \
-  --run-dir "runs/$run_id" \
+  --run-dir "$run_dir" \
   --account-id "$account_id" \
   --output-model-id "$run_id" \
   --deployment-id "$run_id" \
@@ -275,17 +282,17 @@ smithtune deploy \
 Review the replay cases, then evaluate with the gateway credentials above:
 
 ```bash
-smithtune eval-plan --output-dir "runs/$run_id/replay"
+smithtune eval-plan --output-dir "$run_dir/replay"
 ```
 
 ```bash
 smithtune evaluate \
-  --output-dir "runs/$run_id/replay" \
+  --output-dir "$run_dir/replay" \
   --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
   --confirm
 ```
 
-Results are saved to `runs/$run_id/replay/summary.json`. Replay scores agreement with recorded actions without executing tools.
+Results are saved to `<run-dir>/replay/summary.json`. Replay scores agreement with recorded actions without executing tools.
 Add `--base-model '<deployed-base-model-route>'` for a before/after comparison. Reuse the output directory to resume an interrupted evaluation.
 
 Remove the endpoint when finished to stop deployment billing:

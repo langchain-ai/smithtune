@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -63,7 +64,7 @@ def test_provider_aware_commands_default_to_fireworks_and_accept_baseten(monkeyp
         ["prepare", "--model", "qwen3p8-27b", "--workspace-id", "workspace-id", "--dataset-id", "dataset-id"]
     )
     default_plan = parser.parse_args(["plan"])
-    default_train = parser.parse_args(["train", "--run-dir", "run", "--run-id", "run-id"])
+    default_train = parser.parse_args(["train"])
     baseten_plan = parser.parse_args(["plan", "--provider", "baseten"])
 
     assert default_prepare.provider == "fireworks"
@@ -214,15 +215,16 @@ def test_training_provider_registry_returns_adapters():
 
 
 @pytest.mark.parametrize("provider", ["fireworks", "baseten"])
-def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider):
+@pytest.mark.parametrize("explicit_paths", [False, True])
+def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider, explicit_paths):
     run_dir = tmp_path / "run"
+    extras = ["--run-dir", str(run_dir), "--run-id", "no-provision"] if explicit_paths else []
     result = subprocess.run(
         [
             sys.executable, "-m", "smithtune", "train", "--provider", provider,
-            "--data-dir", str(tmp_path / "missing"), "--run-dir", str(run_dir),
-            "--run-id", "no-provision",
+            "--data-dir", str(tmp_path / "missing"), *extras,
         ],
-        cwd=Path(pipeline.__file__).parent,
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         check=False,
@@ -231,6 +233,58 @@ def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider
     assert "--confirm" in result.stderr
     assert "Traceback" not in result.stderr
     assert not run_dir.exists()
+    assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("provider_name", ["fireworks", "baseten"])
+@pytest.mark.parametrize("run_id,run_dir", [(None, None), ("my-sft", None), (None, "output"), ("my-sft", "output")])
+def test_cli_training_generates_identity_and_preserves_overrides(
+    tmp_path, monkeypatch, capsys, provider_name, run_id, run_dir
+):
+    provider = get_provider(provider_name)
+    calls = []
+
+    def train(data_dir, output_dir, identity, settings, **kwargs):
+        calls.append((data_dir, output_dir, identity, kwargs))
+        return {"checkpoint": "saved-checkpoint"}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(provider, "train", train)
+    monkeypatch.setattr(pipeline, "get_provider", lambda name: provider)
+    argv = ["train", "--provider", provider_name, "--confirm"]
+    if run_id is not None:
+        argv.extend(["--run-id", run_id])
+    if run_dir is not None:
+        argv.extend(["--run-dir", run_dir])
+
+    identities = []
+    for _ in range(2):
+        pipeline.main(argv)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        data_dir, output_dir, identity, kwargs = calls[-1]
+        assert data_dir == tmp_path / "data"
+        assert kwargs == {"confirm": True, "init_from_checkpoint": None}
+        if run_id is None:
+            assert re.fullmatch(r"sft-\d{8}-\d{6}-[0-9a-f]{12}", identity)
+        else:
+            assert identity == run_id
+        assert output_dir == (Path(run_dir) if run_dir else tmp_path / "runs" / identity)
+        assert result == {"checkpoint": "saved-checkpoint", "run_id": identity, "run_dir": str(output_dir.resolve())}
+        assert f"Run ID: {identity}\nRun directory: {output_dir.resolve()}\n" == captured.err
+        identities.append(identity)
+    if run_id is None:
+        assert identities[0] != identities[1]
+
+
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../outside", "/absolute", "nested/name", "nested\\name"])
+def test_cli_training_rejects_path_ids_for_default_directory(tmp_path, monkeypatch, capsys, run_id):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        pipeline.main(["train", "--run-id", run_id, "--confirm"])
+    assert error.value.code == 2
+    assert "single directory name" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
 
 
 def test_baseten_runtime_errors_use_the_cli_error_path(tmp_path, monkeypatch, capsys):
