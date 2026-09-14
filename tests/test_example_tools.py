@@ -195,7 +195,7 @@ def test_replay_dispatches_matching_contracts_and_rejects_stale_results(tmp_path
     monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *args: (
         [{**case, "prompt_tokens": 10} for case in cases], [],
     ))
-    monkeypatch.setattr(evaluation, "calibrate_judge", lambda *args: [])
+    monkeypatch.setattr(evaluation, "calibrate_judge", lambda *args: [{"actual": True, "expected": True}])
     monkeypatch.setattr(evaluation, "judge_replay_candidate", lambda *args: {"pass": True, "reason": "ok"})
     requests = []
 

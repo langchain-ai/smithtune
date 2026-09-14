@@ -31,6 +31,8 @@ from smithtune.providers import PROVIDERS, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
+from smithtune.eval_deployment import EvalDeployment
+from smithtune.artifacts import _json_dump, output_lock
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -215,6 +217,12 @@ def _parser() -> argparse.ArgumentParser:
             help="optional cap; default evaluates every assistant turn",
         )
         command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
+        command.add_argument("--serving-mode", choices=("existing", "preemptible"), default="existing")
+        command.add_argument("--account-id", help="account owning the promoted model for temporary evaluation")
+        command.add_argument("--deployment-id", help="stable ID for the owned temporary deployment")
+        command.add_argument("--deployment-shape", help="compatible Fireworks deployment shape resource")
+        command.add_argument("--deployment-timeout", type=float, default=600, help="temporary deployment readiness timeout in seconds")
+    eval_plan.add_argument("--tuned-model", help="promoted model resource; required for preemptible mode")
     evaluation.add_argument("--tuned-model", required=True)
     evaluation.add_argument(
         "--base-model",
@@ -240,6 +248,19 @@ def _settings_from_args(args: argparse.Namespace) -> CommonSFTSettings:
         field.name: getattr(args, field.name) for field in fields(TrainingOptions)
     })
     return get_provider(args.provider).settings_from_options(options)
+
+
+def _eval_deployment(args) -> EvalDeployment | None:
+    fields = (args.account_id, args.deployment_id, args.deployment_shape)
+    if args.serving_mode == "existing":
+        if any(fields) or args.deployment_timeout != 600:
+            raise PipelineError("deployment options require --serving-mode preemptible")
+        return None
+    if not all(fields) or not args.tuned_model:
+        raise PipelineError("preemptible mode requires --tuned-model, --account-id, --deployment-id, and --deployment-shape")
+    config = EvalDeployment(args.tuned_model, *fields, timeout=args.deployment_timeout)
+    config.validate()
+    return config
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -334,12 +355,17 @@ def main(argv: list[str] | None = None) -> None:
                 confirm=args.confirm,
             )
         elif args.command == "eval-plan":
-            value = replay_evaluation.prepare_replay_evaluation(
-                args.data_dir,
-                args.output_dir,
-                args.max_points_per_trajectory,
-                args.max_output_tokens,
-            )
+            serving = _eval_deployment(args)
+            with output_lock(args.output_dir):
+                value = replay_evaluation.prepare_replay_evaluation(
+                    args.data_dir,
+                    args.output_dir,
+                    args.max_points_per_trajectory,
+                    args.max_output_tokens,
+                )
+                if serving:
+                    value["deployment"] = serving.plan()
+                    _json_dump(args.output_dir / "plan.json", value)
         elif args.command == "evaluate":
             value = replay_evaluation.run_replay_evaluation(
                 args.data_dir,
@@ -351,6 +377,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_points_per_trajectory=args.max_points_per_trajectory,
                 max_output_tokens=args.max_output_tokens,
                 confirm=args.confirm,
+                deployment=_eval_deployment(args),
             )
         else:
             FireworksProvider().undeploy(args.account_id, args.deployment_id, confirm=args.confirm)

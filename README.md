@@ -40,6 +40,10 @@ Configure credentials in your environment:
 | Baseten preparation and training | `BASETEN_API_KEY` |
 | Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
 
+Fireworks calls use `https://api.fireworks.ai` for training and deployment control,
+and `https://api.fireworks.ai/inference/v1` for inference. Temporary evaluation
+uses the REST API directly and does not require `firectl`; manual cleanup does.
+
 ## Using with a coding agent
 
 Give your agent this prompt, replacing the placeholders:
@@ -156,9 +160,12 @@ Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json`
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
-## Deploy and evaluate (Fireworks)
+## Evaluate a trained model (Fireworks)
 
-Promote the selected checkpoint, then deploy it. The endpoint incurs charges until removed.
+Promote the selected checkpoint, then evaluate it with temporary preemptible
+capacity. Preemptible capacity borrows idle GPUs and can disappear during a run.
+It does not reserve dedicated production GPUs. See
+[Fireworks evaluation paths](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models).
 
 ```bash
 account_id='<fireworks-account-id>'
@@ -170,30 +177,76 @@ smithtune promote \
   --output-model-id "$run_id" \
   --confirm
 
-smithtune deploy \
-  --run-dir "$run_dir" \
-  --account-id "$account_id" \
-  --output-model-id "$run_id" \
-  --deployment-id "$run_id" \
-  --deployment-shape '<compatible-fireworks-shape>' \
-  --confirm
+eval_shape='<full-compatible-fireworks-deployment-shape-resource>'
 ```
 
-Review the replay cases, then evaluate with the gateway credentials above:
+Use a shape compatible with the promoted model, in the form
+`accounts/<account>/deploymentShapes/<shape>` (optionally with `/versions/<version>`).
+Review the replay cases and capacity plan:
 
 ```bash
-smithtune eval-plan --output-dir "$run_dir/replay"
+smithtune eval-plan \
+  --output-dir "$run_dir/replay" \
+  --tuned-model "accounts/$account_id/models/$run_id" \
+  --serving-mode preemptible --account-id "$account_id" \
+  --deployment-id "$run_id-eval" --deployment-shape "$eval_shape"
 ```
+
+Run with the same settings. The CLI calibrates the judge, creates one
+preemptible replica, waits for readiness, scores the held-out cases, and deletes
+its temporary deployment:
 
 ```bash
 smithtune evaluate \
   --output-dir "$run_dir/replay" \
-  --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
+  --tuned-model "accounts/$account_id/models/$run_id" \
+  --serving-mode preemptible --account-id "$account_id" \
+  --deployment-id "$run_id-eval" --deployment-shape "$eval_shape" \
   --confirm
 ```
 
 Results are saved to `<run-dir>/replay/summary.json`. Replay scores agreement with recorded actions without executing tools.
-Add `--base-model '<deployed-base-model-route>'` for a before/after comparison. Reuse the output directory to resume an interrupted evaluation.
+Add `--base-model '<deployed-base-model-route>'` for a before/after comparison.
+The base route must already be available; the temporary deployment serves only
+the tuned model. Model and judge inference use current provider rates.
+
+The default readiness timeout is 600 seconds; use `--deployment-timeout` to
+change it. Capacity loss leaves the evaluation interrupted, rather than scoring
+a model failure. Repeat the command with the same settings and output directory
+to finish missing cases. Completed cases are retained. Completed runs do not
+repeat inference, but still check deployment cleanup.
+
+Ownership and cleanup are recorded in `deployments/<deployment-id>.json` under
+the evaluation directory. The CLI refuses to use or delete an unrelated
+deployment. It attempts cleanup after success, failure, or a keyboard interrupt.
+A killed process or failed API request can leave capacity behind. The receipt
+contains the exact `smithtune undeploy ... --confirm` recovery command; a cleanup
+failure is reported as an error. Inspect that receipt before deleting capacity.
+
+This mode requires a promoted model ID. It does not open an in-session sampling
+client from an active training checkpoint.
+
+### Existing or production deployments
+
+Use `deploy` to keep an on-demand endpoint for production or repeated use:
+
+```bash
+smithtune deploy \
+  --run-dir "$run_dir" --account-id "$account_id" \
+  --output-model-id "$run_id" --deployment-id "$run_id" \
+  --deployment-shape "$eval_shape" --confirm
+```
+
+To evaluate a route that is already serving, omit `--serving-mode` (its default
+is `existing`) and all temporary deployment flags:
+
+```bash
+smithtune eval-plan --output-dir "$run_dir/existing-replay"
+smithtune evaluate \
+  --output-dir "$run_dir/existing-replay" \
+  --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
+  --confirm
+```
 
 Remove the endpoint when finished to stop deployment billing:
 
