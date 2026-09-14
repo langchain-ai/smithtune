@@ -15,7 +15,6 @@ smithtune doctor
 smithtune --help
 ```
 
-These commands require the CLI packaging changes to be merged into `main`.
 For an existing local checkout, see [Contributing](CONTRIBUTING.md).
 
 uv manages an isolated environment and can provision Python 3.12. No repository
@@ -54,6 +53,27 @@ Configure credentials in your environment:
 | Fireworks training and inference | `FIREWORKS_API_KEY` |
 | Baseten training | `BASETEN_API_KEY` |
 | Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
+
+## Using with a coding agent
+
+Agents working in this checkout can use [AGENTS.md](AGENTS.md); Claude loads the
+same guidance through `CLAUDE.md`.
+
+Give your agent the following prompt, replacing the placeholders:
+
+```text
+Help me use smithtune for this task: <desired outcome and provider>.
+My starting point is <tracing project, trajectory dataset, or prepared data>,
+with these source IDs or paths: <workspace/project/dataset IDs or data directory>.
+
+Read the operating guidance and workflow documentation:
+https://github.com/langchain-ai/smithtune/blob/main/AGENTS.md
+https://github.com/langchain-ai/smithtune/blob/main/README.md
+
+Check setup with smithtune doctor and the relevant command's --help, then
+start from the data I already have. Ask for any missing source information.
+Use the documented workflow and keep paid operations within what I authorize.
+```
 
 ## Create a dataset from conversations
 
