@@ -27,7 +27,7 @@ Repository = "https://github.com/langchain-ai/smithtune"
 Issues = "https://github.com/langchain-ai/smithtune/issues"
 
 [project.optional-dependencies]
-test = ["pytest==9.1.1"]
+test = ["pytest==9.1.1", "ruff==0.14.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -36,3 +36,23 @@ include = ["smithtune*"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Lint only; the codebase does not follow `ruff format` and CI does not enforce it.
+select = ["E", "F", "W", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "E501",   # long lines are accepted throughout
+  "SIM102", # nested if
+  "SIM105", # try/except/pass instead of contextlib.suppress
+  "SIM108", # if/else instead of ternary
+  "RUF001", # ambiguous unicode in strings (tests use × deliberately)
+  "RUF002",
+  "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests pass regular expressions to pytest.raises(match=...) on purpose.
+"tests/*" = ["RUF043"]

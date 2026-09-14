@@ -21,7 +21,7 @@ class FakeModelInput:
         self._values = values
 
     @classmethod
-    def from_ints(cls, values: list[int]) -> "FakeModelInput":
+    def from_ints(cls, values: list[int]) -> FakeModelInput:
         return cls(values)
 
     def to_ints(self) -> list[int]:
@@ -1762,7 +1762,8 @@ def _install_renderer_output(monkeypatch: pytest.MonkeyPatch, tokens=None, weigh
     import training.utils
 
     if render is None:
-        render = lambda *args, **kwargs: SimpleNamespace(token_ids=tokens, token_weights=weights)
+        def render(*args, **kwargs):
+            return SimpleNamespace(token_ids=tokens, token_weights=weights)
     monkeypatch.setattr(training.utils, "render_messages_to_datums", render)
 
 

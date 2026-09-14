@@ -26,6 +26,8 @@ jobs:
           mode: firewall-free
       - name: Install contributor dependencies
         run: sfw uv sync --locked --extra test --python 3.12
+      - name: Lint
+        run: uv run --no-sync ruff check
       - name: Test installed wheels and rebuilt source distributions
         run: python scripts/check_dist.py
       - uses: actions/upload-artifact@v4
