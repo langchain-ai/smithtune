@@ -64,7 +64,7 @@ smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
+  --filter 'feedback.correctness.score:>=0.9'
 ```
 
 The command filters trace root runs, deduplicates their threads, and imports one complete
