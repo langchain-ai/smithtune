@@ -112,7 +112,7 @@ automatically and select the appropriate tokenizer and formatting.
 
 | Provider | Model alias | Provider model ID | Training context limit |
 | --- | --- | --- | --- |
-| Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 131,072 |
+| Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 262,144 |
 | Baseten Loops | `kimi-k3` | `moonshotai/Kimi-K3` | 131,072 |
 | Baseten Loops | `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | 131,072 |
 | Baseten Loops | `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | 131,072 |

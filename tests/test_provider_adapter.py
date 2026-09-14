@@ -95,7 +95,7 @@ def test_baseten_resolves_qwen_profile(monkeypatch):
     assert model.tokenizer_model == "Qwen/Qwen3.8-27B"
     assert model.tokenizer_revision == "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
     assert model.renderer == "hf_assistant"
-    assert model.max_seq_len == 131_072
+    assert model.max_seq_len == 262_144
 
 
 def test_provider_specific_training_options_are_rejected(monkeypatch):
@@ -129,7 +129,7 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
 
     def baseten_capability(model, length):
         capability_calls.append((model, length))
-        return baseten.BasetenModelCapability(model, 131_072)
+        return baseten.BasetenModelCapability(model, 262_144)
 
     monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", fireworks_capability)
     monkeypatch.setattr(baseten, "fetch_model_capability", baseten_capability)
@@ -167,7 +167,7 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
         "renderer": adapter_module.DEFAULT_MODEL.renderer,
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
     }
-    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, 131_072)]
+    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, adapter_module.DEFAULT_MODEL.training_context_limit)]
     assert manifest["split"]["train"] == train_rows
     assert manifest["split"]["validation"] == 10
     assert manifest["split"]["test"] == test_rows

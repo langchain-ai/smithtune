@@ -37,7 +37,7 @@ def test_legacy_baseten_profile_restores_its_configured_trainer_limit():
     }
     resolved = resolve_prepared_model(manifest, baseten.MODEL_SPECS, provider="baseten")
     assert resolved == baseten.DEFAULT_MODEL
-    assert resolved.training_context_limit == 131_072
+    assert resolved.training_context_limit == 262_144
 
 
 @pytest.mark.parametrize("stage", ["preparation", "baseten_training"])
