@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from collections.abc import Iterable
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -17,16 +21,58 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@contextmanager
+def output_lock(directory: Path):
+    """Prevent concurrent CLI runs from replacing each other's receipts and votes."""
+    import fcntl
+
+    directory.mkdir(parents=True, exist_ok=True)
+    # Keep the inode: unlinking this file can let a third process bypass the lock.
+    with (directory / ".smithtune.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PipelineError(f"another smithtune operation is using {directory}") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def exclusive_output(argument: str):
+    def decorate(function):
+        parameters = signature(function)
+
+        @wraps(function)
+        def locked(*args, **kwargs):
+            directory = parameters.bind(*args, **kwargs).arguments[argument]
+            with output_lock(directory):
+                return function(*args, **kwargs)
+
+        return locked
+    return decorate
+
+
 def _json_dump(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def _jsonl_dump(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    _atomic_text(path, "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows))
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    """An interrupted write must leave the previous complete artifact readable."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _load_json(path: Path) -> Any:

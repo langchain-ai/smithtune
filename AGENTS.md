@@ -28,12 +28,13 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Paid training, evaluation, and deployment must be within the user's authorized scope. Honor authorization already given; obtain it before adding `--confirm` for an operation that has not been authorized.
 - Use credentials through environment variables; keep their values out of messages, logs, and committed files.
 - Report any provisioned deployment and its cleanup command; deployment charges continue until it is removed.
+- For a promoted Fireworks model, prefer `eval-plan` and `evaluate --serving-mode preemptible` for temporary evaluation. Use the same model, account, shape, deployment ID, and limits on resume. Check the deployment receipt after an interruption or cleanup failure. This path uses the official Fireworks REST API.
 
 ## Preserve the data behavior
 
 - Dataset creation imports whole conversations, including earlier turns and turns outside the selection window.
 - Preparation preserves recorded messages and gathers each example's tool union from all its source LLM runs. Automatic capture is the normal path; a global inference contract is an explicit override.
-- Provider built-ins and conflicting definitions of the same tool within an example fail preparation, even when the tools were not called.
+- Preparation combines optional top-level tool arguments when shared arguments and other schema fields match. The expanded definition applies to the whole example. Provider built-ins and incompatible definitions still fail, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.
 - Fireworks supports deployment and replay evaluation; Baseten currently produces training checkpoints. Replay compares responses against recorded context without executing tools.
 

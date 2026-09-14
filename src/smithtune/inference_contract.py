@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema.exceptions import SchemaError
-from jsonschema.validators import validator_for
+from jsonschema.validators import Draft3Validator, validator_for
 
 
 class ContractError(ValueError):
@@ -356,6 +356,57 @@ def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str,
     }
 
 
+def _has_schema_reference(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(key in value for key in ("$ref", "$dynamicRef", "$recursiveRef")) or any(
+            _has_schema_reference(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_has_schema_reference(item) for item in value)
+    return False
+
+
+def _merge_optional_arguments(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    """Union optional top-level properties without reconciling other schema changes."""
+    left_function, right_function = left["function"], right["function"]
+    if json_sha256({key: value for key, value in left.items() if key != "function"}) != json_sha256({
+        key: value for key, value in right.items() if key != "function"
+    }) or json_sha256({key: value for key, value in left_function.items() if key != "parameters"}) != json_sha256({
+        key: value for key, value in right_function.items() if key != "parameters"
+    }):
+        return None
+    first, second = left_function["parameters"], right_function["parameters"]
+    # Composition, dependencies, property-count limits, and schema references can
+    # make a property addition change constraints on other arguments.
+    allowed = {"type", "properties", "required", "additionalProperties", "title", "description", "$schema"}
+    for schema in (first, second):
+        if (
+            schema.get("type") != "object" or set(schema) - allowed
+            or validator_for(schema) is Draft3Validator
+            or not isinstance(schema.get("properties", {}), Mapping)
+            or not isinstance(schema.get("additionalProperties", True), bool)
+            or _has_schema_reference(schema)
+        ):
+            return None
+    if {key: value for key, value in first.items() if key != "properties"} != {
+        key: value for key, value in second.items() if key != "properties"
+    }:
+        return None
+    first_properties, second_properties = first.get("properties", {}), second.get("properties", {})
+    changed_names = first_properties.keys() ^ second_properties.keys()
+    if not changed_names or changed_names.intersection(first.get("required", [])):
+        return None
+    if any(json_sha256(first_properties[name]) != json_sha256(second_properties[name])
+           for name in first_properties.keys() & second_properties.keys()):
+        return None
+    merged = copy.deepcopy(left)
+    properties = {**first_properties, **second_properties}
+    merged["function"]["parameters"]["properties"] = {
+        name: copy.deepcopy(properties[name]) for name in sorted(properties)
+    }
+    return merged
+
+
 def contract_from_runs(
     runs: Sequence[Mapping[str, Any]], *, workspace_id: str,
     source_run_id: str | None = None, thread_id: str | None = None,
@@ -389,10 +440,13 @@ def contract_from_runs(
             raise ContractError(f"run {run_id}: {exc}") from exc
         for tool in captured:
             name = tool["function"]["name"]
-            if name in tools and tools[name] != tool:
-                raise ContractError(
-                    f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
-                )
+            if name in tools and json_sha256(tools[name]) != json_sha256(tool):
+                merged = _merge_optional_arguments(tools[name], tool)
+                if merged is None:
+                    raise ContractError(
+                        f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
+                    )
+                tool = merged
             tools[name] = tool
             tool_sources[name] = run_id
     if source_run_id is None:

@@ -10,7 +10,7 @@ import pytest
 from smithtune import dataset
 from smithtune import evaluation
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_jsonl
-from smithtune.inference_contract import contract_from_runs, json_sha256
+from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256
 from smithtune.providers import fireworks
 from smithtune.providers.base import PipelineError
 from test_tool_capture import llm, tool, page
@@ -195,7 +195,7 @@ def test_replay_dispatches_matching_contracts_and_rejects_stale_results(tmp_path
     monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *args: (
         [{**case, "prompt_tokens": 10} for case in cases], [],
     ))
-    monkeypatch.setattr(evaluation, "calibrate_judge", lambda *args: [])
+    monkeypatch.setattr(evaluation, "calibrate_judge", lambda *args: [{"actual": True, "expected": True}])
     monkeypatch.setattr(evaluation, "judge_replay_candidate", lambda *args: {"pass": True, "reason": "ok"})
     requests = []
 
@@ -274,3 +274,106 @@ def test_same_tool_name_may_differ_between_examples_but_not_within_one():
     runner, _ = source_runner({("project-1", "thread-1"): [llm("run-1", [tool("weather")]), llm("run-2", [changed])]})
     with pytest.raises(PipelineError, match="example example-1.*weather.*conflicting definitions.*run-1.*run-2"):
         dataset.capture_example_contracts("workspace-id", [example(1)], runner=runner)
+
+
+@pytest.mark.parametrize("expanded_first", [False, True])
+@pytest.mark.parametrize("additional_properties", [None, False, True])
+def test_optional_tool_argument_expansion_preserves_unused_tools(expanded_first, additional_properties):
+    original = tool("list_threads")
+    parameters = original["function"]["parameters"]
+    parameters["required"] = ["query"]
+    if additional_properties is not None:
+        parameters["additionalProperties"] = additional_properties
+    expanded = copy.deepcopy(original)
+    expanded["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
+    definitions = [expanded, original] if expanded_first else [original, expanded]
+    runs = [llm(f"run-{i}", [definition]) for i, definition in enumerate(definitions)]
+    before = copy.deepcopy(runs)
+    runner, _ = source_runner({("project-1", "thread-1"): runs})
+    examples = [example(1)]  # No tool calls in the conversation.
+    contracts = dataset.capture_example_contracts("workspace-id", examples, runner=runner)
+    rows = dataset.prepare_sft_rows(examples, example_contracts=contracts)
+    assert rows[0]["tools"] == [expanded]
+    assert runs == before
+    assert contracts["example-1"].tools_sha256 == json_sha256([expanded])
+
+
+def test_optional_arguments_are_combined_across_multiple_snapshots():
+    base = tool("list_threads")
+    admin = copy.deepcopy(base)
+    admin["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
+    limit = copy.deepcopy(base)
+    limit["function"]["parameters"]["properties"]["limit"] = {"type": "integer"}
+    merged = contract_from_runs([llm("a", [admin]), llm("b", [limit]), llm("c", [base])], workspace_id="workspace")
+    assert merged["tools"][0]["function"]["parameters"]["properties"] == {
+        "query": {"type": "string"}, "admin_threads": {"type": ["boolean", "null"]}, "limit": {"type": "integer"},
+    }
+    reversed_merge = contract_from_runs([llm("a", [limit]), llm("b", [base]), llm("c", [admin])], workspace_id="workspace")
+    assert merged["contract_sha256"] == reversed_merge["contract_sha256"]
+
+
+@pytest.mark.parametrize("change", ["required", "existing_type", "nested", "description", "additional_properties"])
+def test_optional_expansion_still_rejects_incompatible_changes(change):
+    base = tool("list_threads")
+    base["function"]["parameters"]["properties"]["filters"] = {"type": "object", "properties": {}}
+    expanded = copy.deepcopy(base)
+    parameters = expanded["function"]["parameters"]
+    parameters["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
+    if change == "required":
+        parameters["required"] = ["admin_threads"]
+    elif change == "existing_type":
+        parameters["properties"]["query"]["type"] = "integer"
+    elif change == "nested":
+        parameters["properties"]["filters"]["properties"]["new"] = {"type": "string"}
+    elif change == "description":
+        expanded["function"]["description"] = "Different behavior"
+    else:
+        parameters["additionalProperties"] = False
+    with pytest.raises(ContractError, match="list_threads.*conflicting definitions.*a.*b"):
+        contract_from_runs([llm("a", [base]), llm("b", [expanded])], workspace_id="workspace")
+
+
+@pytest.mark.parametrize("constraint", [
+    {"maxProperties": 1}, {"anyOf": [{"required": ["query"]}]},
+    {"dependentRequired": {"query": ["admin_threads"]}},
+    {"additionalProperties": {"type": "string"}}, {"required": ["admin_threads"]},
+])
+def test_optional_expansion_rejects_interacting_root_constraints(constraint):
+    base = tool("list_threads")
+    base["function"]["parameters"].update(constraint)
+    expanded = copy.deepcopy(base)
+    expanded["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
+    with pytest.raises(ContractError, match="conflicting definitions"):
+        contract_from_runs([llm("a", [base]), llm("b", [expanded])], workspace_id="workspace")
+    # Unchanged complex schemas remain supported.
+    assert contract_from_runs([llm("a", [base]), llm("b", [base])], workspace_id="workspace")["tools"] == [base]
+
+
+def test_optional_expansion_rejects_schema_references():
+    base = tool("list_threads")
+    base["function"]["parameters"]["properties"]["query"] = {"$ref": "#/properties/admin_threads"}
+    expanded = copy.deepcopy(base)
+    expanded["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
+    with pytest.raises(ContractError, match="conflicting definitions"):
+        contract_from_runs([llm("a", [base]), llm("b", [expanded])], workspace_id="workspace")
+
+
+def test_optional_expansion_rejects_draft3_property_level_required():
+    base = tool("list_threads")
+    base["function"]["parameters"]["$schema"] = "http://json-schema.org/draft-03/schema#"
+    expanded = copy.deepcopy(base)
+    expanded["function"]["parameters"]["properties"]["admin_threads"] = {
+        "type": ["boolean", "null"], "required": True,
+    }
+    with pytest.raises(ContractError, match="conflicting definitions"):
+        contract_from_runs([llm("a", [base]), llm("b", [expanded])], workspace_id="workspace")
+
+
+def test_optional_expansion_distinguishes_boolean_and_numeric_constraints():
+    base = tool("list_threads")
+    base["function"]["parameters"]["properties"]["flag"] = {"const": True}
+    expanded = copy.deepcopy(base)
+    expanded["function"]["parameters"]["properties"]["flag"] = {"const": 1}
+    expanded["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
+    with pytest.raises(ContractError, match="conflicting definitions"):
+        contract_from_runs([llm("a", [base]), llm("b", [expanded])], workspace_id="workspace")
