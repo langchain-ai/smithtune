@@ -56,11 +56,10 @@ Configure credentials in your environment:
 
 ## Using with a coding agent
 
-Agents working in this checkout can use [AGENTS.md](AGENTS.md); Claude Code loads the
-same guidance through `CLAUDE.md`. Installing the CLI alone does not automatically
-load these repository instructions into an agent working in another project.
+Agents working in this checkout can use [AGENTS.md](AGENTS.md); Claude loads the
+same guidance through `CLAUDE.md`.
 
-Give that agent the following prompt, replacing the placeholders:
+Give your agent the following prompt, replacing the placeholders:
 
 ```text
 Help me use smithtune for this task: <desired outcome and provider>.
