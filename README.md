@@ -64,13 +64,14 @@ smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --filter 'feedback.correctness.score:>=0.9'
+  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
 
 The command filters trace root runs, deduplicates their threads, and imports one complete
 conversation per dataset example, entirely server-side. It prints the dataset ID for `prepare`.
 Recorded messages are preserved, including earlier turns and turns outside the filter window.
 
+- `--filter` accepts [LangSmith API filter expressions](https://docs.langchain.com/langsmith/trace-query-syntax). The example selects root runs with correctness feedback of at least 0.9.
 - The time window uses an inclusive start and exclusive end. Feedback, metadata, tag, and error filters apply to root runs.
 - All matching threads are included by default. Use `--limit 100` to sample up to 100 threads; `--seed` defaults to 42.
 - Roots without a thread ID are excluded and counted. If no threads match, no dataset is created.
@@ -124,23 +125,31 @@ remains available to create a global contract from a sample thread.
 
 ## Plan and train
 
-Review the plan before running `train`. Training is billed by the provider and requires `--confirm`.
+Save and review the plan before running `train`. Training is billed by the provider and requires `--confirm`.
 
 ```bash
-smithtune plan --provider "$provider" --run-id "$run_id"
+smithtune plan \
+  --provider "$provider" \
+  --run-id "$run_id" \
+  --output "plans/$run_id.json"
 ```
 
 ```bash
 smithtune train \
-  --provider "$provider" \
-  --run-id "$run_id" \
+  --plan "plans/$run_id.json" \
   --run-dir "runs/$run_id" \
   --confirm
 ```
 
+Set training options such as `--learning-rate` on `plan`; `train --plan` reuses the saved
+provider, dataset path, run ID, and settings. It rejects additional training settings and
+changes to the prepared data. To change settings or reprepare data, generate and review a new plan.
+Without `--output`, the plan is saved to `./plan.json`. Keep it outside the new or empty `--run-dir`.
+Direct training with `--provider`, `--run-id`, and training flags remains supported without `--plan`.
+
 The best checkpoint is selected by validation loss and recorded in `runs/$run_id/result.json`.
 Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
-Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
+Add `--init-from-checkpoint '<checkpoint-uri>'` to `plan` (or direct `train`) to initialize a new run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
 ## Deploy and evaluate (Fireworks)

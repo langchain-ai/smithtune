@@ -21,6 +21,16 @@ from smithtune.providers import PROVIDERS, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
+from smithtune.training_plan import load_training_plan, save_training_plan
+
+
+class _TrainingArgument(argparse.Action):
+    """Track explicit settings so saved-plan training cannot silently override them."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        specified = getattr(namespace, "training_arguments", ())
+        namespace.training_arguments = (*specified, "--" + self.dest.replace("_", "-"))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,7 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--name", required=True, help="name for the new LangSmith dataset")
     create.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
     create.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
-    create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
+    create.add_argument("--filter", help='LangSmith API filter expression on root runs, e.g. and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))')
     create.add_argument("--limit", type=int, help="sample at most this many distinct threads; default: all matches")
     create.add_argument("--seed", type=int, default=42, help="sampling seed (default: 42)")
     create.add_argument("--output", type=Path, help="selection file path; default: an automatic path under data/selections; import receipt saved alongside it")
@@ -87,23 +97,26 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached per-example tool schemas without querying LangSmith")
     prep.add_argument("--skip-render-check", action="store_true", help=argparse.SUPPRESS)
 
-    plan = sub.add_parser("plan", help="print the resolved training plan without provisioning resources")
+    plan = sub.add_parser("plan", help="save and print the resolved training plan without provisioning resources")
     plan.add_argument(
         "--provider", choices=tuple(PROVIDERS), default="fireworks",
         help="training provider (default: %(default)s)",
     )
     plan.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     plan.add_argument("--run-id", default="langsmith-sft")
+    plan.add_argument("--output", type=Path, default=project / "plan.json", help="saved plan path (default: ./plan.json); keep outside the training run directory")
+    plan.add_argument("--init-from-checkpoint", help="checkpoint to initialize the planned training run from")
 
     training = sub.add_parser("train", help="run paid serverless SFT after plan approval")
     training.add_argument(
-        "--provider", choices=tuple(PROVIDERS), default="fireworks",
+        "--provider", action=_TrainingArgument, choices=tuple(PROVIDERS), default="fireworks",
         help="training provider (default: %(default)s)",
     )
-    training.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
+    training.add_argument("--data-dir", action=_TrainingArgument, type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     training.add_argument("--run-dir", type=Path, required=True)
-    training.add_argument("--run-id", required=True)
-    training.add_argument("--init-from-checkpoint")
+    training.add_argument("--run-id", action=_TrainingArgument, help="required for direct training; read from --plan otherwise")
+    training.add_argument("--init-from-checkpoint", action=_TrainingArgument)
+    training.add_argument("--plan", type=Path, help="train using a saved plan; cannot be combined with provider, data, run ID, checkpoint, or training settings")
     training.add_argument("--confirm", action="store_true")
 
     common_defaults = CommonSFTSettings()
@@ -114,69 +127,69 @@ def _parser() -> argparse.ArgumentParser:
             "Shared training options", "Supported by both Fireworks and Baseten.",
         )
         shared.add_argument(
-            "--max-epochs", type=int, default=common_defaults.max_epochs,
+            "--max-epochs", action=_TrainingArgument, type=int, default=common_defaults.max_epochs,
             help="maximum training epochs (default: %(default)s)",
         )
         shared.add_argument(
-            "--early-stopping-patience", type=int, default=common_defaults.early_stopping_patience,
+            "--early-stopping-patience", action=_TrainingArgument, type=int, default=common_defaults.early_stopping_patience,
             help="epochs without sufficient validation improvement before stopping (default: %(default)s)",
         )
         shared.add_argument(
-            "--early-stopping-min-delta", type=float, default=common_defaults.early_stopping_min_delta,
+            "--early-stopping-min-delta", action=_TrainingArgument, type=float, default=common_defaults.early_stopping_min_delta,
             help="minimum validation-loss improvement (default: %(default)s)",
         )
         shared.add_argument(
-            "--learning-rate", type=float, default=common_defaults.learning_rate,
+            "--learning-rate", action=_TrainingArgument, type=float, default=common_defaults.learning_rate,
             help="optimizer learning rate (default: %(default)s)",
         )
         shared.add_argument(
-            "--batch-size", type=int, default=common_defaults.batch_size,
+            "--batch-size", action=_TrainingArgument, type=int, default=common_defaults.batch_size,
             help="training batch size; Baseten accumulates microbatches to this effective size (default: %(default)s)",
         )
         shared.add_argument(
-            "--seed", type=int, default=common_defaults.seed,
+            "--seed", action=_TrainingArgument, type=int, default=common_defaults.seed,
             help="training random seed (default: %(default)s)",
         )
         shared.add_argument(
-            "--lora-rank", type=int,
+            "--lora-rank", action=_TrainingArgument, type=int,
             help="LoRA rank for either provider (default: the prepared model profile's default_lora_rank)",
         )
         fireworks = command.add_argument_group(
             "Fireworks-only options", "Require --provider fireworks; rejected by Baseten.",
         )
         fireworks.add_argument(
-            "--lora-alpha", type=int,
+            "--lora-alpha", action=_TrainingArgument, type=int,
             help=f"LoRA scaling factor (default: {fireworks_defaults.lora_alpha})",
         )
         fireworks.add_argument(
-            "--pipeline-depth", type=int,
+            "--pipeline-depth", action=_TrainingArgument, type=int,
             help=f"training pipeline depth (default: {fireworks_defaults.pipeline_depth})",
         )
         baseten = command.add_argument_group(
             "Baseten-only options", "Require --provider baseten; rejected by Fireworks.",
         )
         baseten.add_argument(
-            "--microbatch-token-budget", type=int,
+            "--microbatch-token-budget", action=_TrainingArgument, type=int,
             help="token budget per microbatch (default: the prepared model's max_seq_len)",
         )
         baseten.add_argument(
-            "--max-spend-usd", type=float,
+            "--max-spend-usd", action=_TrainingArgument, type=float,
             help="active-time spend ceiling in USD; requires --hourly-rate-usd (default: disabled)",
         )
         baseten.add_argument(
-            "--hourly-rate-usd", type=float,
+            "--hourly-rate-usd", action=_TrainingArgument, type=float,
             help="total hourly rate in USD for the spend guard; requires --max-spend-usd (default: unset)",
         )
         baseten.add_argument(
-            "--replicas", type=int,
+            "--replicas", action=_TrainingArgument, type=int,
             help=f"training replicas (default: {baseten_defaults.replicas})",
         )
         baseten.add_argument(
-            "--spend-reserve-fraction", type=float,
+            "--spend-reserve-fraction", action=_TrainingArgument, type=float,
             help=f"fraction of spend ceiling reserved for cleanup (default: {baseten_defaults.spend_reserve_fraction})",
         )
         baseten.add_argument(
-            "--max-dropped-training-rows", type=int,
+            "--max-dropped-training-rows", action=_TrainingArgument, type=int,
             help=f"maximum training rows excluded above the trainer context limit (default: {baseten_defaults.max_dropped_training_rows})",
         )
 
@@ -273,14 +286,37 @@ def main(argv: list[str] | None = None) -> None:
             )
         elif args.command == "plan":
             provider = get_provider(args.provider)
-            value = provider.plan(args.data_dir, args.run_id, _settings_from_args(args))
+            value = save_training_plan(
+                provider, args.data_dir, args.run_id, _settings_from_args(args),
+                args.output, init_from_checkpoint=args.init_from_checkpoint,
+            )
+            print(f"Training plan saved to {args.output}", file=sys.stderr)
         elif args.command == "train":
-            provider = get_provider(args.provider)
+            if args.plan is not None:
+                overrides = getattr(args, "training_arguments", ())
+                if overrides:
+                    raise PipelineError(
+                        "--plan cannot be combined with " + ", ".join(sorted(set(overrides)))
+                        + "; change the settings with smithtune plan and review the new plan"
+                    )
+                if not args.confirm:
+                    raise PipelineError("training incurs cost; rerun with --confirm")
+                request = load_training_plan(args.plan)
+                provider = request.provider
+                args.data_dir = request.data_dir
+                args.run_id = request.run_id
+                args.init_from_checkpoint = request.init_from_checkpoint
+                settings = request.settings
+            else:
+                if args.run_id is None:
+                    raise PipelineError("train requires --plan or --run-id")
+                provider = get_provider(args.provider)
+                settings = _settings_from_args(args)
             value = provider.train(
                 args.data_dir,
                 args.run_dir,
                 args.run_id,
-                _settings_from_args(args),
+                settings,
                 confirm=args.confirm,
                 init_from_checkpoint=args.init_from_checkpoint,
             )
