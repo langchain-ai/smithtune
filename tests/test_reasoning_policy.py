@@ -165,7 +165,7 @@ def test_cli_and_provider_pass_preparation_policy(tmp_path, monkeypatch, provide
 
     def baseten_capability(model, context):
         capability_calls.append((model, context))
-        return baseten.BasetenModelCapability(model, 131_072)
+        return baseten.BasetenModelCapability(model, 262_144)
 
     def resolve_rendering(model):
         rendering_calls.append(model)
@@ -189,7 +189,7 @@ def test_cli_and_provider_pass_preparation_policy(tmp_path, monkeypatch, provide
     pipeline.main()
     manifest = json.loads((tmp_path / "prepared" / "manifest.json").read_text())
     rows = [json.loads(line) for line in (tmp_path / "prepared" / "train.jsonl").read_text().splitlines()]
-    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, 131_072)]
+    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, adapter_module.DEFAULT_MODEL.training_context_limit)]
     assert rendering_calls == [adapter_module.DEFAULT_MODEL]
     assert manifest["conversion"]["reasoning_policy"] == policy
     assert ("reasoning_content" in rows[0]["messages"][1]) == (policy == "preserve")

@@ -160,7 +160,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
     assert plan["run_id"] == "approved-run"
     assert plan["provider"] == "baseten"
     assert plan["base_model"] == "Qwen/Qwen3.8-27B"
-    assert plan["model"] == asdict(replace(baseten.DEFAULT_MODEL, max_seq_len=262_144))
+    assert plan["model"] == asdict(replace(baseten.DEFAULT_MODEL, trainer_max_seq_len=131_072))
     assert plan["dataset"] == {
         "source_rows": 100,
         "train_rows": 90,
@@ -195,7 +195,28 @@ def test_baseten_provider_owns_its_model_profile():
     assert model == baseten.MODEL_SPECS["qwen3p8-27b"]
     assert model.base_model == "Qwen/Qwen3.8-27B"
     assert model.provider == "baseten"
-    assert model.max_seq_len == 131_072
+    assert model.max_seq_len == 262_144
+    assert model.training_context_limit == 262_144
+
+
+@pytest.mark.parametrize("context_tokens", [180_000, 262_144])
+def test_qwen_training_passes_larger_context_to_loops(tmp_path, context_tokens):
+    _write_prepared_dataset(tmp_path, model=baseten.DEFAULT_MODEL, max_context_tokens=context_tokens)
+    trainer = FakeTrainer(validation_losses=[1.0])
+    service = FakeService(trainer)
+
+    def render(row, model, **kwargs):
+        return [_datum(context_tokens if row["_source"]["example_id"] == "example-0" else 1)]
+
+    provider = _provider(service, FakeManagement(inactive=[True]), render_fn=render)
+    result = _train(provider, tmp_path, baseten.BasetenSFTSettings(max_epochs=1))
+
+    plan = json.loads((tmp_path / "run/plan.json").read_text())
+    assert result["status"] == "completed"
+    assert plan["config"]["max_seq_len"] == context_tokens
+    assert service.create_calls[0]["max_seq_len"] == context_tokens
+    assert plan["dataset"]["train_rows"] == 90
+    assert plan["dataset"].get("dropped_train_rows", []) == []
 
 
 def test_model_resolution_rejects_unsupported_models():
@@ -281,7 +302,7 @@ def test_preparation_delegates_with_baseten_policy(
 
     def capability_resolver(model, length):
         capability_calls.append((model, length))
-        return baseten.BasetenModelCapability(model, 131_072)
+        return baseten.BasetenModelCapability(model, 262_144)
 
     result = baseten.BasetenProvider(capability_resolver=capability_resolver).prepare(
         "workspace-id",
@@ -296,7 +317,7 @@ def test_preparation_delegates_with_baseten_policy(
     )
 
     assert result is manifest
-    assert capability_calls == [("Qwen/Qwen3.8-27B", 131_072)]
+    assert capability_calls == [("Qwen/Qwen3.8-27B", 262_144)]
     assert calls == [
         (
             (
@@ -1469,22 +1490,24 @@ def test_render_row_preserves_tool_declarations_and_masks_role_boundaries():
     assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0]
 
 
-def test_render_row_enforces_131072_token_ceiling_without_truncation(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("limit", [131_072, 262_144])
+def test_render_row_enforces_selected_token_ceiling_without_truncation(
+    monkeypatch: pytest.MonkeyPatch, limit: int,
 ):
-    _install_renderer_output(monkeypatch, list(range(131_072)), [0] * 131_071 + [1])
+    model = replace(_model(), max_seq_len=limit, trainer_max_seq_len=limit)
+    _install_renderer_output(monkeypatch, list(range(limit)), [0] * (limit - 1) + [1])
 
     accepted = baseten.render_row(
-        _row(), _model(), loops_types=FAKE_LOOPS_TYPES, renderer=object()
+        _row(), model, loops_types=FAKE_LOOPS_TYPES, renderer=object()
     )
 
     assert len(accepted) == 1
-    assert len(accepted[0].model_input.to_ints()) == 131_071
+    assert len(accepted[0].model_input.to_ints()) == limit - 1
 
-    _install_renderer_output(monkeypatch, list(range(131_073)), [0] * 131_072 + [1])
-    with pytest.raises(baseten.BasetenDataError, match="131,072"):
+    _install_renderer_output(monkeypatch, list(range(limit + 1)), [0] * limit + [1])
+    with pytest.raises(baseten.BasetenDataError, match=f"{limit:,}"):
         baseten.render_row(
-            _row(), _model(), loops_types=FAKE_LOOPS_TYPES, renderer=object()
+            _row(), model, loops_types=FAKE_LOOPS_TYPES, renderer=object()
         )
 
 
@@ -1607,11 +1630,11 @@ def _write_raw_dataset(root: Path, *, count: int) -> None:
     write_empty_tool_snapshot(root, examples)
 
 
-def _write_prepared_dataset(root: Path) -> None:
+def _write_prepared_dataset(root: Path, *, model: ModelSpec | None = None, max_context_tokens: int = 135_590) -> None:
     prepared = root / "prepared"
     prepared.mkdir()
-    # Prepared artifacts can retain a larger preparation context than the trainer.
-    model = replace(baseten.DEFAULT_MODEL, max_seq_len=262_144)
+    # Older prepared artifacts retain their recorded 131K trainer limit.
+    model = model or replace(baseten.DEFAULT_MODEL, trainer_max_seq_len=131_072)
     manifest = {
         "langsmith": {
             "workspace_id": "workspace-id",
@@ -1625,7 +1648,7 @@ def _write_prepared_dataset(root: Path) -> None:
             "renderer": model.renderer,
             "tokenizer_revision": model.tokenizer_revision,
         },
-        "audit": {"max_context_tokens": 135_590},
+        "audit": {"max_context_tokens": max_context_tokens},
         "source_examples_sha256": "a" * 64,
     }
     (prepared / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
