@@ -4,10 +4,10 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from models import resolve_prepared_model
-from providers import baseten, fireworks
-from providers.base import ModelOptions, PipelineError
-from rendering import validate_model_context
+from smithtune.models import resolve_prepared_model
+from smithtune.providers import baseten, fireworks
+from smithtune.providers.base import ModelOptions, PipelineError
+from smithtune.rendering import validate_model_context
 
 
 @pytest.mark.parametrize("adapter,base_model", [

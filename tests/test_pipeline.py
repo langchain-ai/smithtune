@@ -12,16 +12,16 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import artifacts
-import dataset as dataset_ops
-import evaluation as replay
-import inference as inference_transport
-import inference_contract
-import pipeline
-from providers import get_provider
-import rendering
-from providers import baseten, fireworks
-from providers.base import ModelSpec, PipelineError
+from smithtune import artifacts
+from smithtune import dataset as dataset_ops
+from smithtune import evaluation as replay
+from smithtune import inference as inference_transport
+from smithtune import inference_contract
+from smithtune import cli as pipeline
+from smithtune.providers import get_provider
+from smithtune import rendering
+from smithtune.providers import baseten, fireworks
+from smithtune.providers.base import ModelSpec, PipelineError
 
 
 def message(role: str, content, message_id: str, **extra):
@@ -1693,7 +1693,7 @@ def test_source_uses_official_provider_urls_and_no_embedded_secret():
 
 def test_fireworks_settings_errors_use_the_cli_error_path():
     result = subprocess.run(
-        [sys.executable, pipeline.__file__, "plan", "--max-epochs", "0"],
+        [sys.executable, "-m", "smithtune", "plan", "--max-epochs", "0"],
         cwd=Path(pipeline.__file__).parent,
         capture_output=True,
         text=True,

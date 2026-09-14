@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from providers.base import PipelineError
+from smithtune.providers.base import PipelineError
+from smithtune.doctor import INSTALL_HELP
 
 
 def _utc_now() -> str:
@@ -42,10 +43,14 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _run(command: list[str], *, capture: bool = False, input: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        check=True,
-        text=True,
-        capture_output=capture,
-        input=input,
-    )
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            text=True,
+            capture_output=capture,
+            input=input,
+        )
+    except FileNotFoundError as exc:
+        help_text = INSTALL_HELP.get(command[0], f"Install {command[0]} and ensure it is on PATH")
+        raise PipelineError(f"cannot run {command[0]}. {help_text}; run smithtune doctor to check setup") from exc

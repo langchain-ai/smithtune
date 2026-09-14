@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from inference_contract import InferenceContract
+from smithtune.inference_contract import InferenceContract
 
 
 class PipelineError(ValueError):

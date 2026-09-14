@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from providers.base import ModelSpec, PipelineError
+from smithtune.providers.base import ModelSpec, PipelineError
 
 
 SFT_TARGET_POLICY = "all_assistant_messages"
@@ -34,7 +34,7 @@ def resolved_renderer_name(model: ModelSpec) -> str:
     try:
         from training.utils.supervised import resolve_renderer_plan
     except ImportError as exc:
-        raise PipelineError("training dependencies are missing; run ./bootstrap.sh") from exc
+        raise PipelineError("training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
     try:
         return resolve_renderer_plan(
             model.tokenizer_model,
@@ -56,7 +56,7 @@ def validate_model_context(
         from training.utils.supervised import renderer_declares_tools
         from training.utils.tokenizers import load_tokenizer
     except ImportError as exc:
-        raise PipelineError("training dependencies are missing; run ./bootstrap.sh") from exc
+        raise PipelineError("training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
 
     renderer_name = resolved_renderer_name(model)
     tokenizer = load_tokenizer(
@@ -138,7 +138,7 @@ def validate_replay_context(
         )
         from training.utils.tokenizers import load_tokenizer
     except ImportError as exc:
-        raise PipelineError("training dependencies are missing; run ./bootstrap.sh") from exc
+        raise PipelineError("training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
     renderer_name = resolved_renderer_name(model)
     tokenizer = load_tokenizer(
         model.tokenizer_model,

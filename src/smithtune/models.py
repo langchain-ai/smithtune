@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import Any, Mapping
 
-from dataset import _require_prepared_provider
-from providers.base import ModelOptions, ModelSpec, PipelineError
+from smithtune.dataset import _require_prepared_provider
+from smithtune.providers.base import ModelOptions, ModelSpec, PipelineError
 
 
 def resolve_model_options(

@@ -8,9 +8,9 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from inference_contract import ContractError, InferenceContract
-from providers.base import PipelineError
-from providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
+from smithtune.inference_contract import ContractError, InferenceContract
+from smithtune.providers.base import PipelineError
+from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
 
 
 ANTHROPIC_INFERENCE_URL = "https://gateway.smith.langchain.com/anthropic/v1/messages"

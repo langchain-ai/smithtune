@@ -10,21 +10,25 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 
-import dataset
-import curation
-import evaluation as replay_evaluation
-from inference_contract import ContractError, load_inference_contract
-from providers.baseten import BasetenSFTSettings
-from providers.fireworks import FireworksProvider, SFTSettings as FireworksSFTSettings
-from providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
-from providers import PROVIDERS, get_provider
-from rendering import DEFAULT_REPLAY_MAX_TOKENS
+from smithtune import dataset
+from smithtune import curation
+from smithtune import evaluation as replay_evaluation
+from smithtune.inference_contract import ContractError, load_inference_contract
+from smithtune.providers.baseten import BasetenSFTSettings
+from smithtune.providers.fireworks import FireworksProvider, SFTSettings as FireworksSFTSettings
+from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
+from smithtune.providers import PROVIDERS, get_provider
+from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
+from smithtune import get_version
+from smithtune.doctor import diagnose
 
 
 def _parser() -> argparse.ArgumentParser:
-    project = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description=__doc__)
+    project = Path.cwd()
+    parser = argparse.ArgumentParser(prog="smithtune", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {get_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor", help="report installed dependencies and configuration without network calls")
 
     curate = sub.add_parser("dataset", help="create a conversation trajectory dataset from project filters")
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
@@ -52,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
 
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")
     prep.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
-    prep.add_argument("--data-dir", type=Path, default=project / "data")
+    prep.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
     prep.add_argument("--inference-contract", type=Path, help="optional global tool-schema override; by default collect tools from each example's source LLM runs")
@@ -88,7 +92,7 @@ def _parser() -> argparse.ArgumentParser:
         "--provider", choices=tuple(PROVIDERS), default="fireworks",
         help="training provider (default: %(default)s)",
     )
-    plan.add_argument("--data-dir", type=Path, default=project / "data")
+    plan.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     plan.add_argument("--run-id", default="langsmith-sft")
 
     training = sub.add_parser("train", help="run paid serverless SFT after plan approval")
@@ -96,7 +100,7 @@ def _parser() -> argparse.ArgumentParser:
         "--provider", choices=tuple(PROVIDERS), default="fireworks",
         help="training provider (default: %(default)s)",
     )
-    training.add_argument("--data-dir", type=Path, default=project / "data")
+    training.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     training.add_argument("--run-dir", type=Path, required=True)
     training.add_argument("--run-id", required=True)
     training.add_argument("--init-from-checkpoint")
@@ -192,7 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     eval_plan = sub.add_parser("eval-plan", help="build held-out trajectory replay cases")
     evaluation = sub.add_parser("evaluate", help="compare base and tuned actions with a calibrated judge")
     for command in (eval_plan, evaluation):
-        command.add_argument("--data-dir", type=Path, default=project / "data")
+        command.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
         command.add_argument("--output-dir", type=Path, required=True)
         command.add_argument(
             "--max-points-per-trajectory",
@@ -228,11 +232,13 @@ def _settings_from_args(args: argparse.Namespace) -> CommonSFTSettings:
     return get_provider(args.provider).settings_from_options(options)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = _parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
-        if args.command == "dataset":
+        if args.command == "doctor":
+            value = diagnose()
+        elif args.command == "dataset":
             print("Selecting conversations and creating dataset...", file=sys.stderr)
             value = curation.create_dataset(
                 workspace_id=args.workspace_id, project_id=args.project_id,

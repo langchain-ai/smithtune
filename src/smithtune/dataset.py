@@ -10,8 +10,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
-from inference_contract import (
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
+from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
     contract_from_runs,
@@ -19,8 +19,8 @@ from inference_contract import (
     parse_inference_contract,
     json_sha256,
 )
-from providers.base import ModelSpec, PipelineError, ReasoningPolicy
-from rendering import validate_model_context, validate_reasoning_support
+from smithtune.providers.base import ModelSpec, PipelineError, ReasoningPolicy
+from smithtune.rendering import validate_model_context, validate_reasoning_support
 
 
 SPLIT_SEED = 42

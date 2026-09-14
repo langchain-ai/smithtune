@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
-from artifacts import _json_dump, _load_json, _run, _utc_now
-from providers.base import PipelineError
+from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.providers.base import PipelineError
 
 
-DEFAULT_SELECTION_DIR = Path(__file__).resolve().parent / "data" / "selections"
+DEFAULT_SELECTION_DIR = Path("data") / "selections"
 
 
 def _api(workspace_id, method, path, body=None, *, runner=_run):

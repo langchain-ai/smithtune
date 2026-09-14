@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-import dataset
-import pipeline
-from providers import baseten, fireworks
-from providers.base import PipelineError
-from providers import get_provider
+from smithtune import dataset
+from smithtune import cli as pipeline
+from smithtune.providers import baseten, fireworks
+from smithtune.providers.base import PipelineError
+from smithtune.providers import get_provider
 
 
 def _write_raw_dataset(root, count=100):
@@ -197,11 +197,11 @@ def without_cli_or_sdk(name, *args, **kwargs):
     return original_import(name, *args, **kwargs)
 builtins.__import__ = without_cli_or_sdk
 
-from providers.base import TrainingOptions
-from providers import get_provider
+from smithtune.providers.base import TrainingOptions
+from smithtune.providers import get_provider
 adapter = get_provider(sys.argv[1])
 plan = adapter.plan(Path(sys.argv[2]), 'standalone', adapter.settings_from_options(TrainingOptions()))
-assert 'pipeline' not in sys.modules
+assert 'smithtune.cli' not in sys.modules
 print(json.dumps(plan))
 """, provider, str(tmp_path)],
         cwd=Path(pipeline.__file__).parent,
@@ -227,7 +227,7 @@ def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider
     run_dir = tmp_path / "run"
     result = subprocess.run(
         [
-            sys.executable, pipeline.__file__, "train", "--provider", provider,
+            sys.executable, "-m", "smithtune", "train", "--provider", provider,
             "--data-dir", str(tmp_path / "missing"), "--run-dir", str(run_dir),
             "--run-id", "no-provision",
         ],

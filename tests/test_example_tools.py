@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import dataset
-import evaluation
-from artifacts import _json_dump, _jsonl_dump, _load_jsonl
-from inference_contract import contract_from_runs, json_sha256
-from providers import fireworks
-from providers.base import PipelineError
+from smithtune import dataset
+from smithtune import evaluation
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_jsonl
+from smithtune.inference_contract import contract_from_runs, json_sha256
+from smithtune.providers import fireworks
+from smithtune.providers.base import PipelineError
 from test_tool_capture import llm, tool, page
 
 
@@ -244,8 +244,8 @@ def test_prepared_contract_mapping_rejects_tampering(tmp_path, monkeypatch):
 @pytest.mark.parametrize("temperature", [None, 0.7])
 def test_replay_temperature_default_survives_automatic_contracts(monkeypatch, temperature):
     import io
-    import inference
-    from inference_contract import parse_inference_contract
+    from smithtune import inference
+    from smithtune.inference_contract import parse_inference_contract
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "test-session")
     payload = contract_from_runs([llm("run-1", [])], workspace_id="workspace-id")

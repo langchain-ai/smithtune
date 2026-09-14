@@ -2,12 +2,12 @@
 
 from importlib import import_module
 
-from providers.base import PipelineError, TrainingProvider
+from smithtune.providers.base import PipelineError, TrainingProvider
 
 
 PROVIDERS = {
-    "fireworks": ("providers.fireworks", "FireworksProvider"),
-    "baseten": ("providers.baseten", "BasetenProvider"),
+    "fireworks": ("smithtune.providers.fireworks", "FireworksProvider"),
+    "baseten": ("smithtune.providers.baseten", "BasetenProvider"),
 }
 
 

@@ -17,10 +17,10 @@ from typing import Any, Iterable
 import urllib.error
 import urllib.request
 
-from inference_contract import InferenceContract
-from models import resolve_model_options, resolve_prepared_model
-from rendering import SFT_TARGET_POLICY, resolved_renderer_name
-from providers.base import (
+from smithtune.inference_contract import InferenceContract
+from smithtune.models import resolve_model_options, resolve_prepared_model
+from smithtune.rendering import SFT_TARGET_POLICY, resolved_renderer_name
+from smithtune.providers.base import (
     CommonSFTSettings,
     ModelOptions,
     ModelSpec,
@@ -586,7 +586,7 @@ class BasetenProvider:
         check_render: bool = True,
     ) -> dict[str, Any]:
         """Prepare canonical rows with the Baseten model and shared split defaults."""
-        from dataset import DEFAULT_TEST_FRACTION, DEFAULT_VALIDATION_FRACTION, prepare_dataset
+        from smithtune.dataset import DEFAULT_TEST_FRACTION, DEFAULT_VALIDATION_FRACTION, prepare_dataset
 
         return prepare_dataset(
             workspace_id,
@@ -1134,7 +1134,7 @@ def render_row(
     try:
         from training.utils import parse_train_on_what, render_messages_to_datums
     except ImportError as exc:
-        raise BasetenDataError("pinned renderer dependencies are missing") from exc
+        raise BasetenDataError("training runtime is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
 
     if renderer is not None:
         resolved_renderer_name(model)
@@ -1253,7 +1253,7 @@ def _load_renderer(model: Any) -> Any:
         from training.renderer import get_renderer
         from training.utils.tokenizers import load_tokenizer
     except ImportError as exc:
-        raise BasetenDataError("pinned renderer dependencies are missing") from exc
+        raise BasetenDataError("training runtime is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
     renderer_name = resolved_renderer_name(model)
     tokenizer = load_tokenizer(
         model.tokenizer_model,
@@ -1268,7 +1268,7 @@ def _resolve_loops_types() -> Any:
         import baseten.loops
     except ImportError as exc:
         raise BasetenDataError(
-            "Baseten Loops is not installed; install the Baseten provider dependency"
+            "Baseten Loops is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor"
         ) from exc
     return baseten.loops
 

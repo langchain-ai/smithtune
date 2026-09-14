@@ -5,14 +5,46 @@ Fireworks supports training, deployment, and replay evaluation; Baseten supports
 
 ## Setup
 
-Requires Python 3.12, `git`, `uv`, `sfw`, the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli), and `firectl`.
+Install directly from GitHub using [uv](https://docs.astral.sh/uv/getting-started/installation/)
+and Git:
 
 ```bash
-git clone https://github.com/langchain-ai/smithtune.git
-cd smithtune
-./bootstrap.sh
-source .venv/bin/activate
+uv tool install --python 3.12 \
+  'git+https://github.com/langchain-ai/smithtune.git'
+smithtune doctor
+smithtune --help
 ```
+
+These commands require the CLI packaging changes to be merged into `main`.
+For an existing local checkout, see [Contributing](CONTRIBUTING.md).
+
+uv manages an isolated environment and can provision Python 3.12. No repository
+checkout or environment activation is needed. It fetches smithtune and the pinned
+Fireworks cookbook automatically. Both providers and their Python dependencies
+are included. GitHub access and Git are needed during installation. Uninstall
+with `uv tool uninstall smithtune`.
+
+To upgrade, repeat the installation command with `--upgrade`. For a reproducible
+release, append a tag or full commit SHA as `@<ref>` to the Git URL. A release tag
+must exist before it can be installed. There is no PyPI publication step.
+
+Install these companion tools for the operations you use:
+
+| Tool | Required for |
+| --- | --- |
+| [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Dataset creation, contract capture, and fetching data during preparation |
+| [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) | Fireworks deployment and undeployment |
+
+Follow their official installation/authentication instructions and ensure their
+commands are on `PATH`. `smithtune doctor` reports installation versions, tool
+availability, and whether credential variables are set. It makes no network calls,
+does not validate credentials, and never prints their values. Missing prerequisites
+only affect operations that need them.
+
+Run smithtune from a writable working directory of your choice. Data defaults to
+`./data/`; use `--data-dir` to select a different location. The training runtime
+includes PyTorch, so installation is substantial, but no local GPU is required.
+Preparation can download model tokenizer files into the Hugging Face cache.
 
 Configure credentials in your environment:
 
@@ -28,7 +60,7 @@ Configure credentials in your environment:
 Create a dataset directly from a tracing project and filters:
 
 ```bash
-python pipeline.py dataset create \
+smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
@@ -73,7 +105,7 @@ Choose a provider and prepare your dataset:
 provider=fireworks # or baseten
 run_id=my-sft
 
-python pipeline.py prepare \
+smithtune prepare \
   --provider "$provider" \
   --workspace-id '<workspace-id>' \
   --dataset-id '<dataset-id>' \
@@ -95,11 +127,11 @@ remains available to create a global contract from a sample thread.
 Review the plan before running `train`. Training is billed by the provider and requires `--confirm`.
 
 ```bash
-python pipeline.py plan --provider "$provider" --run-id "$run_id"
+smithtune plan --provider "$provider" --run-id "$run_id"
 ```
 
 ```bash
-python pipeline.py train \
+smithtune train \
   --provider "$provider" \
   --run-id "$run_id" \
   --run-dir "runs/$run_id" \
@@ -118,12 +150,12 @@ Promote the selected checkpoint, then deploy it. The endpoint incurs charges unt
 ```bash
 account_id='<fireworks-account-id>'
 
-python pipeline.py promote \
+smithtune promote \
   --run-dir "runs/$run_id" \
   --output-model-id "$run_id" \
   --confirm
 
-python pipeline.py deploy \
+smithtune deploy \
   --run-dir "runs/$run_id" \
   --account-id "$account_id" \
   --output-model-id "$run_id" \
@@ -135,11 +167,11 @@ python pipeline.py deploy \
 Review the replay cases, then evaluate with the gateway credentials above:
 
 ```bash
-python pipeline.py eval-plan --output-dir "runs/$run_id/replay"
+smithtune eval-plan --output-dir "runs/$run_id/replay"
 ```
 
 ```bash
-python pipeline.py evaluate \
+smithtune evaluate \
   --output-dir "runs/$run_id/replay" \
   --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
   --confirm
@@ -151,7 +183,7 @@ Add `--base-model '<deployed-base-model-route>'` for a before/after comparison. 
 Remove the endpoint when finished to stop deployment billing:
 
 ```bash
-python pipeline.py undeploy \
+smithtune undeploy \
   --account-id "$account_id" \
   --deployment-id "$run_id" \
   --confirm
@@ -159,13 +191,17 @@ python pipeline.py undeploy \
 
 ## Options and tests
 
-Data is saved under `data/`; checkpoints and reports under `runs/`. Both directories are ignored by Git.
+Data defaults to `data/` in your current working directory; the examples above
+save checkpoints and reports under `runs/`. Those directories are ignored by
+Git in this repository. No artifacts are written into the installed package.
 See command help for model profiles, custom models, split fractions, and provider-specific training settings.
 
 ```bash
-python pipeline.py --help
-python pipeline.py dataset create --help
-python pipeline.py prepare --help
-python pipeline.py train --help
-python -m pytest
+smithtune --help
+smithtune dataset create --help
+smithtune prepare --help
+smithtune train --help
+smithtune --version
 ```
+
+See [Contributing](CONTRIBUTING.md) for development, tests, and releases.

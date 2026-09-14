@@ -1,4 +1,4 @@
-"""Validated inference contracts and provider request construction."""
+"""Validated smithtune inference contracts and provider request construction."""
 
 from __future__ import annotations
 

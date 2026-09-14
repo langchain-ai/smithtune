@@ -11,16 +11,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
-from artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
-from dataset import (
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
+from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
     _prepared_example_contracts,
 )
-from inference import ANTHROPIC_MODEL_PREFIX, _chat_completion, _inference_messages
-from inference_contract import ContractError, InferenceContract
-from providers.base import PipelineError
-from providers.fireworks import _require_confirm, _set_skill_session
-from rendering import DEFAULT_REPLAY_MAX_TOKENS, validate_reasoning_support, validate_replay_context
+from smithtune.inference import ANTHROPIC_MODEL_PREFIX, _chat_completion, _inference_messages
+from smithtune.inference_contract import ContractError, InferenceContract
+from smithtune.providers.base import PipelineError
+from smithtune.providers.fireworks import _require_confirm, _set_skill_session
+from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS, validate_reasoning_support, validate_replay_context
 
 
 DEFAULT_REPLAY_POINTS: int | None = None

@@ -13,16 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from artifacts import _json_dump, _load_json, _run, _utc_now
-from dataset import (
+from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
     _model_from_manifest,
     prepare_dataset,
 )
-from inference_contract import InferenceContract
-from models import resolve_model_options, resolve_prepared_model
-from providers.base import (
+from smithtune.inference_contract import InferenceContract
+from smithtune.models import resolve_model_options, resolve_prepared_model
+from smithtune.providers.base import (
     CommonSFTSettings,
     ModelOptions,
     ModelSpec,
@@ -30,7 +30,7 @@ from providers.base import (
     ReasoningPolicy,
     TrainingOptions,
 )
-from rendering import SFT_TARGET_POLICY
+from smithtune.rendering import SFT_TARGET_POLICY
 
 
 TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
@@ -410,7 +410,7 @@ class FireworksProvider:
             from training.utils import RunnerConfig, WandBConfig
         except ImportError as exc:
             raise PipelineError(
-                "training dependencies are missing; run ./bootstrap.sh"
+                "training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor"
             ) from exc
 
         run_dir.mkdir(parents=True, exist_ok=True)

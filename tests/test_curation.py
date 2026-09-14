@@ -11,12 +11,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import artifacts
-import curation
-import dataset
-import pipeline
-from providers.base import PipelineError
-from providers.fireworks import DEFAULT_MODEL
+from smithtune import artifacts
+from smithtune import curation
+from smithtune import dataset
+from smithtune import cli as pipeline
+from smithtune.providers.base import PipelineError
+from smithtune.providers.fireworks import DEFAULT_MODEL
 
 
 def uid(number):
