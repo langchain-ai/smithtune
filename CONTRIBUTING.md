@@ -8,11 +8,15 @@ is maintained here, and there is no bootstrap step.
 sfw uv sync --locked --extra test --python 3.12
 uv run --no-sync smithtune --help
 uv run --no-sync pytest
+uv run --no-sync ruff check
 ```
 
 `sfw` is used for contributor dependency installation. It is not a smithtune runtime
 prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.
+
+CI runs `ruff check` with the rules in `pyproject.toml`; it does not enforce
+`ruff format`. Run `uv run --no-sync ruff check --fix` to apply the safe autofixes.
 
 To install your checkout as an isolated CLI:
 
