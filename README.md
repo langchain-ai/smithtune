@@ -162,10 +162,26 @@ Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rat
 
 ## Evaluate a trained model (Fireworks)
 
-Promote the selected checkpoint, then evaluate it with temporary preemptible
-capacity. Preemptible capacity borrows idle GPUs and can disappear during a run.
-It does not reserve dedicated production GPUs. See
-[Fireworks evaluation paths](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models).
+`deploy` starts a serving endpoint so a model can answer requests. `evaluate`
+sends test prompts to a model and scores its answers. A trained checkpoint
+needs running compute before it can answer a prompt.
+
+For a temporary evaluation, let `evaluate` manage that compute:
+
+```text
+promote -> eval-plan -> evaluate --serving-mode preemptible
+                              |
+                              +-- create temporary serving capacity
+                              +-- wait until ready
+                              +-- generate and score responses
+                              +-- save results and delete the deployment
+```
+
+**You do not run `deploy` or `undeploy` yourself for this path.** Preemptible
+capacity uses idle GPUs that Fireworks can reclaim. If that interrupts the run,
+repeat the evaluation command to finish missing cases.
+
+First, promote the selected checkpoint to a Fireworks model ID:
 
 ```bash
 account_id='<fireworks-account-id>'
@@ -180,24 +196,29 @@ smithtune promote \
 eval_shape='<full-compatible-fireworks-deployment-shape-resource>'
 ```
 
-Use a shape compatible with the promoted model, in the form
+The deployment shape specifies compatible serving hardware. Use a shape for
+the promoted model, in the form
 `accounts/<account>/deploymentShapes/<shape>` (optionally with `/versions/<version>`).
-Review the replay cases and capacity plan:
+See [Fireworks evaluation paths](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models).
+Use the data directory from `prepare` (`data` in these examples).
+`eval-plan` previews the held-out cases and deployment settings. It does not
+start a deployment or run model inference:
 
 ```bash
 smithtune eval-plan \
+  --data-dir data \
   --output-dir "$run_dir/replay" \
   --tuned-model "accounts/$account_id/models/$run_id" \
   --serving-mode preemptible --account-id "$account_id" \
   --deployment-id "$run_id-eval" --deployment-shape "$eval_shape"
 ```
 
-Run with the same settings. The CLI calibrates the judge, creates one
-preemptible replica, waits for readiness, scores the held-out cases, and deletes
-its temporary deployment:
+Run `evaluate` with the same settings. It checks the judge, creates one
+temporary replica, waits for readiness, and runs the evaluation:
 
 ```bash
 smithtune evaluate \
+  --data-dir data \
   --output-dir "$run_dir/replay" \
   --tuned-model "accounts/$account_id/models/$run_id" \
   --serving-mode preemptible --account-id "$account_id" \
@@ -205,7 +226,15 @@ smithtune evaluate \
   --confirm
 ```
 
-Results are saved to `<run-dir>/replay/summary.json`. Replay scores agreement with recorded actions without executing tools.
+For each case, the evaluator:
+
+1. Takes recorded conversation context from the held-out data.
+2. Asks the tuned model for its next response or tool call.
+3. Checks the response and asks a judge model to score it against the recorded behavior.
+4. Saves the result. It does not execute generated tool calls.
+
+The CLI then deletes the temporary deployment and confirms deletion. Results
+are saved to `<run-dir>/replay/summary.json`.
 Add `--base-model '<deployed-base-model-route>'` for a before/after comparison.
 The base route must already be available; the temporary deployment serves only
 the tuned model. Model and judge inference use current provider rates.
@@ -226,9 +255,15 @@ failure is reported as an error. Inspect that receipt before deleting capacity.
 This mode requires a promoted model ID. It does not open an in-session sampling
 client from an active training checkpoint.
 
-### Existing or production deployments
+### Keep an endpoint running with `deploy`
 
-Use `deploy` to keep an on-demand endpoint for production or repeated use:
+Use `deploy` when you want an endpoint for repeated use. It starts the endpoint;
+it does not run the evaluation. The endpoint stays available and can incur
+charges until you run `undeploy`:
+
+```text
+promote -> deploy -> evaluate -> undeploy
+```
 
 ```bash
 smithtune deploy \
