@@ -13,6 +13,7 @@ def check_installation() -> None:
     try:
         import deepagents  # noqa: F401
         import langchain_openai  # noqa: F401
+        import pydantic_monty  # noqa: F401
     except ImportError:
         raise PipelineError("Deep Agents support is optional; install smithtune with the [deepagents] extra") from None
 
@@ -38,28 +39,38 @@ def _model(judge: dict, max_tokens: int):
                       default_headers=headers, max_tokens=max_tokens, timeout=60, max_retries=0, use_responses_api=False)
 
 
+def skill_files() -> dict:
+    from deepagents.backends.utils import create_file_data
+
+    skill = files("smithtune").joinpath("skills/sft-trace-triage")
+    return {f"/skills/sft-trace-triage/{item.name}": create_file_data(item.read_text(encoding="utf-8"))
+            for item in skill.iterdir() if item.is_file()}
+
+
+def allowed_tools(names: set[str]):
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.messages import ToolMessage
+
+    class TriageTools(AgentMiddleware):
+        def wrap_model_call(self, request, handler):
+            allowed = [tool for tool in request.tools if getattr(tool, "name", None) in names]
+            return handler(request.override(tools=allowed))
+
+        def wrap_tool_call(self, request, handler):
+            if request.tool_call["name"] not in names:
+                return ToolMessage(content="Only the supplied triage tools are allowed.", tool_call_id=request.tool_call["id"])
+            return handler(request)
+
+    return TriageTools()
+
+
 def make_agent(judge: dict, system_prompt: str, max_tokens: int, *, model=None):
     check_installation()
     from deepagents import create_deep_agent
     from deepagents.backends import StateBackend
-    from deepagents.backends.utils import create_file_data
     from deepagents.middleware.filesystem import FilesystemMiddleware
-    from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
-    from langchain_core.messages import ToolMessage
+    from langchain.agents.middleware import SummarizationMiddleware
 
-    class ReadOnlyJudge(AgentMiddleware):
-        def wrap_model_call(self, request, handler):
-            allowed = [tool for tool in request.tools if getattr(tool, "name", None) == "read_file"]
-            return handler(request.override(tools=allowed))
-
-        def wrap_tool_call(self, request, handler):
-            if request.tool_call["name"] != "read_file":
-                return ToolMessage(content="Only reading the supplied skill is allowed.", tool_call_id=request.tool_call["id"])
-            return handler(request)
-
-    skill = files("smithtune").joinpath("skills/sft-trace-triage")
-    skill_files = {f"/skills/sft-trace-triage/{item.name}": create_file_data(item.read_text(encoding="utf-8"))
-                   for item in skill.iterdir() if item.is_file()}
     backend = StateBackend()
     chat_model = model if model is not None else _model(judge, max_tokens)
     agent = create_deep_agent(
@@ -71,7 +82,7 @@ def make_agent(judge: dict, system_prompt: str, max_tokens: int, *, model=None):
             # Replace the default summarizer through the supported middleware
             # override. Overflow must fail a vote, never shorten its evidence.
             SummarizationMiddleware(model=chat_model, trigger=None),
-            ReadOnlyJudge(),
+            allowed_tools({"read_file"}),
         ],
     )
-    return agent, skill_files
+    return agent, skill_files()

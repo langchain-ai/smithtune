@@ -13,6 +13,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 
 - Tracing project: use `dataset create` with the intended workspace, project, time window, and root-run filters, then pass the returned dataset ID to `prepare`.
 - To judge which traces to use for SFT, use `dataset triage --dry-run`, then the same command with `--confirm` when paid judging is authorized. Use `dataset create --triage-dir` to import accepted saved conversations. The packaged skill is available through `skill export`.
+- Use `dataset triage --output-dir <saved-triage-dir> --runner deepagent --config <judges.json> --confirm` to label a local snapshot with one coordinator, Python code mode, and judge subagents. Source flags are only needed for a new download. The CLI validates and saves votes; the coordinator's final text cannot assign labels.
 - Existing dataset: start at `prepare`; source thread/trace and project information is needed for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
 - Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.

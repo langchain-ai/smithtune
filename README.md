@@ -108,6 +108,20 @@ A judge is a model that checks recorded behavior against the selection rules.
 Each trace gets `keep: 1` or `keep: 0`, a completion status, reasons, and evidence.
 This checks the training examples; `evaluate` checks the trained model.
 
+This adds a judging step between local trace capture and dataset creation:
+
+```text
+LangSmith traces -> local snapshot -> Deep Agent coordinator
+                                           |
+                                      Python code mode
+                                           |
+                                    judge subagents
+                                           |
+                                    checked 0/1 labels
+                                           |
+                    dataset create --triage-dir -> prepare -> plan -> train
+```
+
 First download and save the source evidence without calling a judge:
 
 ```bash
@@ -179,21 +193,50 @@ labels remain incomplete. Keep an independent test set for model comparisons.
 
 ### Deep Agents and the portable skill
 
-The default `--runner api` needs no agent runtime. Install the optional
-[Deep Agents](https://github.com/langchain-ai/deepagents) extra to use
-`--runner deepagent` on both triage commands:
+Install the optional [Deep Agents](https://github.com/langchain-ai/deepagents)
+extra to run a coordinator with code mode and judge subagents:
 
 ```bash
 uv tool install --upgrade --python 3.12 \
   'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
-Each judge task gets a fresh Deep Agent and the packaged selection skill.
-The agent can only read the supplied skill files in memory. It cannot run
-commands, write files, fetch more data, or delegate. Automatic summarization is
-disabled: an input that exceeds the provider's context limit fails the vote.
-Each attempt is limited to 12 graph steps; agent judging can cost more than one
-direct model call.
+Label an existing local snapshot with:
+
+```bash
+smithtune dataset triage --output-dir data/triage \
+  --runner deepagent --config judges.json --confirm
+```
+
+Once `snapshot.json` exists, source flags can be omitted. The CLI reads the
+saved local evidence without querying LangSmith again. Labels stay local;
+triage does not write feedback to the tracing project.
+
+One Deep Agent loads the packaged skill and uses Python code to list pending
+trace/judge pairs and dispatch batches of judge subagents. It can also dispatch
+an individual judge with the `task` tool. The first configured judge model
+serves as the coordinator. Each slot uses its configured model for judging.
+The default `--runner api` remains available without the optional agent runtime.
+
+Code runs in a Monty sandbox with `pending_tasks`, `read_trace`, and
+`judge_batch` functions. It has no shell, network, environment, or host file
+access. Each code call has 32 MiB of memory, a 5-second execution limit, and at
+most 256 host calls; judge batches have at most 128 pairs. `--concurrency`
+limits active judge tasks across batches. Duplicate dispatches cannot repeat
+paid votes within the same run.
+
+Each judge gets a fresh Deep Agent with the full saved trace, preceding context,
+and run tree. Judges read the rubric but cannot execute recorded tools or
+delegate further. Automatic summarization is disabled. Inputs above the limit
+remain incomplete. A judge can also report missing evidence as incomplete.
+Each judge attempt has at most 12 graph steps. The coordinator has at most
+`min(1000, 24 + 4 * pending_tasks)` graph steps, so its calls add to judge cost.
+
+Only validated subagent votes enter the label files. The coordinator cannot
+replace them with its own final answer. Votes are saved as subagents finish;
+`agent-state.json` records coordinator status and code-call counts. Resume
+reuses successful votes; a fully completed run starts no agent. Coordinator
+skill changes require a new output directory, like rubric or model changes.
 
 Any agent that can run the CLI can use the same portable skill:
 

@@ -67,7 +67,7 @@ def test_injected_tool_request_cannot_execute_or_write(monkeypatch):
     ])
     result = invoke(model, monkeypatch)
     outputs = [message for message in result["messages"] if isinstance(message, ToolMessage)]
-    assert any("Only reading" in message.content for message in outputs)
+    assert any("Only the supplied triage tools" in message.content for message in outputs)
     assert all(names == ["read_file"] for names in model.exposed)
 
 

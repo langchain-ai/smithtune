@@ -12,7 +12,7 @@ from pathlib import Path
 
 from smithtune import dataset
 from smithtune import curation, triage
-from smithtune.triage_source import source_options
+from smithtune.triage_source import load_snapshot, source_options
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
 from smithtune.providers.baseten import BasetenRuntimeError, BasetenSFTSettings
@@ -51,10 +51,10 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--confirm", action="store_true", help="confirm dataset creation from triage labels")
 
     triage_cmd = curate_sub.add_parser("triage", help="label project traces keep/drop for SFT with one or more judges")
-    triage_cmd.add_argument("--workspace-id", required=True)
-    triage_cmd.add_argument("--project-id", required=True)
-    triage_cmd.add_argument("--start-time", required=True)
-    triage_cmd.add_argument("--end-time", required=True)
+    triage_cmd.add_argument("--workspace-id", help="omit source flags to use the local snapshot in --output-dir")
+    triage_cmd.add_argument("--project-id")
+    triage_cmd.add_argument("--start-time")
+    triage_cmd.add_argument("--end-time")
     triage_cmd.add_argument("--filter", help="root-run filter; selected threads expand to all their turns")
     triage_cmd.add_argument("--limit", type=int, default=100, help="maximum selected root traces before thread expansion (default: 100)")
     triage_cmd.add_argument("--seed", type=int, default=42)
@@ -270,8 +270,15 @@ def main(argv: list[str] | None = None) -> None:
             value = triage.export_skill(args.output)
         elif args.command == "dataset":
             if args.dataset_command == "triage":
-                source = source_options(args.workspace_id, args.project_id, args.start_time, args.end_time,
-                                        filter=args.filter, limit=args.limit, seed=args.seed)
+                source_fields = (args.workspace_id, args.project_id, args.start_time, args.end_time)
+                if all(source_fields):
+                    source = source_options(*source_fields, filter=args.filter, limit=args.limit, seed=args.seed)
+                elif any(source_fields) or args.filter or args.limit != 100 or args.seed != 42:
+                    raise PipelineError("supply all source IDs and times, or omit source flags to use the saved local snapshot")
+                elif (args.output_dir / "snapshot.json").exists():
+                    source = load_snapshot(args.output_dir)["source"]
+                else:
+                    raise PipelineError("no local snapshot; supply workspace, project, start time, and end time to download traces")
                 value = triage.run_triage(source, args.output_dir, config_path=args.config, runner_mode=args.runner,
                                          dry_run=args.dry_run, confirm=args.confirm, concurrency=args.concurrency,
                                          max_input_chars=args.max_input_chars, max_output_tokens=args.max_output_tokens, attempts=args.attempts)

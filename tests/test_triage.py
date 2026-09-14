@@ -374,3 +374,34 @@ def test_paid_and_remote_writes_require_confirmation(tmp_path):
         triage.run_triage(source(), tmp_path, runner=API())
     with pytest.raises(PipelineError, match="requires --confirm"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=False)
+
+
+def test_judge_missing_evidence_is_incomplete_not_a_drop(tmp_path):
+    calls = []
+
+    def incomplete(judge, messages_, tokens):
+        trace = json.loads(messages_[-1]["content"])["untrusted_trace_evidence"]
+        calls.append(trace["trace_id"])
+        return {"trace_id": trace["trace_id"], "status": "incomplete", "reason": "The relevant tool result is missing."}
+
+    result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=incomplete, confirm=True)
+    assert result["incomplete"] == 2 and result["dropped"] == 0
+    assert len(calls) == 2
+    records = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
+    assert all(r["error_kind"] == "insufficient_evidence" for r in records)
+
+
+def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, capsys):
+    triage_source.snapshot(source(), tmp_path, runner=API())
+    original = triage.run_triage
+    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
+        *args, **kwargs, judge_call=judge_call,
+        runner=lambda *_a, **_kw: pytest.fail("local snapshot must not query LangSmith")))
+    cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["kept"] == 2
+
+
+def test_cli_requires_source_when_no_snapshot_exists(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--dry-run"])
+    assert "no local snapshot" in capsys.readouterr().err

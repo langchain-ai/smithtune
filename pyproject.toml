@@ -28,7 +28,7 @@ Issues = "https://github.com/langchain-ai/smithtune/issues"
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
-deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2"]
+deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]
 
 [tool.setuptools.package-data]
 smithtune = ["skills/*/*.md", "skills/*/*.json"]

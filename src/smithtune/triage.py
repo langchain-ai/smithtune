@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.resources import files
 from pathlib import Path
+from threading import Lock
 from uuid import NAMESPACE_URL, uuid5
 
 from smithtune.artifacts import _atomic_text, _json_dump, _jsonl_dump, _load_json, _load_jsonl, _run, exclusive_output
@@ -15,7 +16,7 @@ from smithtune.curation import _api, _uuid, _write_new
 from smithtune.dataset import validate_trajectories
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
-from smithtune.triage_judges import PROVIDERS, api_judge, check_credentials, deepagent_judge, judge_messages, rubric_text, validate_judgment
+from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, judge_messages, rubric_text, validate_judgment
 from smithtune.triage_source import load_snapshot, snapshot
 
 
@@ -74,12 +75,20 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     rubric = rubric_text()
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
                 "runner": runner_mode, "max_input_chars": max_input_chars, "max_output_tokens": max_output_tokens}
+    if runner_mode == "deepagent":
+        # The coordinator skill changes scheduling decisions and belongs in
+        # the resume identity just like the judge rubric.
+        skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
+        identity.update(agent_version=2, skill_sha256=json_sha256(skill))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "traces": len(frozen["traces"]),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "judge_tasks": len(frozen["traces"]) * len(config["judges"]), "max_attempts_per_task": attempts,
             "concurrency": concurrency, "aggregation": "all slots required; strict majority; ties drop",
             "training_selection": "whole frozen conversation only if every trace passes",
-            "cost": "provider input/output rates; deepagent may make up to 12 graph steps per attempt"}
+            "cost": "provider input/output rates; deepagent adds coordinator calls and up to 12 judge graph steps per attempt"}
+    if runner_mode == "deepagent":
+        plan["coordinator"] = config["judges"][0]
+        plan["code_mode"] = "sandboxed Python; bounded judge batches; no host filesystem or network"
     _json_dump(output_dir / "plan.json", plan)
     if dry_run:
         return plan
@@ -119,6 +128,8 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                 error_kind = "invalid_result"
                 result = validate_judgment(response, trace)
                 return {**record, "status": "complete", "judgment": result}
+            except IncompleteJudgment as exc:
+                return {**record, "status": "error", "error_kind": "insufficient_evidence", "error": str(exc)}
             except Exception:
                 if attempt + 1 < attempts:
                     sleeper(2 ** attempt)
@@ -126,19 +137,20 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
 
     pending = [(trace, judge) for trace in frozen["traces"] for judge in config["judges"]
                if records.get((trace["trace_id"], judge["name"]), {}).get("status") != "complete"]
+    record_lock = Lock()
+
+    def save_record(record):
+        with record_lock:
+            records[(record["trace_id"], record["judge"])] = record
+            _jsonl_dump(results_path, [records[key] for key in sorted(records)])
+
     try:
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = []
-            try:
-                for trace, judge in pending:
-                    futures.append(executor.submit(judge_one, trace, judge))
-                for future in as_completed(futures):
-                    record = future.result()
-                    records[(record["trace_id"], record["judge"])] = record
-                    _jsonl_dump(results_path, [records[key] for key in sorted(records)])
-            finally:
-                for future in futures:
-                    future.cancel()
+        if runner_mode == "deepagent" and pending and judge_call is None:
+            from smithtune.triage_coordinator import coordinate
+            coordinate(pending, judge_one, save_record, output_dir, concurrency=concurrency,
+                       max_tokens=max_output_tokens, coordinator_judge=config["judges"][0])
+        elif pending:
+            _run_direct(pending, judge_one, save_record, concurrency)
     finally:
         labels = [_label(trace, records, config["judges"]) for trace in frozen["traces"]]
         for label in labels:
@@ -168,6 +180,19 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                 report.append(f"- {label['trace_id']}: keep={keep}, {label['status']}. " + " ".join(reasons).replace("\n", " "))
         _atomic_text(output_dir / "report.md", "\n".join(report) + "\n")
     return summary
+
+
+def _run_direct(pending, judge_one, save_record, concurrency):
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = []
+        try:
+            for trace, judge in pending:
+                futures.append(executor.submit(judge_one, trace, judge))
+            for future in as_completed(futures):
+                save_record(future.result())
+        finally:
+            for future in futures:
+                future.cancel()
 
 
 def selected_examples(triage_dir: Path) -> list[dict]:

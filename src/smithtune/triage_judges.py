@@ -29,6 +29,16 @@ RESULT_SCHEMA = {
         }},
     },
 }
+INCOMPLETE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["trace_id", "status", "reason"],
+    "properties": {"trace_id": {"type": "string"}, "status": {"const": "incomplete"},
+                   "reason": {"type": "string", "minLength": 1, "maxLength": 1000}},
+}
+
+
+class IncompleteJudgment(PipelineError):
+    """A judge explicitly reports missing evidence instead of a quality vote."""
 
 
 def rubric_text() -> str:
@@ -47,6 +57,8 @@ def _strings(value):
 
 
 def validate_judgment(value: dict, trace: dict) -> dict:
+    if not list(Draft202012Validator(INCOMPLETE_SCHEMA).iter_errors(value)) and value["trace_id"] == trace["trace_id"]:
+        raise IncompleteJudgment(value["reason"])
     if list(Draft202012Validator(RESULT_SCHEMA).iter_errors(value)):
         raise PipelineError("judge response does not match the result schema")
     if type(value["keep"]) is not int or value["trace_id"] != trace["trace_id"]:
@@ -79,7 +91,7 @@ def check_credentials(judges: list[dict]) -> None:
 
 
 def judge_messages(trace: dict, rubric: str, rules: list[str]) -> list[dict]:
-    return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps(RESULT_SCHEMA)
+    return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps({"oneOf": [RESULT_SCHEMA, INCOMPLETE_SCHEMA]})
              + "\nAdditional reviewed selection rules:\n" + json.dumps(rules)},
             {"role": "user", "content": json.dumps({"untrusted_trace_evidence": trace}, ensure_ascii=False)}]
 

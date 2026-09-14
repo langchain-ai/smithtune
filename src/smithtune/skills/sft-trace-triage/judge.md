@@ -22,11 +22,24 @@ error can be good training data. Appropriate refusal or a clear statement of
 a real limitation can also be good data. Do not reward length or demand exact
 wording. A terse user message is not itself a defect.
 
+Read the current trace's assistant steps in order. For each material decision,
+check what the user asked, what evidence was available, what action was taken,
+and what result was observed. Inspect child runs as separate executions with
+their own inputs. Do not judge earlier conversation turns a second time; use
+them to understand this trace. Other subagents judge those turns separately.
+
 Drop it when there is a material unsupported claim, wrong tool or argument,
 false claim of completion, uncorrected failure, or other behavior that the
 model should not learn. Check step decisions against evidence available at
 that step. Do not use a later tool result to justify an earlier unsupported
 claim. A successful final answer does not excuse a bad process.
+
+Make one decision for the whole current trace. Do not keep only its final
+answer or propose a shortened training example. Do not infer quality from
+trace length, a success status, or another judge's vote. If required evidence
+is missing and you cannot make a supported decision, return
+`{"trace_id":"<the supplied trace ID>","status":"incomplete","reason":"<missing evidence>"}`.
+The CLI records this as an incomplete task, never as a quality drop vote.
 
 SFT targets assistant messages. User messages and tool results provide context.
 Privacy or tool-version restrictions are project-specific selection rules;

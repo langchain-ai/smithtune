@@ -15,12 +15,17 @@ For the optional Deep Agents judge runner:
 
 ```bash
 sfw uv sync --locked --extra test --extra deepagents --python 3.12
-uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage.py
+uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage_coordinator.py tests/test_triage.py
 ```
 
-Deep Agents and its OpenAI adapter are pinned in the optional `deepagents` extra.
+Deep Agents, its OpenAI adapter, and Monty are pinned in the optional `deepagents` extra.
 Tests use the actual agent graph with a deterministic local model. They check
-skill loading, fresh task state, read-only tools, and full evidence retention.
+coordinator skill loading, Python sandbox execution, subagent dispatch, bounded
+concurrency, fresh judge context, full evidence retention, and resume.
+Monty is the Pydantic project's MIT-licensed Python sandbox. Version 0.0.23
+was checked against its source, PyPI metadata, and OSV on 2026-09-14; no published
+advisories were returned. Code gets no host mounts or OS handlers. Only the
+three reviewed trace/task functions cross the sandbox boundary.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
