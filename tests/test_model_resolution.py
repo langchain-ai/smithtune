@@ -14,15 +14,31 @@ from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import ModelOptions, PipelineError
 
 
-@pytest.mark.parametrize("provider", [baseten, fireworks])
+@pytest.mark.parametrize("provider,expected", [
+    *((baseten, model) for model in baseten.MODEL_SPECS.values()),
+    *((fireworks, model) for model in fireworks.MODEL_SPECS.values()),
+])
 @pytest.mark.parametrize("selector", ["name", "base_model", "tokenizer_model"])
-def test_explicit_model_resolves_the_provider_rendering_configuration(provider, selector):
-    expected = provider.DEFAULT_MODEL
+def test_explicit_model_resolves_the_provider_rendering_configuration(provider, expected, selector):
     actual = resolve_model_options(
         ModelOptions(model=getattr(expected, selector)), provider.MODEL_SPECS,
         provider=expected.provider,
     )
     assert actual == expected
+
+
+@pytest.mark.parametrize("model", [*baseten.MODEL_SPECS.values(), *fireworks.MODEL_SPECS.values()])
+def test_supported_model_preflight_checks_its_selected_identity_and_context(model):
+    calls = []
+
+    def resolver(base_model, context):
+        calls.append((base_model, context))
+        if model.provider == "baseten":
+            return baseten.BasetenModelCapability(base_model, context)
+        return capabilities.FireworksModelCapability(base_model, model.tokenizer_model, context, True)
+
+    assert capabilities.preflight_model(model, capability_resolver=resolver) == model
+    assert calls == [(model.base_model, model.training_context_limit)]
 
 
 def test_explicit_fireworks_model_selects_kimi_without_qwen_defaults():
@@ -141,10 +157,27 @@ def test_inference_serverless_flag_does_not_determine_training_support(inference
     assert capability.supervised_lora_tunable is True
 
 
-@pytest.mark.parametrize("value", [False, None, "true", 1])
-def test_fireworks_rejects_missing_invalid_or_false_lora_training_support(value):
+@pytest.mark.parametrize("value", [None, "true", 1])
+def test_fireworks_rejects_invalid_managed_lora_metadata(value):
     with pytest.raises(PipelineError, match="LoRA training|supervised LoRA"):
         _fetch_document(_fireworks_document(supervisedLoraTunable=value, supportsServerless=True))
+
+
+@pytest.mark.parametrize("alias", ["deepseek-v4-flash-0731", "muse-glimmer-30b"])
+@pytest.mark.parametrize("managed_flag", [False, True, "absent"])
+def test_serverless_training_does_not_require_managed_sft_support(alias, managed_flag):
+    model = fireworks.MODEL_SPECS[alias]
+    document = _fireworks_document(
+        name=model.base_model, huggingFaceUrl=f"https://huggingface.co/{model.tokenizer_model}",
+        supervisedLoraTunable=managed_flag, trainingContextLength=65_536,
+    )
+    if managed_flag == "absent":
+        del document["supervisedLoraTunable"]
+    capability = capabilities.fetch_fireworks_model_capability(
+        model.base_model, model.training_context_limit, api_key="test-key",
+        opener=lambda *args, **kwargs: io.BytesIO(json.dumps(document).encode()),
+    )
+    assert capabilities.preflight_model(model, capability_resolver=lambda *args: capability) == model
 
 
 @pytest.mark.parametrize("value", [None, 0, -1, True, 1.5, "131072"])

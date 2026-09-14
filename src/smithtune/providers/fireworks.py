@@ -65,6 +65,26 @@ MODEL_SPECS = {
         trust_remote_code=True,
         requires_tool_declarations=True,
     ),
+    "deepseek-v4-flash-0731": ModelSpec(
+        name="deepseek-v4-flash-0731",
+        base_model="accounts/fireworks/models/deepseek-v4-flash-0731",
+        tokenizer_model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        tokenizer_revision="7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+        renderer="deepseek_v4",
+        max_seq_len=262_144,
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+    ),
+    "muse-glimmer-30b": ModelSpec(
+        name="muse-glimmer-30b",
+        base_model="accounts/fireworks/models/muse-glimmer-30b",
+        tokenizer_model="meta-models/Muse-Glimmer-30B",
+        tokenizer_revision="a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+        renderer="muse_glimmer",
+        max_seq_len=131_072,
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+    ),
 }
 
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]

@@ -1,12 +1,14 @@
 """Opt-in checks using public, pinned tokenizer assets; no provider resources."""
 
 from dataclasses import replace
+import copy
 import os
 
 import pytest
 
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import PipelineError
+from smithtune.hf_rendering import _normalize_messages
 from smithtune.rendering import load_training_renderer, render_row_tokens, resolve_rendering_model
 
 
@@ -23,6 +25,7 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
     model = resolve_rendering_model(model)
     renderer = load_training_renderer(model)
     messages = [
+        {"role": "system", "content": "SYSTEM_CONTEXT_SENTINEL"},
         {"role": "user", "content": "USER_CONTEXT_SENTINEL"},
         {"role": "assistant", "content": "", "reasoning_content": "REASONING_SENTINEL",
          "tool_calls": [{"id": "call-1", "type": "function", "function": {
@@ -37,23 +40,66 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         "name": "weather", "description": "Look up weather.",
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
     }}]
+    original_messages = copy.deepcopy(messages)
     rows = render_row_tokens({"messages": messages, "tools": tools}, model, renderer=renderer, include_loss_mask=True)
-    assert len(rows) == 1
-    datum = rows[0]
-    assert len(datum.token_ids) == len(datum.token_weights)
-    target = renderer.tokenizer.decode([
-        token for token, weight in zip(datum.token_ids, datum.token_weights, strict=True) if weight
-    ])
+    assert messages == original_messages
+    expected_datums = 2 if model.renderer in {"muse_glimmer", "hf_prefix_qwen3_5"} else 1
+    assert len(rows) == expected_datums
+    target = ""
+    for datum in rows:
+        assert len(datum.token_ids) == len(datum.token_weights)
+        target += renderer.tokenizer.decode([
+            token for token, weight in zip(datum.token_ids, datum.token_weights, strict=True) if weight
+        ])
     for expected in ("REASONING_SENTINEL", "ASSISTANT_ONE_SENTINEL", "ASSISTANT_TWO_SENTINEL", "weather", "Paris", "café 🐢 東京"):
         assert expected in target
-    for context in ("USER_CONTEXT_SENTINEL", "TOOL_RESULT_SENTINEL", "USER_TWO_SENTINEL"):
+    for expected in ("REASONING_SENTINEL", "ASSISTANT_ONE_SENTINEL", "ASSISTANT_TWO_SENTINEL"):
+        assert target.count(expected) == 1
+    for context in ("SYSTEM_CONTEXT_SENTINEL", "USER_CONTEXT_SENTINEL", "TOOL_RESULT_SENTINEL", "USER_TWO_SENTINEL"):
         assert context not in target
     # Reloading the saved identities must accept the same assets and versions.
     assert resolve_rendering_model(model) == model
-    if model.provider == "baseten":
+    if model.renderer == "hf_assistant":
         assert target.count("<think>") == 3
         assert target.count("</think>") == 3
         assert target.count("<|im_end|>") == 3
         assert "trl=1.13.0" in model.rendering_version
+    if model.provider == "baseten":
         with pytest.raises(PipelineError, match="implementation differs"):
             load_training_renderer(replace(model, rendering_version="previous-renderer"))
+    if model.renderer == "hf_prefix_glm53_flash":
+        assert target.count("<|observation|>") == 1
+        assert target.count("<|user|>") == 2
+    if model.renderer == "hf_prefix_kimi_k3":
+        assert "<|end_of_msg|>" not in target
+        assert target.count("<|close|>message<|sep|>") == 3
+
+
+@pytest.mark.parametrize("model", [model for model in baseten.MODEL_SPECS.values() if model.renderer.startswith("hf_prefix_")], ids=lambda model: model.name)
+def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
+    renderer = load_training_renderer(model)
+    messages = [
+        {"role": "user", "content": "FIRST_USER"},
+        {"role": "assistant", "reasoning_content": "FIRST_REASON", "content": "FIRST_ANSWER"},
+        {"role": "assistant", "reasoning_content": "", "content": "FOLLOWUP_ANSWER"},
+        {"role": "user", "content": "SECOND_USER"},
+        {"role": "assistant", "reasoning_content": "LAST_REASON", "content": ""},
+    ]
+    for index in (1, 2, 4):
+        prefix = renderer.prompt_tokens(messages[:index])
+        datum = renderer.render(messages[:index + 1])[-1]
+        assert datum.token_ids[:len(prefix)] == prefix
+        expected = renderer.tokenizer.apply_chat_template(
+            _normalize_messages(messages[:index + 1]), tokenize=False, add_generation_prompt=False,
+        )
+        if model.renderer == "hf_prefix_glm53_flash":
+            expected += "<|user|>"
+        assert renderer.tokenizer.decode(datum.token_ids) == expected
+        assert datum.token_weights[len(prefix)] == 1
+    rows = renderer.render(messages)
+    target = "".join(renderer.tokenizer.decode([
+        token for token, weight in zip(row.token_ids, row.token_weights, strict=True) if weight
+    ]) for row in rows)
+    for sentinel in ("FIRST_REASON", "FIRST_ANSWER", "FOLLOWUP_ANSWER", "LAST_REASON"):
+        assert target.count(sentinel) == 1
+    assert "FIRST_USER" not in target and "SECOND_USER" not in target

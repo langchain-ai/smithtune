@@ -47,7 +47,49 @@ MODEL_SPECS = {
         supports_reasoning_content=True,
         requires_tool_declarations=True,
         provider="baseten",
-    )
+    ),
+    "kimi-k3": ModelSpec(
+        name="kimi-k3",
+        base_model="moonshotai/Kimi-K3",
+        tokenizer_model="moonshotai/Kimi-K3",
+        tokenizer_revision="301be1b88c89c0d3a763da6301352cb8fe399e90",
+        renderer="hf_prefix_kimi_k3",
+        max_seq_len=131_072,
+        trainer_max_seq_len=131_072,
+        thinking_trace_history_mode="preserved",
+        trust_remote_code=True,
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+        provider="baseten",
+    ),
+    "qwen3p5-9b": ModelSpec(
+        name="qwen3p5-9b",
+        base_model="Qwen/Qwen3.5-9B",
+        tokenizer_model="Qwen/Qwen3.5-9B",
+        tokenizer_revision="c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+        renderer="hf_prefix_qwen3_5",
+        max_seq_len=131_072,
+        trainer_max_seq_len=131_072,
+        thinking_trace_history_mode="interleaved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+        provider="baseten",
+    ),
+    "glm-5p3-flash": ModelSpec(
+        name="glm-5p3-flash",
+        base_model="zai-org/GLM-5.3-Flash",
+        tokenizer_model="zai-org/GLM-5.3-Flash",
+        tokenizer_revision="eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+        renderer="hf_prefix_glm53_flash",
+        # Keep the documented configuration; live larger contexts may use a
+        # different parallelism/loss configuration.
+        max_seq_len=131_072,
+        trainer_max_seq_len=131_072,
+        thinking_trace_history_mode="preserved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+        provider="baseten",
+    ),
 }
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]
 BASETEN_CAPABILITIES_URL = "https://api.baseten.co/v1/loops/capabilities"

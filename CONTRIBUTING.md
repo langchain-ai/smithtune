@@ -38,6 +38,12 @@ prepared-data identity. Native annotated templates pass through unchanged;
 unrecognized unannotated templates fail preparation. The model support registry
 remains separate from upstream template coverage.
 
+The additional Baseten models use `native_rendering.py`: it calls the official
+formatter, verifies each response against its inference prompt, and coalesces
+only identical token prefixes. Keep its implementation version in the prepared
+identity when changing formatting or masks. Test model-specific stop tokens,
+empty reasoning, history changes, and Unicode against the pinned real tokenizers.
+
 CI also downloads the exact tokenizer revisions for each supported provider/model
 configuration and checks tools, reasoning, and loss masks without provisioning
 training or downloading model weights. Run those checks locally with:

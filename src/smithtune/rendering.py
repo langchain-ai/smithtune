@@ -23,8 +23,12 @@ def rendering_version(model: ModelSpec) -> str:
         transformers_version = metadata.version("transformers")
         if model.provider == "baseten":
             from smithtune.hf_rendering import HF_RENDERING_VERSION
+            from smithtune.native_rendering import NATIVE_MODELS, NATIVE_RENDERING_VERSION
 
-            implementation = f"{HF_RENDERING_VERSION};trl={metadata.version('trl')}"
+            implementation = (
+                NATIVE_RENDERING_VERSION if model.renderer in NATIVE_MODELS
+                else f"{HF_RENDERING_VERSION};trl={metadata.version('trl')}"
+            )
         else:
             distribution = metadata.distribution("fireworks-training-cookbook")
             source = json.loads(distribution.read_text("direct_url.json") or "{}")
@@ -43,7 +47,10 @@ def load_training_renderer(model: ModelSpec) -> Any:
         raise PipelineError("rendering implementation differs from preparation; restore dependencies or prepare again")
     if model.provider == "baseten":
         from smithtune.hf_rendering import HFRenderer, load_tokenizer
+        from smithtune.native_rendering import NATIVE_MODELS, NativePrefixRenderer
 
+        if model.renderer in NATIVE_MODELS:
+            return NativePrefixRenderer(model, load_tokenizer(model))
         return HFRenderer(model, load_tokenizer(model))
     try:
         from training.renderer import get_renderer
@@ -96,7 +103,7 @@ def resolve_rendering_model(model: ModelSpec) -> ModelSpec:
         model,
         template_sha256=_tokenizer_template_hash(
             renderer.tokenizer,
-            allow_missing=model.provider == "fireworks" and model.renderer == "kimi_k3",
+            allow_missing=model.renderer in {"kimi_k3", "deepseek_v4", "hf_prefix_kimi_k3"},
         ),
         rendering_version=rendering_version(model),
     )
@@ -107,6 +114,7 @@ def render_row_tokens(
     include_loss_mask: bool = False, reduction: str = "mean",
 ) -> list[Any]:
     """Preserve the all-assistant policy while selecting provider-specific rendering."""
+    _validate_renderer_messages(row["messages"], model)
     if model.provider == "baseten":
         return renderer.render(row["messages"], tools=row.get("tools"))
     from training.utils import parse_train_on_what, render_messages_to_datums
@@ -125,7 +133,10 @@ def validate_reasoning_support(model: ModelSpec) -> None:
         raise PipelineError(
             f"model {model.name} does not support reasoning content; use reasoning_policy='omit'"
         )
-    if resolved_renderer_name(model) not in {"qwen3_8_preserved", "kimi_k3", "hf_assistant"}:
+    if resolved_renderer_name(model) not in {
+        "qwen3_8_preserved", "kimi_k3", "hf_assistant", "deepseek_v4", "muse_glimmer",
+        "hf_prefix_kimi_k3", "hf_prefix_qwen3_5", "hf_prefix_glm53_flash",
+    }:
         raise PipelineError(
             f"renderer {model.renderer} has no verified reasoning-content adapter; "
             "use reasoning_policy='omit'"
@@ -136,8 +147,12 @@ def resolved_renderer_name(model: ModelSpec) -> str:
     """Validate an explicit thinking-history mode against the renderer registry."""
     if model.provider == "baseten":
         from smithtune.hf_rendering import validate_hf_model
+        from smithtune.native_rendering import NATIVE_MODELS, validate_native_model
 
-        validate_hf_model(model)
+        if model.renderer in NATIVE_MODELS:
+            validate_native_model(model)
+        else:
+            validate_hf_model(model)
         return model.renderer
     mode = getattr(model, "thinking_trace_history_mode", "")
     if not mode:
@@ -237,6 +252,7 @@ def validate_replay_context(
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for case in cases:
+        _validate_renderer_messages(case["messages"], model)
         if model.provider == "baseten":
             prompt_tokens = len(renderer.prompt_tokens(case["messages"], tools=case.get("tools")))
         else:
@@ -260,3 +276,19 @@ def validate_replay_context(
             continue
         accepted.append({**case, "prompt_tokens": prompt_tokens})
     return accepted, rejected
+
+
+def _validate_renderer_messages(messages: list[dict[str, Any]], model: ModelSpec) -> None:
+    if model.renderer != "muse_glimmer":
+        return
+    if not any(message.get("role") == "system" for message in messages):
+        # Muse otherwise injects today's date, changing tokens between
+        # preparation, training, and serving on different days.
+        raise PipelineError("Muse Glimmer requires an explicit system message for reproducible rendering")
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            continue
+        if message.get("content"):
+            raise PipelineError("Muse Glimmer cannot preserve visible assistant text alongside tool calls")
+        if index + 1 < len(messages) and messages[index + 1].get("role") == "assistant":
+            raise PipelineError("Muse Glimmer cannot preserve a tool-call stop before a consecutive assistant message")

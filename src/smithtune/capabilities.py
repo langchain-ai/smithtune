@@ -21,10 +21,15 @@ FIREWORKS_TRAINING_CATALOG = "https://docs.fireworks.ai/fine-tuning/models"
 FIREWORKS_SERVERLESS_CONTEXT_LIMITS = {
     "accounts/fireworks/models/qwen3p8-27b": 131_072,
     "accounts/fireworks/models/kimi-k3": 196_608,
+    "accounts/fireworks/models/deepseek-v4-flash-0731": 262_144,
+    "accounts/fireworks/models/muse-glimmer-30b": 131_072,
 }
 # Loops does not expose supported losses in its capabilities response. Keep
 # known cross-entropy compatibility separate from its live model catalog.
-BASETEN_CROSS_ENTROPY_MODELS = frozenset({"Qwen/Qwen3.8-27B"})
+BASETEN_CROSS_ENTROPY_MODELS = frozenset({
+    "Qwen/Qwen3.8-27B", "Qwen/Qwen3.5-9B", "moonshotai/Kimi-K3",
+    "zai-org/GLM-5.3-Flash",
+})
 MAX_METADATA_RESPONSE_BYTES = 1024 * 1024
 _MODEL_RESOURCE = re.compile(r"accounts/[a-z0-9][a-z0-9-]{0,62}/models/[a-z0-9][a-z0-9-]{0,62}")
 _HF_MODEL_PATH = re.compile(r"/([A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*)/?")
@@ -35,6 +40,7 @@ class FireworksModelCapability:
     model_name: str
     tokenizer_model: str
     training_context_length: int
+    # Managed SFT metadata, not eligibility for the token-level Training API.
     supervised_lora_tunable: bool
 
 
@@ -122,11 +128,11 @@ def fetch_fireworks_model_capability(
         raise PipelineError("Fireworks returned malformed model metadata") from None
     if not isinstance(document, dict) or document.get("name") != model:
         raise PipelineError("Fireworks returned metadata for an unexpected model")
-    tunable = document.get("supervisedLoraTunable")
+    tunable = document.get("supervisedLoraTunable", False)
     if not isinstance(tunable, bool):
         raise PipelineError("Fireworks returned invalid LoRA training metadata")
-    if not tunable:
-        raise PipelineError("Fireworks does not advertise supervised LoRA training for this model")
+    # DeepSeek 0731 and Muse have this Managed SFT flag set to false while
+    # explicitly supporting serverless Training API LoRA in the catalog.
     context = document.get("trainingContextLength")
     if not _positive_integer(context):
         raise PipelineError("Fireworks returned an invalid training context limit")
@@ -179,8 +185,8 @@ def preflight_model(
             raise PipelineError("Fireworks returned invalid model capability metadata")
         if capability.model_name != model.base_model:
             raise PipelineError("Fireworks returned metadata for an unexpected model")
-        if capability.supervised_lora_tunable is not True:
-            raise PipelineError("Fireworks does not advertise supervised LoRA training for this model")
+        if not isinstance(capability.supervised_lora_tunable, bool):
+            raise PipelineError("Fireworks returned invalid LoRA training metadata")
         if not _positive_integer(capability.training_context_length):
             raise PipelineError("Fireworks returned an invalid training context limit")
         if capability.tokenizer_model != model.tokenizer_model:

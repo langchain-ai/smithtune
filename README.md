@@ -143,8 +143,13 @@ its compatible tokenizer and rendering implementation automatically. The legacy
 | Provider | Model alias | Provider model ID | Training context limit |
 | --- | --- | --- | --- |
 | Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 131,072 |
+| Baseten Loops | `kimi-k3` | `moonshotai/Kimi-K3` | 131,072 |
+| Baseten Loops | `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | 131,072 |
+| Baseten Loops | `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | 131,072 |
 | Fireworks serverless Training API | `qwen3p8-27b` | `accounts/fireworks/models/qwen3p8-27b` | 131,072 |
 | Fireworks serverless Training API | `kimi-k3` | `accounts/fireworks/models/kimi-k3` | 196,608 |
+| Fireworks serverless Training API | `deepseek-v4-flash-0731` | `accounts/fireworks/models/deepseek-v4-flash-0731` | 262,144 |
+| Fireworks serverless Training API | `muse-glimmer-30b` | `accounts/fireworks/models/muse-glimmer-30b` | 131,072 |
 
 Add `--max-seq-len 32768`, for example, to select a smaller preparation and training
 context without configuring a custom tokenizer. The current adapters use LoRA.
@@ -152,22 +157,46 @@ Before downloading tokenizer assets or fetching the dataset, preparation checks
 the selected provider's training metadata with `BASETEN_API_KEY` or
 `FIREWORKS_API_KEY`. Training checks availability again before starting resources.
 Baseten's live capabilities must accommodate the selected context. Fireworks uses
-live model metadata for supervised LoRA eligibility and the documented serverless
-training catalog for shared-pool availability and context; its inference
-`supportsServerless` flag does not establish training availability. An unverified
+live model metadata for model/tokenizer identity and the documented serverless
+training catalog for LoRA availability and context. Neither its inference
+`supportsServerless` flag nor its Managed SFT `supervisedLoraTunable` flag
+determines serverless Training API eligibility. An unverified
 model fails with a compatibility error even if the provider supports it elsewhere.
+The Baseten profiles retain conservative context limits even where the live API
+advertises more. GLM Flash uses the documented 131,072-token configuration;
+GLM 5.3 without Flash is unsupported because its documented long-context
+configuration excludes cross-entropy loss. Availability checks and tokenizer
+tests do not constitute a completed provider training run.
 
-Baseten loads the official Hugging Face tokenizer and uses native assistant-mask
+Baseten loads the official Hugging Face tokenizer. Qwen3.8 uses native assistant-mask
 annotations when available, or a maintained training template from pinned TRL.
-The supported Qwen template trains on assistant text, tool calls, retained
+That template trains on assistant text, tool calls, retained
 reasoning, thinking markers (including empty thinking blocks), and the end-of-turn
 token and newline. User messages, tool results, and role headers are context only.
 The training template must preserve the official template's rendered text.
+For Kimi K3, Qwen3.5-9B, and GLM 5.3 Flash, a scoped adapter calls the official
+formatter and masks the response after its native inference prompt. It verifies
+the prompt prefix and keeps its tokenization when BPE merges across the response
+boundary. Markers already supplied in the generation prompt are context only.
+Kimi's appended history delimiter is also context; GLM's next-role stop token is
+a target. These adapters have no Fireworks rendering dependency.
+
+Targets share a datum only while their native token prefixes remain identical.
+Qwen3.5 removes earlier reasoning when another user turn arrives, so training
+keeps those earlier targets in separate examples. Each assistant is trained once;
+source conversations remain intact in the saved dataset and never cross data splits.
 Fireworks renders and masks with its pinned training cookbook. Both target all
-supported assistant messages. Preparation records the exact tokenizer commit,
-official template hash when present, and rendering implementation (including TRL's version for
-Baseten) in `prepared/manifest.json`; training rejects a changed implementation.
-Kimi's Python formatter is identified by its pinned tokenizer and cookbook commits.
+supported assistant messages. Muse uses the cookbook's example splitting; DeepSeek
+does so for conversations without tools. Muse requires an explicit system message
+because its default otherwise inserts today's date and changes across runs.
+Muse rejects assistant messages combining visible text with tool calls, and tool
+calls followed immediately by another assistant message: the pinned cookbook
+cannot preserve those shapes without dropping text or changing stop tokens.
+All profiles support text and tool trajectories; vision inputs remain unsupported.
+Preparation records the exact tokenizer commit, official template hash when present,
+and rendering implementation (including TRL's version where used) in
+`prepared/manifest.json`; training rejects a changed implementation. Python
+formatters are identified by their pinned tokenizer and rendering implementation.
 Baseten data prepared with an earlier renderer must be prepared again.
 `--no-fetch` reuses the LangSmith export and tool schemas; provider preflight and
 tokenizer resolution still run. These checks do not provision training resources.
