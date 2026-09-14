@@ -72,7 +72,9 @@ def _parser() -> argparse.ArgumentParser:
         "--test-fraction", type=float,
         help=f"test fraction for either provider (default: {dataset.DEFAULT_TEST_FRACTION}; use 0 for no test split)",
     )
-    prep.add_argument("--model-profile", default=ModelOptions().model_profile, help="provider model profile or custom")
+    model_choice = prep.add_mutually_exclusive_group(required=True)
+    model_choice.add_argument("--model", help="provider model ID or supported model alias")
+    model_choice.add_argument("--model-profile", help="provider model profile or custom")
     prep.add_argument("--base-model")
     prep.add_argument("--tokenizer-model")
     prep.add_argument("--tokenizer-revision")

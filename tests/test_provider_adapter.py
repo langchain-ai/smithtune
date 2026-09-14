@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from smithtune import dataset
+from smithtune import capabilities, dataset
 from smithtune import cli as pipeline
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import PipelineError
@@ -55,11 +55,12 @@ def _write_raw_dataset(root, count=100):
     write_empty_tool_snapshot(root, examples)
 
 
-def test_provider_aware_commands_default_to_fireworks_and_accept_baseten():
+def test_provider_aware_commands_default_to_fireworks_and_accept_baseten(monkeypatch):
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     parser = pipeline._parser()
 
     default_prepare = parser.parse_args(
-        ["prepare", "--workspace-id", "workspace-id", "--dataset-id", "dataset-id"]
+        ["prepare", "--model", "qwen3p8-27b", "--workspace-id", "workspace-id", "--dataset-id", "dataset-id"]
     )
     default_plan = parser.parse_args(["plan"])
     default_train = parser.parse_args(["train", "--run-dir", "run", "--run-id", "run-id"])
@@ -71,10 +72,13 @@ def test_provider_aware_commands_default_to_fireworks_and_accept_baseten():
     assert baseten_plan.provider == "baseten"
 
 
-def test_baseten_resolves_qwen_profile():
+def test_baseten_resolves_qwen_profile(monkeypatch):
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     args = pipeline._parser().parse_args(
         [
             "prepare",
+            "--model",
+            "qwen3p8-27b",
             "--provider",
             "baseten",
             "--workspace-id",
@@ -89,15 +93,18 @@ def test_baseten_resolves_qwen_profile():
     assert model.base_model == "Qwen/Qwen3.8-27B"
     assert model.tokenizer_model == "Qwen/Qwen3.8-27B"
     assert model.tokenizer_revision == "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
-    assert model.renderer == "qwen3_8_preserved"
-    assert model.max_seq_len == 262_144
+    assert model.renderer == "hf_qwen3_8_preserved"
+    assert model.max_seq_len == 131_072
 
 
-def test_provider_specific_training_options_are_rejected():
+def test_provider_specific_training_options_are_rejected(monkeypatch):
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     parser = pipeline._parser()
     baseten_prepare = parser.parse_args(
         [
             "prepare",
+            "--model",
+            "qwen3p8-27b",
             "--provider",
             "baseten",
             "--workspace-id",
@@ -111,6 +118,8 @@ def test_provider_specific_training_options_are_rejected():
     baseten_zero_rank = parser.parse_args(
         [
             "prepare",
+            "--model",
+            "qwen3p8-27b",
             "--provider",
             "baseten",
             "--workspace-id",
@@ -144,6 +153,21 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
     tmp_path, monkeypatch, capsys, provider, test_fraction, train_rows, test_rows
 ):
     _write_raw_dataset(tmp_path)
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
+    capability_calls = []
+
+    def fireworks_capability(model, length):
+        capability_calls.append((model, length))
+        return capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
+
+    def baseten_capability(model, length):
+        capability_calls.append((model, length))
+        return baseten.BasetenModelCapability(model, 131_072)
+
+    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", fireworks_capability)
+    monkeypatch.setattr(baseten, "fetch_model_capability", baseten_capability)
+    adapter_module = fireworks if provider == "fireworks" else baseten
+    monkeypatch.setattr(adapter_module, "resolve_rendering_model", lambda model: model)
     monkeypatch.setattr(
         dataset,
         "validate_model_context",
@@ -161,7 +185,7 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
     )
 
     argv = [
-        "pipeline.py", "prepare", "--provider", provider,
+        "pipeline.py", "prepare", "--provider", provider, "--model", "qwen3p8-27b",
         "--workspace-id", "workspace-id", "--dataset-id", "dataset-id",
         "--data-dir", str(tmp_path), "--no-fetch",
     ]
@@ -173,9 +197,10 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
 
     assert manifest["provider"] == {
         "name": provider,
-        "renderer": "qwen3_8_preserved",
+        "renderer": adapter_module.DEFAULT_MODEL.renderer,
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
     }
+    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, 131_072)]
     assert manifest["split"]["train"] == train_rows
     assert manifest["split"]["validation"] == 10
     assert manifest["split"]["test"] == test_rows
@@ -254,6 +279,7 @@ def test_baseten_runtime_errors_use_the_cli_error_path(tmp_path, monkeypatch, ca
         def train(self, *args, **kwargs):
             raise baseten.BasetenRuntimeError("BASETEN_API_KEY is required for preflight")
 
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     monkeypatch.setattr(pipeline, "get_provider", lambda name: Provider())
     with pytest.raises(SystemExit) as error:
         pipeline.main([

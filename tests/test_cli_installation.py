@@ -44,10 +44,11 @@ main(['--help'])
 
 
 def test_default_and_explicit_data_paths_follow_invocation(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "get_version", lambda: "0.1.0")
     monkeypatch.chdir(tmp_path)
     for command in ("prepare", "plan", "train", "eval-plan", "evaluate"):
         extras = {
-            "prepare": ["--workspace-id", "w", "--dataset-id", "d"],
+            "prepare": ["--workspace-id", "w", "--dataset-id", "d", "--model", "qwen3p8-27b"],
             "plan": [],
             "train": ["--run-dir", "runs/test", "--run-id", "test"],
             "eval-plan": ["--output-dir", "replay"],

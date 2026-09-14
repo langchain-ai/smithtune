@@ -59,7 +59,7 @@ def test_renderer_matches_pinned_upstream_snapshot():
 def test_real_renderer_context_boundaries(monkeypatch):
     from dataclasses import replace
     import training.utils.tokenizers
-    from smithtune.providers.baseten import DEFAULT_MODEL
+    from smithtune.providers.fireworks import DEFAULT_MODEL
     from smithtune.rendering import validate_model_context, validate_replay_context
 
     monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: CharacterTokenizer())

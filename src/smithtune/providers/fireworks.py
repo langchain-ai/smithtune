@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.capabilities import preflight_model
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
@@ -32,7 +33,7 @@ from smithtune.providers.base import (
     ReasoningPolicy,
     TrainingOptions,
 )
-from smithtune.rendering import SFT_TARGET_POLICY
+from smithtune.rendering import SFT_TARGET_POLICY, load_training_renderer, resolve_rendering_model
 
 
 TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
@@ -321,10 +322,11 @@ class FireworksProvider:
         fetch: bool = True,
         check_render: bool = True,
     ) -> dict[str, Any]:
+        model = resolve_rendering_model(preflight_model(self.model_from_options(model_options)))
         return prepare_dataset(
             workspace_id,
             dataset_id,
-            self.model_from_options(model_options),
+            model,
             data_dir,
             inference_contract=inference_contract,
             reasoning_policy=reasoning_policy,
@@ -414,6 +416,9 @@ class FireworksProvider:
         plan = self.plan(data_dir, run_id, settings)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
+        model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
+        preflight_model(model)
+        load_training_renderer(model)
         try:
             from training.recipes import sft_loop
             from training.utils import RunnerConfig, WandBConfig
@@ -425,9 +430,6 @@ class FireworksProvider:
         run_dir.mkdir(parents=True, exist_ok=True)
         _set_skill_session()
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
-        model = _model_from_manifest(
-            _load_json(data_dir / "prepared" / "manifest.json")
-        )
         lora_rank = settings.lora_rank or model.default_lora_rank
         _json_dump(run_dir / "plan.json", plan)
         _write_run_md(

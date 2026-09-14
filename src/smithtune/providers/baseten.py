@@ -19,8 +19,9 @@ import urllib.error
 import urllib.request
 
 from smithtune.inference_contract import InferenceContract
+from smithtune.capabilities import open_without_redirects, preflight_model
 from smithtune.models import resolve_model_options, resolve_prepared_model
-from smithtune.rendering import SFT_TARGET_POLICY, resolved_renderer_name
+from smithtune.rendering import load_training_renderer, render_row_tokens, resolve_rendering_model
 from smithtune.providers.base import (
     CommonSFTSettings,
     ModelOptions,
@@ -39,8 +40,8 @@ MODEL_SPECS = {
         base_model="Qwen/Qwen3.8-27B",
         tokenizer_model="Qwen/Qwen3.8-27B",
         tokenizer_revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        renderer="qwen3_8_preserved",
-        max_seq_len=262_144,
+        renderer="hf_qwen3_8_preserved",
+        max_seq_len=131_072,
         trainer_max_seq_len=131_072,
         thinking_trace_history_mode="preserved",
         supports_reasoning_content=True,
@@ -241,7 +242,7 @@ def fetch_model_capability(
     *,
     api_key: str | None = None,
     timeout_seconds: float = 30.0,
-    opener: Any = urllib.request.urlopen,
+    opener: Any = open_without_redirects,
     sleeper: Any = time.sleep,
 ) -> BasetenModelCapability:
     """Confirm model/context support without provisioning a paid trainer."""
@@ -595,10 +596,14 @@ class BasetenProvider:
         """Prepare canonical rows with the Baseten model and shared split defaults."""
         from smithtune.dataset import DEFAULT_TEST_FRACTION, DEFAULT_VALIDATION_FRACTION, prepare_dataset
 
+        model = preflight_model(
+            self.model_from_options(model_options), capability_resolver=self._capability_resolver,
+        )
+        model = resolve_rendering_model(model)
         return prepare_dataset(
             workspace_id,
             dataset_id,
-            self.model_from_options(model_options),
+            model,
             data_dir,
             inference_contract=inference_contract,
             reasoning_policy=reasoning_policy,
@@ -691,7 +696,10 @@ class BasetenProvider:
             lambda: self._capability_resolver(model.base_model, max_seq_len),
             sleeper=self._sleeper,
         )
-        _validate_capability(capability, model.base_model, max_seq_len)
+        preflight_model(
+            model, capability_resolver=lambda *_: capability,
+            required_context=max_seq_len,
+        )
 
         loops_types = self._loops_types or _resolve_loops_types()
         render_fn = self._render_fn or render_row
@@ -1138,23 +1146,10 @@ def render_row(
     renderer: Any | None = None,
 ) -> list[Any]:
     """Render one canonical row and convert every result to shifted Loops data."""
-    try:
-        from training.utils import parse_train_on_what, render_messages_to_datums
-    except ImportError as exc:
-        raise BasetenDataError("training runtime is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
-
-    if renderer is not None:
-        resolved_renderer_name(model)
     active_renderer = renderer if renderer is not None else _load_renderer(model)
-    rendered = render_messages_to_datums(
-        row["messages"],
-        renderer=active_renderer,
-        train_on_what=parse_train_on_what(SFT_TARGET_POLICY),
-        tools=row.get("tools"),
-        include_loss_mask=True,
-        reduction="none",
+    rendered_items = render_row_tokens(
+        row, model, renderer=active_renderer, include_loss_mask=True, reduction="none",
     )
-    rendered_items = rendered if isinstance(rendered, list) else [rendered]
     if not rendered_items:
         raise BasetenDataError("canonical row rendered no training datum")
     constructors = loops_types if loops_types is not None else _resolve_loops_types()
@@ -1256,18 +1251,7 @@ def _to_loops_datum(rendered: Any, loops_types: Any, max_sequence_tokens: int) -
 
 
 def _load_renderer(model: Any) -> Any:
-    try:
-        from training.renderer import get_renderer
-        from training.utils.tokenizers import load_tokenizer
-    except ImportError as exc:
-        raise BasetenDataError("training runtime is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
-    renderer_name = resolved_renderer_name(model)
-    tokenizer = load_tokenizer(
-        model.tokenizer_model,
-        model.tokenizer_revision,
-        trust_remote_code=getattr(model, "trust_remote_code", False),
-    )
-    return get_renderer(renderer_name, tokenizer)
+    return load_training_renderer(model)
 
 
 def _resolve_loops_types() -> Any:

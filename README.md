@@ -44,14 +44,17 @@ Run smithtune from a writable working directory of your choice. Data defaults to
 `./data/`; use `--data-dir` to select a different location. The training runtime
 includes PyTorch, so installation is substantial, but no local GPU is required.
 Preparation can download model tokenizer files into the Hugging Face cache.
+Public tokenizer repositories such as Qwen's can be downloaded without a Hugging
+Face token. Gated or private repositories require an authorized `HF_TOKEN` or an
+existing Hugging Face login. Only tokenizer assets are needed, not model weights.
 
 Configure credentials in your environment:
 
 | Task | Variable |
 | --- | --- |
 | Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
-| Fireworks training and inference | `FIREWORKS_API_KEY` |
-| Baseten training | `BASETEN_API_KEY` |
+| Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
+| Baseten preparation and training | `BASETEN_API_KEY` |
 | Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
 
 ## Using with a coding agent
@@ -120,7 +123,7 @@ name within an example also fail, with the example and source run IDs.
 System messages come from each trajectory and are preserved during preparation and replay.
 The default Qwen renderer supports a system message only as the first message.
 
-Choose a provider and prepare your dataset:
+Choose a provider and model, then prepare your dataset:
 
 ```bash
 provider=fireworks # or baseten
@@ -130,8 +133,42 @@ smithtune prepare \
   --provider "$provider" \
   --workspace-id '<workspace-id>' \
   --dataset-id '<dataset-id>' \
-  --model-profile qwen3p8-27b
+  --model qwen3p8-27b
 ```
+
+`--model` accepts a supported alias or the provider's model ID. The model selects
+its compatible tokenizer and rendering implementation automatically. The legacy
+`--model-profile` option is also accepted; one model selector is required.
+
+| Provider | Model alias | Provider model ID | Training context limit |
+| --- | --- | --- | --- |
+| Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 131,072 |
+| Fireworks serverless Training API | `qwen3p8-27b` | `accounts/fireworks/models/qwen3p8-27b` | 131,072 |
+| Fireworks serverless Training API | `kimi-k3` | `accounts/fireworks/models/kimi-k3` | 196,608 |
+
+Add `--max-seq-len 32768`, for example, to select a smaller preparation and training
+context without configuring a custom tokenizer. The current adapters use LoRA.
+Before downloading tokenizer assets or fetching the dataset, preparation checks
+the selected provider's training metadata with `BASETEN_API_KEY` or
+`FIREWORKS_API_KEY`. Training checks availability again before starting resources.
+Baseten's live capabilities must accommodate the selected context. Fireworks uses
+live model metadata for supervised LoRA eligibility and the documented serverless
+training catalog for shared-pool availability and context; its inference
+`supportsServerless` flag does not establish training availability. An unverified
+model fails with a compatibility error even if the provider supports it elsewhere.
+
+Baseten renders with the official Hugging Face chat template and a validated
+Qwen assistant-mask adapter. Fireworks renders with its pinned training cookbook.
+Both preserve the all-assistant training policy. Preparation records the exact
+tokenizer commit, official template hash, and rendering implementation in
+`prepared/manifest.json`; training rejects a changed template or implementation.
+Old Baseten data prepared with a Fireworks renderer must be prepared again.
+`--no-fetch` reuses the LangSmith export and tool schemas; provider preflight and
+tokenizer resolution still run. These checks do not provision training resources.
+
+Advanced `--model-profile custom` configurations remain available, but still need
+verified provider training support and a supported rendering implementation.
+An arbitrary Hugging Face model or renderer name does not establish compatibility.
 
 For an existing global contract, `--inference-contract path/to/contract.json` explicitly
 uses its schemas for every example and skips automatic capture. Legacy contract files with

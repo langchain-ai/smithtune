@@ -90,12 +90,12 @@ def test_explicit_custom_trainer_limit_survives_manifest_resolution():
 def test_conflicting_thinking_history_mode_is_rejected_before_tokenizer_loading(
     monkeypatch, stage
 ):
-    import training.utils.tokenizers
+    from smithtune import hf_rendering
 
     def unexpected_load(*args, **kwargs):
         raise AssertionError("conflicting model options must fail before loading the tokenizer")
 
-    monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", unexpected_load)
+    monkeypatch.setattr(hf_rendering, "load_tokenizer", unexpected_load)
     model = replace(baseten.DEFAULT_MODEL, thinking_trace_history_mode="interleaved")
     with pytest.raises(PipelineError, match="conflicts with.*thinking_trace_history_mode"):
         if stage == "preparation":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Literal, Protocol
 
 from smithtune.inference_contract import InferenceContract
@@ -33,6 +34,8 @@ class ModelSpec:
     provider: str = "fireworks"
     trainer_max_seq_len: int | None = None
     supports_reasoning_content: bool = False
+    template_sha256: str = ""
+    rendering_version: str = ""
 
     @property
     def training_context_limit(self) -> int:
@@ -67,6 +70,12 @@ class ModelSpec:
             raise PipelineError("supports_reasoning_content must be boolean")
         if not isinstance(self.thinking_trace_history_mode, str):
             raise PipelineError("thinking_trace_history_mode must be a string")
+        if not isinstance(self.template_sha256, str) or (
+            self.template_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.template_sha256)
+        ):
+            raise PipelineError("template_sha256 must be empty or a lowercase SHA-256 digest")
+        if not isinstance(self.rendering_version, str):
+            raise PipelineError("rendering_version must be a string")
 
 
 @dataclass(frozen=True)
@@ -97,7 +106,7 @@ class CommonSFTSettings:
 class ModelOptions:
     """Unresolved model options; each provider validates its own support."""
 
-    model_profile: str = "qwen3p8-27b"
+    model_profile: str | None = None
     base_model: str | None = None
     tokenizer_model: str | None = None
     tokenizer_revision: str | None = None
@@ -109,6 +118,7 @@ class ModelOptions:
     requires_tool_declarations: bool = False
     default_lora_rank: int | None = None
     supports_reasoning_content: bool = False
+    model: str | None = None
 
 
 @dataclass(frozen=True)
