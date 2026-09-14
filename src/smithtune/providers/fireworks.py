@@ -410,7 +410,7 @@ class FireworksProvider:
             from training.utils import RunnerConfig, WandBConfig
         except ImportError as exc:
             raise PipelineError(
-                "training dependencies are missing; reinstall smithtune with uv tool install --reinstall smithtune and run smithtune doctor"
+                "training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor"
             ) from exc
 
         run_dir.mkdir(parents=True, exist_ok=True)

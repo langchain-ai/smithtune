@@ -1134,7 +1134,7 @@ def render_row(
     try:
         from training.utils import parse_train_on_what, render_messages_to_datums
     except ImportError as exc:
-        raise BasetenDataError("training runtime is unavailable; reinstall smithtune and run smithtune doctor") from exc
+        raise BasetenDataError("training runtime is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
 
     if renderer is not None:
         resolved_renderer_name(model)
@@ -1253,7 +1253,7 @@ def _load_renderer(model: Any) -> Any:
         from training.renderer import get_renderer
         from training.utils.tokenizers import load_tokenizer
     except ImportError as exc:
-        raise BasetenDataError("training runtime is unavailable; reinstall smithtune and run smithtune doctor") from exc
+        raise BasetenDataError("training runtime is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
     renderer_name = resolved_renderer_name(model)
     tokenizer = load_tokenizer(
         model.tokenizer_model,
@@ -1268,7 +1268,7 @@ def _resolve_loops_types() -> Any:
         import baseten.loops
     except ImportError as exc:
         raise BasetenDataError(
-            "Baseten Loops is unavailable; reinstall smithtune and run smithtune doctor"
+            "Baseten Loops is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor"
         ) from exc
     return baseten.loops
 

@@ -27,11 +27,12 @@ def run(*args: str, cwd: Path = ROOT, env: dict | None = None) -> None:
 
 
 def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
-    wheels = [next(dist.glob(f"{name}-*.whl")) for name in ("smithtune", "smithtune_training_runtime")]
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    wheel = dist / f"smithtune-{version}-py3-none-any.whl"
     venv = scratch / "venv"
     run("uv", "venv", "--python", "3.12", str(venv))
     python = str(venv / "bin/python")
-    run("sfw", "uv", "pip", "install", "--python", python, *(str(p) for p in wheels), "pytest==9.1.1")
+    run("sfw", "uv", "pip", "install", "--python", python, str(wheel), "pytest==9.1.1")
     run("uv", "pip", "check", "--python", python)
     work = scratch / "customer"
     work.mkdir()
@@ -47,15 +48,25 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
     for name in ("README.md", "pyproject.toml"):
         shutil.copy2(ROOT / name, work / name)
-    provenance = work / "packages/training-runtime"
-    provenance.mkdir(parents=True)
-    shutil.copy2(ROOT / "packages/training-runtime/upstream.json", provenance / "upstream.json")
-    targets = ["tests"] if full_tests else ["tests/test_cli_installation.py", "tests/test_runtime_packaging.py"]
+    targets = ["tests"] if full_tests else ["tests/test_cli_installation.py", "tests/test_training_dependency.py"]
     run(python, "-I", "-m", "pytest", *targets, cwd=work, env=env)
     if full_tests:
+        # Commit a clean source snapshot in a disposable repository. This tests
+        # Git installation of the current working tree without committing it to
+        # the developer's repository or depending on a published branch.
+        source = scratch / "source"
+        source.mkdir()
+        for name in ("pyproject.toml", "README.md", "CONTRIBUTING.md", "MANIFEST.in", ".gitignore"):
+            shutil.copy2(ROOT / name, source / name)
+        shutil.copytree(ROOT / "src/smithtune", source / "src/smithtune", ignore=shutil.ignore_patterns("__pycache__"))
+        run("git", "init", "--quiet", str(source))
+        run("git", "add", "pyproject.toml", "README.md", "CONTRIBUTING.md", "MANIFEST.in", ".gitignore", "src/smithtune", cwd=source)
+        run("git", "diff", "--cached", "--name-only", cwd=source)
+        run("git", "-c", "user.name=Distribution test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Distribution test snapshot", cwd=source)
         tool_env = {**env, "UV_TOOL_DIR": str(scratch / "tools"), "UV_TOOL_BIN_DIR": str(scratch / "bin")}
-        run("sfw", "uv", "tool", "install", "--python", "3.12", "--with", str(wheels[1]), str(wheels[0]), cwd=work, env=tool_env)
+        run("sfw", "uv", "tool", "install", "--no-config", "--python", "3.12", "git+" + source.as_uri(), cwd=work, env=tool_env)
         run(str(scratch / "bin/smithtune"), "--version", cwd=work, env=tool_env)
+        run(str(scratch / "bin/smithtune"), "doctor", cwd=work, env=tool_env)
 
 
 def main() -> None:
@@ -65,15 +76,14 @@ def main() -> None:
     args = parser.parse_args()
     dist = args.dist_dir.resolve()
     if not args.skip_build:
-        run("sfw", "uv", "build", "--all-packages", "--out-dir", str(dist))
+        run("sfw", "uv", "build", "--out-dir", str(dist))
     with tempfile.TemporaryDirectory(prefix="smithtune-dist-") as temporary:
         scratch = Path(temporary)
         check(dist, scratch / "wheel", full_tests=True)
         rebuilt = scratch / "rebuilt"
-        for project in (ROOT, ROOT / "packages/training-runtime"):
-            metadata = tomllib.loads((project / "pyproject.toml").read_text())["project"]
-            archive = dist / f"{metadata['name'].replace('-', '_')}-{metadata['version']}.tar.gz"
-            run("sfw", "uv", "build", "--wheel", str(archive), "--out-dir", str(rebuilt))
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+        archive = dist / f"smithtune-{metadata['version']}.tar.gz"
+        run("sfw", "uv", "build", "--wheel", str(archive), "--out-dir", str(rebuilt))
         check(rebuilt, scratch / "sdist", full_tests=False)
 
 

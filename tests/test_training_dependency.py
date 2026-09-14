@@ -1,11 +1,8 @@
-"""Exercise the real packaged renderer without downloading tokenizers or models."""
+"""Verify the installed upstream cookbook and its renderer without network calls."""
 
-import hashlib
 from importlib import metadata, resources
 import json
 from pathlib import Path
-
-import pytest
 
 
 class CharacterTokenizer:
@@ -78,18 +75,18 @@ def test_real_renderer_context_boundaries(monkeypatch):
     assert validate_replay_context([case], replace(model, max_seq_len=prompt_limit - 1), 32)[0] == []
 
 
-def test_runtime_source_and_resources_match_reviewed_snapshot():
-    project = Path(__file__).resolve().parents[1]
-    manifest = json.loads((project / "packages/training-runtime/upstream.json").read_text())
-    training = resources.files("training")
-    for name, digest in {**manifest["files"], **manifest.get("patched_files", {})}.items():
-        if name.startswith("src/training/"):
-            content = training.joinpath(name.removeprefix("src/training/")).read_bytes()
-            assert hashlib.sha256(content).hexdigest() == digest, name
-    assert "Apache" in training.joinpath("_vendor/tinker_cookbook_0_4_3/LICENSE").read_text()
+def test_cookbook_is_installed_from_the_declared_upstream_commit():
+    requirement = next(value for value in metadata.requires("smithtune") if value.startswith("fireworks-training-cookbook"))
+    revision = requirement.rsplit("@", 1)[1].split("#", 1)[0]
+    distribution = metadata.distribution("fireworks-training-cookbook")
+    source = json.loads(distribution.read_text("direct_url.json"))
+    assert source["url"].removesuffix(".git") == "https://github.com/fw-ai/cookbook"
+    assert source["vcs_info"]["commit_id"] == revision
+    assert source["subdirectory"] == "training"
+    assert "Apache" in resources.files("training").joinpath("_vendor/tinker_cookbook_0_4_3/LICENSE").read_text()
 
 
-def test_training_dependencies_are_importable_without_cookbook_distribution():
+def test_upstream_training_dependencies_are_importable():
     from training.recipes import sft_loop
     from fireworks.training.sdk import FireworksClient
     import baseten.loops
@@ -97,6 +94,25 @@ def test_training_dependencies_are_importable_without_cookbook_distribution():
     assert callable(sft_loop.main)
     assert FireworksClient is not None
     assert baseten.loops is not None
-    for package in ("tinker-cookbook", "fireworks-training-cookbook"):
-        with pytest.raises(metadata.PackageNotFoundError):
-            metadata.version(package)
+    assert metadata.version("fireworks-training-cookbook") == "0.1.0"
+    assert metadata.version("tinker-cookbook") == "0.4.3"
+    assert metadata.version("transformers") == "5.5.4"
+
+
+def test_installed_dependencies_are_compatible():
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    conflicts = []
+    for distribution in metadata.distributions():
+        owner = canonicalize_name(distribution.metadata["Name"])
+        for text in distribution.requires or []:
+            requirement = Requirement(text)
+            if requirement.marker and not requirement.marker.evaluate():
+                continue
+            name = canonicalize_name(requirement.name)
+            installed = metadata.version(name)
+            if requirement.specifier.contains(installed, prereleases=True):
+                continue
+            conflicts.append(f"{owner} requires {requirement}; installed {installed}")
+    assert not conflicts, "\n".join(conflicts)

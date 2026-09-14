@@ -1,8 +1,8 @@
 # Contributing
 
-Use Python 3.12 and uv. This repository is a workspace containing the CLI and
-`packages/training-runtime`, a separately published dependency. There is no
-bootstrap step or external source checkout.
+Use Python 3.12, uv, and Git. The Fireworks cookbook is a direct Git dependency,
+pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
+is maintained here, and there is no bootstrap step.
 
 ```bash
 sfw uv sync --locked --extra test --python 3.12
@@ -14,46 +14,60 @@ uv run --no-sync pytest
 prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.
 
-## Distribution checks
-
-Build both wheels and source distributions:
+To install your checkout as an isolated CLI:
 
 ```bash
-sfw uv build --all-packages
+sfw uv tool install --python 3.12 .
 ```
 
-CI installs the resulting wheels into a clean environment and runs the tests
-outside the checkout, then rebuilds from the source distributions. This catches
-missing package resources, accidental imports from the checkout, and unpublished
-or local-path dependencies. The runtime's `training` namespace must not coexist
-with an independently installed `fireworks-training-cookbook` distribution.
+## Dependency compatibility
 
-## Releases
+Transformers is pinned to `5.5.4`, matching the upstream Fireworks cookbook and
+satisfying its Tinker cookbook dependency. No overrides or source patches are needed.
+Distribution checks run `uv pip check`; tests verify the installed upstream Git
+revision and Transformers version, and compare renderer outputs to a pinned
+reference using a deterministic test tokenizer.
 
-The `Release` workflow is manually dispatched from the desired release commit.
-Its default is build-and-test only. Enable publishing after the two PyPI projects
-and GitHub environments have been configured:
+Known security tradeoff: `5.5.4` is affected by
+[CVE-2026-9856](https://osv.dev/vulnerability/GHSA-xrqw-3rrv-vx5w), fixed in
+Transformers `5.10.0`. Malicious chat-template dictionary keys can cause arbitrary
+file writes when tokenizer/processor `save_pretrained()` is called. No explicit
+calls were found in smithtune or the installed Fireworks/Tinker cookbook code;
+this is not a proof of unreachability. Reassess this choice when upstream permits
+a fixed version or tokenizer loading/saving paths change.
 
-- PyPI projects: `smithtune-training-runtime` and `smithtune`.
-- Trusted publishers: this repository, workflow `release.yml`, environments
-  `pypi-runtime` and `pypi-smithtune`, respectively.
-- Protect both GitHub environments with the required release reviewers.
+To update the cookbook, change its commit in `pyproject.toml`, inspect the upstream
+diff, run `sfw uv lock`, and run the distribution checks below. Retain the renderer
+reference unless a reviewed upstream behavior change requires updating it. Security
+minimums for Pillow and Datasets are declared in smithtune's dependencies.
 
-The workflow publishes the runtime first, waits until its exact version is
-available from PyPI, verifies smithtune resolves without workspace sources, and
-then publishes smithtune. An unchanged runtime version may already be published;
-its existing artifacts must match the build's package metadata and source content
-before it can be reused. Failures before CLI publication can be rerun. If the CLI
-version has already been uploaded (including a partial upload), bump its version
-for a new release; the workflow will not silently skip an existing CLI artifact.
+## Distribution checks
 
-Version changes belong in each package's `pyproject.toml`; when the runtime changes,
-also update smithtune's exact runtime dependency and regenerate `uv.lock` with
-`sfw uv lock`. `smithtune --version` reads the installed distribution metadata.
+```bash
+python scripts/check_dist.py
+```
 
-Runtime provenance and update instructions are in
-[`packages/training-runtime/README.md`](packages/training-runtime/README.md).
-Keep renderer equivalence checks and the upstream source checksum manifest current.
+This builds smithtune's wheel and source distribution, installs dependencies from
+their declared sources in clean environments, and runs tests outside the checkout.
+It also tests `uv tool install` and rebuilding the wheel from the source archive.
 
-The supported release test targets are Linux x86-64 and macOS ARM64 on Python 3.12.
-Windows and other Python versions are not yet part of the release support matrix.
+CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
+and other Python versions are not yet part of the supported test matrix. CI saves
+the smithtune artifacts for inspection.
+
+## Releases from GitHub
+
+Merge the changes and let CI pass. Set the version in `pyproject.toml`, regenerate
+`uv.lock`, and tag the tested commit (for example, `v0.1.0`). Customers install that
+tag directly:
+
+```bash
+uv tool install --python 3.12 \
+  'git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+```
+
+The example tag must be created before this command works. Repeat the command with
+the next tag to upgrade; `smithtune --version` reads the installed version metadata.
+No PyPI projects, publishing environments, or second-package releases are needed.
+PyPI does not accept the direct Git dependency in smithtune's package metadata, so
+these distributions are intended for GitHub/direct installation.

@@ -5,22 +5,28 @@ Fireworks supports training, deployment, and replay evaluation; Baseten supports
 
 ## Setup
 
-Install the published CLI using [uv](https://docs.astral.sh/uv/getting-started/installation/):
+Install directly from GitHub using [uv](https://docs.astral.sh/uv/getting-started/installation/)
+and Git:
 
 ```bash
-uv tool install --python 3.12 smithtune
+uv tool install --python 3.12 \
+  'git+https://github.com/langchain-ai/smithtune.git'
 smithtune doctor
 smithtune --help
 ```
 
-This installation becomes available once the first PyPI release is published.
-For a local checkout before that release, see [Contributing](CONTRIBUTING.md).
+These commands require the CLI packaging changes to be merged into `main`.
+For an existing local checkout, see [Contributing](CONTRIBUTING.md).
 
 uv manages an isolated environment and can provision Python 3.12. No repository
-checkout or environment activation is needed. Both providers and their Python
-dependencies are included. Alternatively, with Python 3.12 installed, use
-`pipx install --python python3.12 smithtune`. Upgrade with `uv tool upgrade smithtune`
-and uninstall with `uv tool uninstall smithtune`.
+checkout or environment activation is needed. It fetches smithtune and the pinned
+Fireworks cookbook automatically. Both providers and their Python dependencies
+are included. GitHub access and Git are needed during installation. Uninstall
+with `uv tool uninstall smithtune`.
+
+To upgrade, repeat the installation command with `--upgrade`. For a reproducible
+release, append a tag or full commit SHA as `@<ref>` to the Git URL. A release tag
+must exist before it can be installed. There is no PyPI publication step.
 
 Install these companion tools for the operations you use:
 
