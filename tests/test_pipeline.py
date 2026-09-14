@@ -6,6 +6,7 @@ import io
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -361,6 +362,38 @@ def test_source_identity_rejects_conflicting_thread_ids():
         dataset_ops.validate_trajectories([conflicting], 1)
 
 
+def test_source_identity_validates_and_reconciles_trace_ids():
+    with pytest.raises(PipelineError, match="identity source_trace_id must be a non-empty string"):
+        dataset_ops._source_identity({"source_trace_id": 123, "metadata": {}})
+    with pytest.raises(PipelineError, match="identity metadata.source_trace_id must be a non-empty string"):
+        dataset_ops._source_identity({"metadata": {"source_trace_id": ""}})
+    with pytest.raises(PipelineError, match="conflicting source_trace_id"):
+        dataset_ops._source_identity(
+            {"source_trace_id": "trace-a", "metadata": {"source_trace_id": "trace-b"}}
+        )
+
+    identity = dataset_ops._source_identity(
+        {"source_trace_id": "trace-a", "metadata": {"source_trace_id": "trace-a"}}
+    )
+
+    assert identity == {"source_thread_id": None, "source_trace_id": "trace-a"}
+
+
+def test_message_errors_identify_the_example_and_message_position():
+    invalid_role = example(3, [message("human", "q", "human-3"), message("robot", "x", "robot-3")])
+    with pytest.raises(PipelineError, match="example example-3 message 1: unsupported message role"):
+        dataset_ops.validate_trajectories([invalid_role], 1)
+
+    # Native validation accepts extra text-block keys; conversion rejects them
+    # and must still say which example and message failed.
+    extra_keys = example(
+        4, [message("human", "q", "human-4"), message("ai", [{"type": "text", "text": "x", "index": 0}], "ai-4")],
+    )
+    dataset_ops.validate_trajectories([extra_keys], 1)
+    with pytest.raises(PipelineError, match="example example-4 message 1: invalid text content block"):
+        dataset_ops.prepare_sft_rows([extra_keys])
+
+
 def test_split_uses_threads_before_traces_and_preserves_legacy_ranking():
     examples = [example(index, thread=f"thread-{index}") for index in range(10)]
     for index, item in enumerate(examples):
@@ -414,6 +447,24 @@ def test_split_rejects_invalid_fraction_ranges(validation_fraction: float, test_
 
     with pytest.raises(PipelineError, match="fractions"):
         dataset_ops.split_rows(rows, validation_fraction, test_fraction)
+
+
+@pytest.mark.parametrize(
+    ("validation_fraction", "test_fraction"),
+    [(0.7, 0.3), (0.3, 0.7), (0.55, 0.45)],
+)
+def test_split_treats_fractions_summing_to_one_as_no_training_partition(
+    validation_fraction: float, test_fraction: float,
+):
+    # 1 - 0.7 - 0.3 leaves a floating-point remainder; it must not force a
+    # one-group training partition that the operator did not ask for.
+    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)])
+
+    train, validation, test = dataset_ops.split_rows(rows, validation_fraction, test_fraction)
+
+    assert train == []
+    assert len(validation) + len(test) == 10
+    assert len(validation) == round(10 * validation_fraction)
 
 
 def test_split_isolation_rejects_duplicate_content_across_threads():
@@ -1014,6 +1065,49 @@ def test_replay_evaluation_reports_text_scores(tmp_path: Path, monkeypatch: pyte
     assert "base_pass_rate" not in summary["by_case_type"]["text"]
 
 
+@pytest.mark.parametrize(
+    ("first_base", "second_base"),
+    [("base-deployment", None), (None, "base-deployment")],
+)
+def test_replay_resume_rejects_a_different_model_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_base, second_base,
+):
+    # Resuming with or without --base-model must not mix paired results.
+    data_dir = tmp_path / "data"
+    write_manifest(data_dir)
+    row = {
+        "messages": [
+            {"role": "user", "content": "What is x?", "id": "user-1"},
+            {"role": "assistant", "content": "x is 1", "id": "assistant-1"},
+        ],
+        "_source": {"example_id": "example-1", "source_thread_id": "thread-1"},
+    }
+    (data_dir / "prepared" / "test.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        replay,
+        "validate_replay_context",
+        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+    )
+
+    def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):
+        if json_mode:
+            evidence = json.loads(messages[1]["content"])
+            passed = evidence["candidate_next_action"]["content"] == evidence["reference_next_action"]["content"]
+            return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "text check"})}
+        return {"role": "assistant", "content": "x is 1"}
+
+    output = tmp_path / "evaluation"
+    first = replay.run_replay_evaluation(
+        data_dir, output, "tuned-model", "judge-model", base_model=first_base, confirm=True, chat=fake_chat,
+    )
+    assert first["evaluated_models"] == (2 if first_base else 1)
+
+    with pytest.raises(PipelineError, match="existing replay results use different models"):
+        replay.run_replay_evaluation(
+            data_dir, output, "tuned-model", "judge-model", base_model=second_base, confirm=True, chat=fake_chat,
+        )
+
+
 def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_path: Path):
     contract = loaded_contract(tmp_path)
     reference = tool_call("lookup")
@@ -1277,6 +1371,44 @@ def test_anthropic_judge_prefers_gateway_custom_headers(monkeypatch: pytest.Monk
     assert captured["key"] == "gateway-key"
 
 
+@pytest.mark.parametrize("model", ["accounts/fireworks/models/model", "anthropic/claude-sonnet-5"])
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (urllib.error.URLError("connection refused"), "failed: connection refused"),
+        (TimeoutError("timed out"), "failed: timed out"),
+        (urllib.error.HTTPError("https://example.invalid", 503, "unavailable", {}, None), "failed with HTTP 503"),
+        (b"not json", "returned invalid JSON"),
+        (b"[]", "returned an invalid response"),
+        (b"{}", "returned no message|returned invalid content"),
+    ],
+)
+def test_inference_transport_reports_failures_as_pipeline_errors(
+    monkeypatch: pytest.MonkeyPatch, model, failure, expected,
+):
+    # Replay runs inference from worker threads; transport and shape failures
+    # must surface as PipelineError instead of raw urllib or JSON tracebacks.
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+    def fake_urlopen(request, timeout):
+        if isinstance(failure, BaseException):
+            raise failure
+        return Response(failure)
+
+    monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
+    monkeypatch.setenv("FIREWORKS_SESSION_ID", "session-id")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-value")
+
+    with pytest.raises(PipelineError, match=expected):
+        inference_transport._chat_completion(model, [{"role": "user", "content": "hi"}], 16)
+
+
 def test_claude_sonnet_5_is_the_default_judge():
     args = pipeline._parser().parse_args(
         ["evaluate", "--output-dir", "evaluation", "--tuned-model", "tuned"]
@@ -1467,6 +1599,35 @@ def test_training_plan_requires_train_and_validation_rows(tmp_path: Path):
         manifest["split"][missing_partition] = 1
 
 
+@pytest.mark.parametrize(
+    "split",
+    [None, [8, 1, 1], {"train": 8, "validation": 1}, {"train": 8, "validation": 1, "test": "1"},
+     {"train": 8, "validation": 1, "test": True}, {"train": 8, "validation": 1, "test": -1}],
+)
+def test_malformed_split_counts_fail_before_planning_or_replay(tmp_path: Path, split):
+    write_manifest(tmp_path)
+    manifest_path = tmp_path / "prepared" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["split"] = split
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(PipelineError, match="split counts|row count"):
+        fireworks.FireworksProvider().plan(tmp_path, "run-id", fireworks.SFTSettings())
+    with pytest.raises(PipelineError, match="split counts|row count"):
+        replay.prepare_replay_evaluation(tmp_path, tmp_path / "replay")
+
+
+def test_plan_requires_a_langsmith_source_summary(tmp_path: Path):
+    write_manifest(tmp_path)
+    manifest_path = tmp_path / "prepared" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["langsmith"] = ["not", "an", "object"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(PipelineError, match="LangSmith source summary"):
+        fireworks.FireworksProvider().plan(tmp_path, "run-id", fireworks.SFTSettings())
+
+
 def test_qwen_renderer_resolves_for_preserved_trajectory_history():
     from training.recipes import sft_loop
 
@@ -1525,6 +1686,8 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
                     "createTime": "2026-01-01T00:00:01Z",
                     "promotable": True,
                 },
+                # A partially populated row must be skipped, not crash the scan.
+                {"name": None, "checkpointType": None, "createTime": "2026-01-01T00:00:02Z", "promotable": True},
             ]
 
         def close(self):
@@ -1689,6 +1852,17 @@ def test_source_uses_official_provider_urls_and_no_embedded_secret():
     assert "https://gateway.smith.langchain.com/anthropic/v1/messages" in source
     assert "fw_" not in source
     assert "lsv2_pt_" not in source
+
+
+def test_fireworks_settings_defaults_come_from_the_dataclass():
+    from smithtune.providers.base import TrainingOptions
+
+    resolved = fireworks.FireworksProvider().settings_from_options(TrainingOptions())
+
+    assert resolved == fireworks.SFTSettings()
+    assert fireworks.FireworksProvider().settings_from_options(
+        TrainingOptions(lora_alpha=64, pipeline_depth=2)
+    ) == fireworks.SFTSettings(lora_alpha=64, pipeline_depth=2)
 
 
 def test_fireworks_settings_errors_use_the_cli_error_path():

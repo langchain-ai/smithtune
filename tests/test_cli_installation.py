@@ -92,6 +92,22 @@ def test_doctor_redacts_configuration_and_is_offline(monkeypatch, capsys):
     assert "https://" in report["tools"]["langsmith"]["help"]
 
 
+def test_invalid_local_json_artifacts_fail_with_pipeline_errors(tmp_path):
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    with pytest.raises(PipelineError, match="cannot read valid JSON from"):
+        artifacts._load_json(broken)
+    with pytest.raises(PipelineError, match="cannot read valid JSON from"):
+        artifacts._load_json(tmp_path / "missing.json")
+
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text('{"a": 1}\n\nnot json\n', encoding="utf-8")
+    with pytest.raises(PipelineError, match="cannot read valid JSONL from"):
+        artifacts._load_jsonl(rows)
+    rows.write_text('{"a": 1}\n\n{"b": 2}\n', encoding="utf-8")
+    assert artifacts._load_jsonl(rows) == [{"a": 1}, {"b": 2}]
+
+
 @pytest.mark.parametrize("tool", ["langsmith", "firectl"])
 def test_missing_companion_has_actionable_error(tool, monkeypatch):
     def missing(*args, **kwargs):

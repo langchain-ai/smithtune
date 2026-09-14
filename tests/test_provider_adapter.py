@@ -242,6 +242,32 @@ def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider
     assert not run_dir.exists()
 
 
+def test_baseten_runtime_errors_use_the_cli_error_path(tmp_path, monkeypatch, capsys):
+    """Credential-free Baseten service failures print like other CLI errors."""
+
+    class Provider:
+        name = "baseten"
+
+        def settings_from_options(self, options):
+            return baseten.BasetenProvider().settings_from_options(options)
+
+        def train(self, *args, **kwargs):
+            raise baseten.BasetenRuntimeError("BASETEN_API_KEY is required for preflight")
+
+    monkeypatch.setattr(pipeline, "get_provider", lambda name: Provider())
+    with pytest.raises(SystemExit) as error:
+        pipeline.main([
+            "train", "--provider", "baseten", "--data-dir", str(tmp_path),
+            "--run-dir", str(tmp_path / "run"), "--run-id", "test", "--confirm",
+        ])
+
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "BASETEN_API_KEY is required for preflight" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
 def test_fireworks_training_configuration_is_owned_by_provider(tmp_path, monkeypatch):
     prepared = tmp_path / "prepared"
     prepared.mkdir()

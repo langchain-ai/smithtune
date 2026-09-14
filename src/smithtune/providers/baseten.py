@@ -10,10 +10,11 @@ import random
 import re
 import signal
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 import urllib.error
 import urllib.request
 
@@ -455,7 +456,10 @@ def wait_for_run_inactive(
                 lambda: management.run_is_inactive(run_id), sleeper=sleeper
             )
         except BaseException as exc:
-            raise _cleanup_failure(run_id, "inactive polling", exc)
+            failure = _cleanup_failure(run_id, "inactive polling", exc)
+            if failure is exc:
+                raise
+            raise failure from exc
         if inactive:
             return
         if attempt + 1 < attempts:
@@ -480,9 +484,12 @@ def deactivate_identity(
     try:
         active_management = management if management is not None else _BasetenManagement()
     except BaseException as exc:
-        if targets:
-            raise _cleanup_failure(targets[0], "management authentication", exc)
-        raise
+        if not targets:
+            raise
+        failure = _cleanup_failure(targets[0], "management authentication", exc)
+        if failure is exc:
+            raise
+        raise failure from exc
     if not targets and session_id is not None:
         session_id = validate_resource_id(session_id, kind="session")
         targets = sorted(
@@ -1321,7 +1328,7 @@ def _audit_identity(
         "tokenizer_revision": plan["config"]["tokenizer_revision"],
     }
     return {
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "started_at_utc": datetime.now(UTC).isoformat(),
         "model_identity": plan["model"],
         "model_sha256": _sha256_json(plan["model"]),
         "source_dataset_identity": {

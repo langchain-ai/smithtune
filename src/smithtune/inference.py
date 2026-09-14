@@ -19,6 +19,27 @@ ANTHROPIC_INFERENCE_URL = "https://gateway.smith.langchain.com/anthropic/v1/mess
 ANTHROPIC_MODEL_PREFIX = "anthropic/"
 
 
+REQUEST_TIMEOUT_SECONDS = 300
+
+
+def _post_json(request: urllib.request.Request, label: str) -> dict[str, Any]:
+    """Send one request and return its JSON object without echoing bodies or headers."""
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise PipelineError(f"{label} failed with HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise PipelineError(f"{label} failed: {exc.reason}") from exc
+    except OSError as exc:
+        raise PipelineError(f"{label} failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise PipelineError(f"{label} returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise PipelineError(f"{label} returned an invalid response")
+    return result
+
+
 def _inference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "reasoning_content"}
     return [{key: value for key, value in message.items() if key in allowed} for message in messages]
@@ -63,13 +84,9 @@ def _fireworks_chat_completion(
             "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"],
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:
-            result = json.load(response)
-    except urllib.error.HTTPError as exc:
-        raise PipelineError(f"inference failed for {model} with HTTP {exc.code}") from exc
-    choices = result.get("choices", [])
-    message = choices[0].get("message") if choices else None
+    result = _post_json(request, f"inference for {model}")
+    choices = result.get("choices")
+    message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
     if not isinstance(message, dict):
         raise PipelineError(f"inference returned no message for {model}")
     return message
@@ -117,12 +134,10 @@ def _anthropic_chat_completion(
             "Content-Type": "application/json",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:
-            result = json.load(response)
-    except urllib.error.HTTPError as exc:
-        raise PipelineError(f"LangSmith gateway inference failed for {model} with HTTP {exc.code}") from exc
-    content = result.get("content", [])
+    result = _post_json(request, f"LangSmith gateway inference for {model}")
+    content = result.get("content")
+    if not isinstance(content, list) or not all(isinstance(block, dict) for block in content):
+        raise PipelineError(f"LangSmith gateway inference for {model} returned invalid content")
     text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
     return {"role": "assistant", "content": text}
 
