@@ -73,8 +73,9 @@ window. Use the returned dataset ID in `prepare`.
 
 Preparation collects each conversation's tools, including tools that were never
 called. Tools added mid-run appear from the start of the training example.
-Provider built-ins (such as tool search) and conflicting definitions of the same
-tool are unsupported.
+Optional top-level arguments are combined when the rest of the tool definition
+matches; the expanded schema applies to the whole conversation. Provider built-ins
+(such as tool search) and incompatible tool definitions remain unsupported.
 
 Existing datasets need source thread/trace and project IDs; CLI-created datasets
 include these automatically. Recorded system messages are preserved; the default
