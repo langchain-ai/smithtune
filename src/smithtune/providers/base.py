@@ -106,9 +106,8 @@ class CommonSFTSettings:
 class ModelOptions:
     """Select a supported provider model and optionally lower its context limit."""
 
-    model_profile: str | None = None
-    max_seq_len: int | None = None
     model: str | None = None
+    max_seq_len: int | None = None
 
 
 @dataclass(frozen=True)

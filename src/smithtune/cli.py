@@ -90,9 +90,7 @@ def _parser() -> argparse.ArgumentParser:
         "--test-fraction", type=float,
         help=f"test fraction for either provider (default: {dataset.DEFAULT_TEST_FRACTION}; use 0 for no test split)",
     )
-    model_choice = prep.add_mutually_exclusive_group(required=True)
-    model_choice.add_argument("--model", help="provider model ID or supported model alias")
-    model_choice.add_argument("--model-profile", help="supported model alias (legacy alternative to --model)")
+    prep.add_argument("--model", required=True, help="provider model ID or supported model alias")
     prep.add_argument("--max-seq-len", type=int, help="lower the selected model's preparation and training context limit")
     prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached per-example tool schemas without querying LangSmith")
     prep.add_argument("--skip-render-check", action="store_true", help=argparse.SUPPRESS)

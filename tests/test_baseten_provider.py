@@ -198,10 +198,9 @@ def test_baseten_provider_owns_its_model_profile():
     assert model.max_seq_len == 131_072
 
 
-@pytest.mark.parametrize("profile", ["unknown"])
-def test_model_resolution_rejects_unsupported_profiles(profile: str):
-    with pytest.raises(PipelineError, match="unknown|unsupported"):
-        baseten.BasetenProvider().model_from_options(ModelOptions(model_profile=profile))
+def test_model_resolution_rejects_unsupported_models():
+    with pytest.raises(PipelineError, match="no supported baseten rendering configuration"):
+        baseten.BasetenProvider().model_from_options(ModelOptions(model="unknown"))
 
 
 def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options():
@@ -326,12 +325,12 @@ def test_preparation_rejects_invalid_model_before_fetching_data(
 
     monkeypatch.setattr(dataset, "prepare_dataset", unexpected_prepare)
 
-    with pytest.raises(PipelineError, match="unknown|unsupported"):
+    with pytest.raises(PipelineError, match="no supported baseten rendering configuration"):
         baseten.BasetenProvider().prepare(
             "workspace-id",
             "dataset-id",
             tmp_path,
-            model_options=ModelOptions(model_profile="unknown"),
+            model_options=ModelOptions(model="unknown"),
         )
 
 

@@ -16,27 +16,19 @@ def resolve_model_options(
     *,
     provider: str,
 ) -> ModelSpec:
-    if options.model is not None and options.model_profile is not None:
-        raise PipelineError("choose either --model or --model-profile")
     # Preserve the programmatic API default; the CLI requires an explicit choice.
-    profile = "qwen3p8-27b" if options.model_profile is None else options.model_profile
-    if options.model is not None:
-        matches = [
-            model for alias, model in profiles.items()
-            if options.model in {alias, model.base_model, model.tokenizer_model}
-        ]
-        if len(matches) != 1:
-            raise PipelineError(
-                f"no supported {provider} rendering configuration for the selected model; "
-                f"supported aliases: {', '.join(sorted(profiles))}. "
-                "Provider training availability is checked separately."
-            )
-        model = matches[0]
-    else:
-        try:
-            model = profiles[profile]
-        except KeyError as exc:
-            raise PipelineError(f"unknown {provider} model profile: {profile}") from exc
+    selected = "qwen3p8-27b" if options.model is None else options.model
+    matches = [
+        model for alias, model in profiles.items()
+        if selected in {alias, model.base_model, model.tokenizer_model}
+    ]
+    if len(matches) != 1:
+        raise PipelineError(
+            f"no supported {provider} rendering configuration for the selected model; "
+            f"supported aliases: {', '.join(sorted(profiles))}. "
+            "Provider training availability is checked separately."
+        )
+    model = matches[0]
     if options.max_seq_len is not None:
         if (
             isinstance(options.max_seq_len, bool)

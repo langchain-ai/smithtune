@@ -51,20 +51,16 @@ def test_explicit_fireworks_model_selects_kimi_without_qwen_defaults():
 
 
 @pytest.mark.parametrize("provider", [baseten, fireworks])
-def test_programmatic_profile_default_stays_compatible(provider):
+def test_programmatic_model_default_stays_compatible(provider):
     assert resolve_model_options(
         ModelOptions(), provider.MODEL_SPECS, provider=provider.DEFAULT_MODEL.provider,
     ) == provider.DEFAULT_MODEL
 
 
-@pytest.mark.parametrize("options,message", [
-    (ModelOptions(model="qwen3p8-27b", model_profile="qwen3p8-27b"), "choose either"),
-    (ModelOptions(model="unknown"), "rendering configuration"),
-    (ModelOptions(model_profile=""), "unknown fireworks model profile"),
-])
-def test_model_selection_rejects_ambiguous_or_unsupported_options(options, message):
-    with pytest.raises(PipelineError, match=message):
-        resolve_model_options(options, fireworks.MODEL_SPECS, provider="fireworks")
+@pytest.mark.parametrize("model", ["unknown", ""])
+def test_model_selection_rejects_unsupported_models(model):
+    with pytest.raises(PipelineError, match="rendering configuration"):
+        resolve_model_options(ModelOptions(model=model), fireworks.MODEL_SPECS, provider="fireworks")
 
 
 def test_cli_requires_an_explicit_model_choice(capsys, monkeypatch):
@@ -72,23 +68,21 @@ def test_cli_requires_an_explicit_model_choice(capsys, monkeypatch):
     with pytest.raises(SystemExit) as failure:
         cli._parser().parse_args(["prepare", "--workspace-id", "workspace", "--dataset-id", "dataset"])
     assert failure.value.code == 2
-    assert "--model --model-profile" in capsys.readouterr().err
+    assert "required: --model" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("choice", ["--model", "--model-profile"])
-def test_cli_passes_explicit_model_choice(choice, monkeypatch):
+def test_cli_passes_explicit_model_choice(monkeypatch):
     monkeypatch.setattr(cli, "get_version", lambda: "0.1.0")
     args = cli._parser().parse_args([
         "prepare", "--workspace-id", "workspace", "--dataset-id", "dataset",
-        choice, "qwen3p8-27b",
+        "--model", "qwen3p8-27b",
     ])
-    assert getattr(cli._model_options(args), choice[2:].replace("-", "_")) == "qwen3p8-27b"
+    assert cli._model_options(args).model == "qwen3p8-27b"
 
 
 @pytest.mark.parametrize("provider", [baseten, fireworks])
-@pytest.mark.parametrize("selector", ["model", "model_profile"])
-def test_context_can_be_lowered_for_supported_models(provider, selector):
-    options = ModelOptions(**{selector: "qwen3p8-27b"}, max_seq_len=4096)
+def test_context_can_be_lowered_for_supported_models(provider):
+    options = ModelOptions(model="qwen3p8-27b", max_seq_len=4096)
     model = resolve_model_options(options, provider.MODEL_SPECS, provider=provider.DEFAULT_MODEL.provider)
     assert model.max_seq_len == model.training_context_limit == 4096
     assert model.tokenizer_model == provider.DEFAULT_MODEL.tokenizer_model

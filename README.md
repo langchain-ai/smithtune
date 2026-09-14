@@ -137,8 +137,8 @@ smithtune prepare \
 ```
 
 `--model` accepts a supported alias or the provider's model ID. The model selects
-its compatible tokenizer and rendering implementation automatically. The legacy
-`--model-profile` option is also accepted; one model selector is required.
+its compatible tokenizer and rendering implementation automatically. `--model`
+is required for preparation.
 
 List the models supported by your installed version of smithtune:
 
