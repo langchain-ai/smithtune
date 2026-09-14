@@ -125,31 +125,23 @@ remains available to create a global contract from a sample thread.
 
 ## Plan and train
 
-Save and review the plan before running `train`. Training is billed by the provider and requires `--confirm`.
+Review the plan before running `train`. Training is billed by the provider and requires `--confirm`.
 
 ```bash
-smithtune plan \
-  --provider "$provider" \
-  --run-id "$run_id" \
-  --output "plans/$run_id.json"
+smithtune plan --provider "$provider" --run-id "$run_id"
 ```
 
 ```bash
 smithtune train \
-  --plan "plans/$run_id.json" \
+  --provider "$provider" \
+  --run-id "$run_id" \
   --run-dir "runs/$run_id" \
   --confirm
 ```
 
-Set training options such as `--learning-rate` on `plan`; `train --plan` reuses the saved
-provider, dataset path, run ID, and settings. It rejects additional training settings and
-changes to the prepared data. To change settings or reprepare data, generate and review a new plan.
-Without `--output`, the plan is saved to `./plan.json`. Keep it outside the new or empty `--run-dir`.
-Direct training with `--provider`, `--run-id`, and training flags remains supported without `--plan`.
-
 The best checkpoint is selected by validation loss and recorded in `runs/$run_id/result.json`.
 Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
-Add `--init-from-checkpoint '<checkpoint-uri>'` to `plan` (or direct `train`) to initialize a new run from a saved checkpoint.
+Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
 ## Deploy and evaluate (Fireworks)

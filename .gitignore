@@ -22,7 +22,5 @@ fireworks-cookbook/
 data/
 data-*/
 runs/
-/plan.json
-/plans/
 .superpowers/
 docs/superpowers/
