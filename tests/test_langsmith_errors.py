@@ -7,10 +7,17 @@ from smithtune.cli import main
 from smithtune.providers.base import PipelineError
 
 
-@pytest.mark.parametrize("stderr", ["Error: HTTP 429\n", "request timed out\n", "", None])
-def test_cli_bubbles_up_stderr_without_command_or_stdout(monkeypatch, capsys, tmp_path, stderr):
+@pytest.mark.parametrize(("stderr", "stdout", "expected"), [
+    ("Error: HTTP 429\n", "ignored response", "Error: HTTP 429"),
+    ("request timed out\n", None, "request timed out"),
+    ("", '{"detail":["Invalid run type"]}\nHTTP 422\n', '{"detail":["Invalid run type"]}\nHTTP 422'),
+    (" \n", "request failed\n", "request failed"),
+    ("", "", "langsmith exited with status 1"),
+    (None, None, "langsmith exited with status 1"),
+])
+def test_cli_bubbles_up_diagnostic_without_command(monkeypatch, capsys, tmp_path, stderr, stdout, expected):
     def fail(argv, **kwargs):
-        raise subprocess.CalledProcessError(1, argv, stderr=stderr, output="private response")
+        raise subprocess.CalledProcessError(1, argv, stderr=stderr, output=stdout)
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
     with pytest.raises(SystemExit) as error:
@@ -18,10 +25,10 @@ def test_cli_bubbles_up_stderr_without_command_or_stdout(monkeypatch, capsys, tm
               "--output", str(tmp_path / "contract.json")])
     assert error.value.code == 2
     output = capsys.readouterr().err
-    expected = stderr.strip() if stderr else "langsmith exited with status 1"
     assert output.endswith(f"error: {expected}\n")
     assert "--body" not in output
     assert "private" not in output
+    assert "ignored response" not in output
 
 
 def test_contract_failure_keeps_example_context(monkeypatch):
