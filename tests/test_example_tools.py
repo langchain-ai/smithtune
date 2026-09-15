@@ -32,15 +32,27 @@ def source_runner(groups):
     queries = []
 
     def run(command, capture=False):
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         assert command[command.index("--workspace") + 1] == "workspace-id"
         queries.append(body)
-        project = body["session"][0]
+        project = body["project_ids"][0]
+        found = []
         for (source_project, thread), runs in groups.items():
-            if project == source_project and json.dumps(thread) in body.get("trace_filter", ""):
-                if '"thread_id"' in body["trace_filter"]:
-                    return SimpleNamespace(stdout=json.dumps(page(runs)))
-        return SimpleNamespace(stdout=json.dumps(page([])))
+            if project != source_project:
+                continue
+            if body.get("is_root"):
+                if json.dumps(thread) in body["filter"] and '\"thread_id\"' in body["filter"]:
+                    found.extend({"id": f"{thread}:{tid}", "session_id": project}
+                                 for tid in sorted({r["trace_id"] for r in runs}))
+            else:
+                for item in runs:
+                    trace_id = f"{thread}:{item['trace_id']}"
+                    if json.dumps(trace_id) in body["filter"]:
+                        found.append({**item, "trace_id": trace_id})
+        return SimpleNamespace(stdout=json.dumps(page(found)))
 
     return run, queries
 
@@ -77,7 +89,7 @@ def test_examples_get_their_own_complete_union_and_repeated_sources_are_cached()
     assert contracts["example-3"].provenance["source_example_id"] == "example-3"
     assert all(contract.inference_settings == {} for contract in contracts.values())
     assert examples == original
-    assert len(queries) == 6
+    assert len(queries) == 8
 
 
 def test_same_thread_name_in_different_projects_stays_separate():
@@ -92,25 +104,26 @@ def test_same_thread_name_in_different_projects_stays_separate():
 @pytest.mark.parametrize("native", [False, True])
 def test_trace_only_example_queries_every_llm_in_that_trace(native):
     ex = example(1)
-    del ex["metadata"]["source_project_id"]
     ex["metadata"].update(source_scope="trace", source_scope_id="trace-1")
     if native:
+        del ex["metadata"]["source_project_id"]
         ex["source_session_id"] = "project-1"
     queries = []
 
     def runner(command, capture=False):
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         queries.append(body)
-        if body.get("id"):
-            return SimpleNamespace(stdout=json.dumps(page([{"id": "trace-1", "session_id": "project-1"}])))
-        assert body["session"] == ["project-1"]
-        assert body["run_type"] == "llm"
-        assert body["filter"] == 'eq(trace_id,"trace-1")'
+        assert body["project_ids"] == ["project-1"]
+        assert body["run_type"] == "LLM"
+        assert body["trace_id"] == "trace-1"
         return SimpleNamespace(stdout=json.dumps(page([llm("run-1", [tool("weather")]), llm("run-2", [tool("swell")])])))
 
     contracts = dataset.capture_example_contracts("workspace-id", [ex], runner=runner)
     assert len(contracts[ex["id"]].tools) == 2
-    assert len(queries) == (1 if native else 2)
+    assert len(queries) == 1
 
 
 def test_toolless_source_is_valid_but_missing_source_calls_are_not():
@@ -387,38 +400,46 @@ def test_mixed_workspaces_route_and_cache_sources_separately():
 
     def runner(command, capture=False):
         workspace = command[command.index("--workspace") + 1]
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         calls.append(workspace)
-        runs = [llm(f"run-{workspace}", [tool(workspace)])] if '"thread_id"' in body["trace_filter"] else []
+        if body.get("is_root"):
+            runs = [{"id": "trace-1", "session_id": "project-1"}] if '"thread_id"' in body["filter"] else []
+        else:
+            runs = [llm(f"run-{workspace}", [tool(workspace)])]
         return SimpleNamespace(stdout=json.dumps(page(runs)))
 
     contracts = dataset.capture_example_contracts(
         "workspace-id", examples, source_workspace_id="default-source", runner=runner,
     )
-    assert calls == ["default-source"] * 3 + ["other"] * 3 + ["workspace-id"] * 3
+    assert calls == ["default-source"] * 4 + ["other"] * 4 + ["workspace-id"] * 4
     for ex, workspace in zip(examples, ["default-source", "other", "other", "workspace-id"], strict=True):
         contract = contracts[ex["id"]]
         assert contract.provenance["source_workspace_id"] == workspace
         assert contract.tools[0]["function"]["name"] == workspace
 
 
-def test_trace_project_discovery_uses_source_workspace():
+def test_trace_with_explicit_project_uses_source_workspace():
     ex = example(1)
-    del ex["metadata"]["source_project_id"]
     ex["metadata"].update(source_scope="trace", source_scope_id="trace-1")
     queries = []
 
     def runner(command, capture=False):
         assert command[command.index("--workspace") + 1] == "source-workspace"
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         queries.append(body)
-        runs = [{"id": "trace-1", "session_id": "project-1"}] if body.get("id") else [llm("run-1", [])]
+        runs = [llm("run-1", [])]
         return SimpleNamespace(stdout=json.dumps(page(runs)))
 
     contracts = dataset.capture_example_contracts(
         "dataset-workspace", [ex], source_workspace_id="source-workspace", runner=runner,
     )
-    assert len(queries) == 2
+    assert len(queries) == 1
     assert contracts[ex["id"]].provenance["source_workspace_id"] == "source-workspace"
 
 
@@ -514,6 +535,7 @@ def test_interrupted_capture_resumes_and_publishes_complete_snapshot(tmp_path, m
             raise PipelineError("context deadline exceeded")
         return [llm(f"run-{thread}", [tool("weather")])]
 
+    monkeypatch.setattr(dataset, "_project_start_time", lambda *args, **kwargs: "2026-09-01T00:00:00Z")
     monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
 
     def capture(fetch=True):
@@ -555,6 +577,7 @@ def test_capture_checkpoint_invalidated_by_changed_inputs(tmp_path, monkeypatch,
             raise PipelineError("request failed")
         return [llm("run-1", [])]
 
+    monkeypatch.setattr(dataset, "_project_start_time", lambda *args, **kwargs: "2026-09-01T00:00:00Z")
     monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
     with pytest.raises(PipelineError, match="request failed"):
         dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
@@ -585,6 +608,7 @@ def test_capture_rejects_corrupted_checkpoint(tmp_path, monkeypatch):
             raise PipelineError("request failed")
         return [llm("run-1", [])]
 
+    monkeypatch.setattr(dataset, "_project_start_time", lambda *args, **kwargs: "2026-09-01T00:00:00Z")
     monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
     with pytest.raises(PipelineError, match="request failed"):
         dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
@@ -593,3 +617,33 @@ def test_capture_rejects_corrupted_checkpoint(tmp_path, monkeypatch):
     path.write_text(json.dumps(checkpoint))
     with pytest.raises(PipelineError, match="checkpoint hash mismatch"):
         dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
+
+
+def test_project_history_start_is_fetched_once_per_workspace_and_project():
+    examples = [example(1), example(2)]
+    inner, _ = source_runner({
+        ("project-1", "thread-1"): [llm("run-1", [])],
+        ("project-1", "thread-2"): [llm("run-2", [])],
+    })
+    lookups = []
+
+    def runner(command, capture=False):
+        if command[2].startswith("/api/v1/sessions/"):
+            lookups.append(command[2])
+        return inner(command, capture=capture)
+
+    assert len(dataset.capture_example_contracts("workspace-id", examples, runner=runner)) == 2
+    assert lookups == ["/api/v1/sessions/project-1"]
+
+
+@pytest.mark.parametrize("scope", ["thread", "trace"])
+def test_missing_source_project_fails_without_discovery(scope):
+    ex = example(1)
+    del ex["metadata"]["source_project_id"]
+    ex["metadata"].update(source_scope=scope, source_scope_id=f"{scope}-1")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("missing source project must not trigger a network request")
+
+    with pytest.raises(PipelineError, match=r"example example-1: cannot collect tools: missing source project ID; add metadata.source_project_id"):
+        dataset.capture_example_contracts("workspace-id", [ex], runner=unexpected)

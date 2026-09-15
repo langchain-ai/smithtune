@@ -94,7 +94,8 @@ matches; the expanded schema applies to the whole conversation. Provider built-i
 
 Existing datasets need `source_scope` (thread or trace), `source_scope_id`, and
 `source_project_id` in each example's metadata; CLI-created datasets
-include these automatically. Recorded system messages are preserved; the default
+include these automatically. Preparation errors if the source project ID is missing.
+Recorded system messages are preserved; the default
 Qwen renderer requires them at the start.
 
 Choose a provider and model, then prepare your dataset:

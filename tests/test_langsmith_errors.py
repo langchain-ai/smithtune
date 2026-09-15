@@ -8,7 +8,7 @@ from smithtune.cli import main
 from smithtune.providers.base import PipelineError
 
 
-REQUEST_TIMEOUT = ('HTTP POST /api/v1/runs/query: Post "https://api.smith.langchain.com/api/v1/runs/query": '
+REQUEST_TIMEOUT = ('HTTP POST /api/v2/runs/query: Post "https://api.smith.langchain.com/api/v2/runs/query": '
                    'context deadline exceeded (Client.Timeout exceeded while awaiting headers)')
 
 
@@ -69,6 +69,7 @@ def test_curation_retains_existing_error_handling(monkeypatch):
 @pytest.mark.parametrize(("diagnostic", "reason"), [
     ('{"detail":"Rate limit exceeded."}\nHTTP 429', "rate limit reached"),
     (REQUEST_TIMEOUT, "request timed out"),
+    ('{"detail":"deadline exceeded: Query timeout exceeded"}\nHTTP 504', "request timed out"),
 ])
 def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, capsys, diagnostic, reason):
     cursors = []
@@ -79,12 +80,12 @@ def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, ca
         cursors.append(cursor)
         if len(cursors) in (2, 3):
             raise subprocess.CalledProcessError(1, argv, output=diagnostic)
-        response = ({"runs": [{"id": "first"}], "cursors": {"next": "page-2"}} if cursor is None
-                    else {"runs": [{"id": "second"}], "cursors": {}})
+        response = ({"items": [{"id": "first", "project_id": "project-1"}], "next_cursor": "page-2"} if cursor is None
+                    else {"items": [{"id": "second", "project_id": "project-1"}], "next_cursor": None})
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(response))
 
     monkeypatch.setattr(artifacts.subprocess, "run", run)
-    runs = dataset._query_contract_runs("workspace-123", {}, runner=dataset._run_langsmith)
+    runs = dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
     assert [run["id"] for run in runs] == ["first", "second"]
     assert cursors == [None, "page-2", "page-2", "page-2"]
     assert retry_sleeps == [5.5, 10.5]
@@ -98,6 +99,7 @@ def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, ca
     ("context canceled", 1),
     ("request timed out", 6),
     (REQUEST_TIMEOUT, 6),
+    ('{"detail":"deadline exceeded: Query timeout exceeded"}\nHTTP 504', 6),
     ("Client.Timeout exceeded while awaiting headers", 6),
 ])
 def test_query_retry_limit_preserves_original_error(monkeypatch, retry_sleeps, diagnostic, attempts):
@@ -109,7 +111,7 @@ def test_query_retry_limit_preserves_original_error(monkeypatch, retry_sleeps, d
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
     with pytest.raises(PipelineError) as error:
-        dataset._query_contract_runs("workspace-123", {}, runner=dataset._run_langsmith)
+        dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
     assert str(error.value) == diagnostic
     assert len(calls) == attempts
     assert retry_sleeps == ([5.5, 10.5, 20.5, 40.5, 60] if attempts == 6 else [])
