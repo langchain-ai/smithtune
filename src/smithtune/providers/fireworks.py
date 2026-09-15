@@ -249,6 +249,7 @@ def run_early_stopping(
     settings.validate()
     history: list[dict[str, Any]] = []
     best: dict[str, Any] | None = None
+    patience_loss = math.inf
     stale_epochs = 0
     checkpoint = initial_checkpoint
     for epoch in range(1, settings.max_epochs + 1):
@@ -265,12 +266,11 @@ def run_early_stopping(
         result = {**result, "epoch": epoch, "eval_loss": float(loss)}
         history.append(result)
         checkpoint = result["resume_checkpoint"]
-        if (
-            best is None
-            or result["eval_loss"]
-            < best["eval_loss"] - settings.early_stopping_min_delta
-        ):
+        if best is None or result["eval_loss"] < best["eval_loss"]:
             best = result
+        # Patience tracks significant improvement independently of checkpoint selection.
+        if result["eval_loss"] < patience_loss - settings.early_stopping_min_delta:
+            patience_loss = result["eval_loss"]
             stale_epochs = 0
         else:
             stale_epochs += 1
