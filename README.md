@@ -183,7 +183,8 @@ Deep Agent coordinator -> Python code -> independent judge subagents
 ```
 
 Each judge receives the complete ordered conversation messages in one request,
-with the selection rubric. It returns only a 1/0 score and a reason. Recorded
+with the selection rubric. Reasoning is off for the three default judges.
+Each returns only a 1/0 score and a reason of one or two short sentences. Recorded
 tool calls and results are part of the conversation; judges do not execute them.
 There is no message truncation, summary, paged reader, or local character cap.
 If a provider rejects the full request because it exceeds that model's context
@@ -248,8 +249,8 @@ For other models, use `provider:model` in the same list, for example
 `--judges openai:<model-id>,fireworks:accounts/fireworks/models/<model-id>`.
 The list replaces the council and is saved for confirm and resume; you do not
 need to repeat it. The first judge model also runs the
-coordinator. Terra uses OpenAI Responses for reasoning with tools. The Fireworks
-adapter preserves reasoning fields between tool calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
+coordinator. Terra uses OpenAI Responses. Reasoning is disabled for Terra and
+Fireworks council calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
 uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
 `anthropic-gateway` uses the LangSmith Anthropic gateway credential.
 

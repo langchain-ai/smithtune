@@ -642,6 +642,8 @@ def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch
     assert requests[0].full_url == url
     header = "X-api-key" if provider.startswith("anthropic") else "Authorization"
     assert requests[0].get_header(header) == ("test-credential" if provider.startswith("anthropic") else "Bearer test-credential")
+    if provider == "fireworks":
+        assert json.loads(requests[0].data)["reasoning_effort"] == "none"
 
 
 def test_missing_thread_pages_and_changed_turns_fail_closed(tmp_path):

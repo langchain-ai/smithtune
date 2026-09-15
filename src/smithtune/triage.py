@@ -146,6 +146,7 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     rubric = rubric_text()
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
                 "runner": runner_mode, "max_output_tokens": max_output_tokens,
+                "reasoning": {"fireworks": "none", "gpt-5.6-terra": "none"},
                 "prefilter": "multimodal-and-provider-context-v1", "judging_unit": "conversation-v1"}
     if runner_mode == "deepagent":
         # The coordinator skill changes scheduling decisions and belongs in

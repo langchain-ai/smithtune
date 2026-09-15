@@ -37,6 +37,7 @@ def _model(judge: dict, max_tokens: int):
     model_class = ChatOpenAI
     options = {"use_responses_api": False}
     if provider == "fireworks":
+        options["reasoning_effort"] = "none"
         class FireworksChat(ChatOpenAI):
             # ChatOpenAI intentionally drops provider-specific fields. Retain
             # Fireworks reasoning across tool calls without exposing it as text.
@@ -59,10 +60,9 @@ def _model(judge: dict, max_tokens: int):
 
         model_class = FireworksChat
     elif judge["model"] == "gpt-5.6-terra":
-        # Terra supports reasoning with function tools on Responses, not Chat
-        # Completions. Keep reasoning continuity without server-side storage.
+        # Use Responses with reasoning disabled and no server-side storage.
         options = {"use_responses_api": True, "store": False,
-                   "reasoning": {"effort": "medium"}, "include": ["reasoning.encrypted_content"]}
+                   "reasoning": {"effort": "none"}}
     return model_class(model=judge["model"], api_key=os.environ[credential_name(provider)],
                        base_url="https://api.fireworks.ai/inference/v1" if provider == "fireworks" else "https://api.openai.com/v1",
                        default_headers=headers, max_tokens=max_tokens, timeout=60, max_retries=0,

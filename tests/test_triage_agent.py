@@ -87,15 +87,16 @@ def test_fireworks_reasoning_survives_a_tool_round_trip(monkeypatch):
     assert payload["messages"][0]["reasoning_content"] == "Need the saved evidence."
     assert "reasoning_content" not in payload["messages"][1]
     assert model.disable_streaming and not model.use_responses_api
+    assert payload["reasoning_effort"] == "none"
 
 
-def test_terra_uses_responses_for_reasoning_with_tools(monkeypatch):
+def test_terra_uses_responses_with_reasoning_off(monkeypatch):
     from langchain_core.messages import HumanMessage
     from smithtune.triage_agent import _model
     monkeypatch.setenv("OPENAI_API_KEY", "test-credential")
     model = _model({"provider": "openai", "model": "gpt-5.6-terra"}, 4096)
     payload = model._get_request_payload([HumanMessage(content="Judge the trace.")])
     assert model.use_responses_api and payload["store"] is False
-    assert payload["reasoning"]["effort"] == "medium"
+    assert payload["reasoning"]["effort"] == "none"
     assert payload["max_output_tokens"] == 4096 and "messages" not in payload
-    assert "reasoning.encrypted_content" in payload["include"]
+    assert "reasoning.encrypted_content" not in payload.get("include", [])

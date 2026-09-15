@@ -95,6 +95,8 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
             headers["Authorization"] = f"Bearer {os.environ[credential_name(provider)]}"
             body = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
                     "max_tokens" if provider == "fireworks" else "max_completion_tokens": max_tokens}
+            if provider == "fireworks" or model == "gpt-5.6-terra":
+                body["reasoning_effort"] = "none"
             if provider == "fireworks":
                 _set_skill_session()
                 headers.update({"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})
