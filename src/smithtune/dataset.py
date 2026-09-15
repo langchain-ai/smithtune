@@ -16,6 +16,7 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
+    TOOL_MERGE_POLICY,
     contract_from_runs,
     load_inference_contract,
     parse_inference_contract,
@@ -609,7 +610,8 @@ def _example_contract_snapshot(
 ) -> dict[str, InferenceContract]:
     path = raw_dir / "example_contracts.json"
     identity = {"schema_version": 1, "workspace_id": workspace_id,
-                "dataset_id": dataset_id, "source_examples_sha256": source_sha}
+                "dataset_id": dataset_id, "source_examples_sha256": source_sha,
+                "tool_merge_policy": TOOL_MERGE_POLICY}
     if fetch:
         contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id)
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
@@ -857,6 +859,16 @@ def prepare_dataset(
             workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
             source_workspace_id=source_workspace_id,
         )
+    description_replacements = []
+    captured_contracts = example_contracts or ({"global": inference_contract} if inference_contract else {})
+    for example_id, contract in captured_contracts.items():
+        for replacement in contract.provenance.get("tool_description_replacements", []):
+            description_replacements.append({
+                **replacement,
+                **({"example_id": example_id} if example_contracts is not None else {}),
+                "source_workspace_id": contract.provenance.get("source_workspace_id"),
+                "source_thread_id": contract.provenance.get("source_thread_id"),
+            })
     rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
                             reasoning_policy=reasoning_policy, model=model)
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
@@ -868,7 +880,10 @@ def prepare_dataset(
         rendered = {}
     train, validation, test = split_rows(rows, validation_fraction, test_fraction)
     _validate_split_isolation(train, validation, test)
-    audit_value = {**asdict(audit), **rendered}
+    audit_value = {
+        **asdict(audit), **rendered,
+        "tool_description_replacements": len(description_replacements),
+    }
     manifest = {
         "schema_version": 1,
         "created_at_utc": _utc_now(),
@@ -926,6 +941,7 @@ def prepare_dataset(
     _jsonl_dump(data_dir / "prepared" / "test.jsonl", test)
     _json_dump(data_dir / "prepared" / "manifest.json", manifest)
     _json_dump(data_dir / "prepared" / "warnings.json", audit.duplicate_message_warnings)
+    _json_dump(data_dir / "prepared" / "tool_description_replacements.json", description_replacements)
     _json_dump(data_dir / "prepared" / "rejected.json", rejected)
     if inference_contract is not None:
         _json_dump(

@@ -249,7 +249,7 @@ def test_catalog_additions_can_accompany_optional_argument_additions():
 @pytest.mark.parametrize("change", [
     "remove", "edit", "reorder", "duplicate", "prose", "footer", "required", "type", "arbitrary_description",
 ])
-def test_incompatible_catalog_changes_still_fail(change):
+def test_description_changes_use_latest_but_incompatible_parameters_still_fail(change):
     before = catalog_tool([("a", "A"), ("b", "B")], suffix="\n\nUse sparingly.")
     after = catalog_tool([("a", "A"), ("b", "B"), ("c", "C")], suffix="\n\nUse sparingly.")
     if change == "remove":
@@ -271,7 +271,100 @@ def test_incompatible_catalog_changes_still_fail(change):
     elif change == "arbitrary_description":
         before["function"]["description"] = "Original description."
         after["function"]["description"] = "Original description. Additional prose."
+    runs = [llm("run-1", [before]), llm("run-2", [after])]
+    if change in {"required", "type"}:
+        with pytest.raises(inference_contract.ContractError, match="conflicting definitions"):
+            inference_contract.contract_from_runs(runs, workspace_id="workspace")
+    else:
+        contract = inference_contract.contract_from_runs(runs, workspace_id="workspace")
+        assert contract["tools"] == [after]
+        assert len(contract["provenance"]["tool_description_replacements"]) == 1
+
+
+@pytest.mark.parametrize("source_run_id", [None, "run-early"])
+def test_latest_description_uses_actual_timestamp_and_reports_replacements(source_run_id):
+    early = tool("list_threads")
+    early["function"]["description"] = "List threads the current user joined."
+    later = copy.deepcopy(early)
+    later["function"]["description"] = "List surfaced threads by locator, participant, admin mode, status, source, or text."
+    later["function"]["parameters"]["properties"]["admin_threads"] = {
+        "anyOf": [{"type": "boolean"}, {"type": "null"}], "default": None,
+    }
+    first, last = llm("run-early", [early]), llm("run-late", [later])
+    first["start_time"] = "2026-09-06T12:30:00+02:00"
+    last["start_time"] = "2026-09-06T11:00:00Z"  # Later, despite sorting earlier as text.
+    original = copy.deepcopy([last, first])
+    result = inference_contract.contract_from_runs(
+        [last, first], workspace_id="workspace", source_run_id=source_run_id,
+    )
+    assert result["tools"] == [later]
+    assert [last, first] == original
+    changes = result["provenance"]["tool_description_replacements"]
+    assert changes == [{
+        "tool_name": "list_threads",
+        "previous_run_id": "run-early", "selected_run_id": "run-late",
+        "previous_run_start_time": first["start_time"], "selected_run_start_time": last["start_time"],
+        "previous_description_sha256": inference_contract.json_sha256(early["function"]["description"]),
+        "selected_description_sha256": inference_contract.json_sha256(later["function"]["description"]),
+    }]
+    assert inference_contract.contract_from_runs(
+        [first, last], workspace_id="workspace", source_run_id=source_run_id,
+    ) == result
+
+
+def test_equal_timestamps_use_run_id_as_stable_tiebreaker():
+    before, after = tool("lookup"), tool("lookup")
+    after["function"]["description"] = "Latest tie-breaking description."
+    a, b = llm("a", [before]), llm("b", [after])
+    assert inference_contract.contract_from_runs([b, a], workspace_id="w")["tools"] == [after]
+
+
+@pytest.mark.parametrize("description", ["", None])
+def test_latest_empty_or_absent_description_replaces_old_text(description):
+    before, after = tool("lookup"), tool("lookup")
+    if description is None:
+        del after["function"]["description"]
+    else:
+        after["function"]["description"] = description
+    result = inference_contract.contract_from_runs([llm("a", [before]), llm("b", [after])], workspace_id="w")
+    assert result["tools"] == [after]
+    assert len(result["provenance"]["tool_description_replacements"]) == 1
+
+
+def test_unchanged_descriptions_do_not_generate_replacement_events():
+    result = inference_contract.contract_from_runs(
+        [llm("a", [tool("lookup")]), llm("b", [tool("lookup")])], workspace_id="w",
+    )
+    assert "tool_description_replacements" not in result["provenance"]
+
+
+def test_unknown_timestamps_do_not_guess_latest_changed_description():
+    a, b = llm("a", [tool("lookup")]), llm("b", [tool("lookup")])
+    b["extra"]["invocation_params"]["tools"][0]["function"]["description"] = "Changed"
+    del a["start_time"]
+    with pytest.raises(inference_contract.ContractError, match="changed descriptions require source run start_time"):
+        inference_contract.contract_from_runs([a, b], workspace_id="w")
+
+
+@pytest.mark.parametrize("change", ["type", "required", "strict"])
+def test_latest_description_does_not_override_incompatible_schemas(change):
+    before, after = tool("lookup"), tool("lookup")
+    after["function"]["description"] = "A newer description"
+    if change == "type":
+        after["function"]["parameters"]["properties"]["query"]["type"] = "integer"
+    elif change == "required":
+        after["function"]["parameters"]["required"] = ["query"]
+    else:
+        after["function"]["strict"] = True
     with pytest.raises(inference_contract.ContractError, match="conflicting definitions"):
-        inference_contract.contract_from_runs(
-            [llm("run-1", [before]), llm("run-2", [after])], workspace_id="workspace",
-        )
+        inference_contract.contract_from_runs([llm("a", [before]), llm("b", [after])], workspace_id="w")
+
+
+def test_matching_dated_snapshot_does_not_hide_unknown_description_timestamp():
+    unknown = llm("unknown", [tool("lookup")])
+    del unknown["start_time"]
+    early = llm("early", [tool("lookup")])
+    late = llm("late", [tool("lookup")])
+    late["extra"]["invocation_params"]["tools"][0]["function"]["description"] = "Changed"
+    with pytest.raises(inference_contract.ContractError, match="changed descriptions require source run start_time"):
+        inference_contract.contract_from_runs([late, unknown, early], workspace_id="w")

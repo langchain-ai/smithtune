@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,9 @@ from jsonschema.validators import Draft3Validator, validator_for
 
 class ContractError(ValueError):
     """The inference contract or a request built from it is invalid."""
+
+
+TOOL_MERGE_POLICY = "latest-description-v1"
 
 
 ALLOWED_INFERENCE_SETTINGS = {
@@ -408,54 +411,27 @@ def _merge_optional_arguments(left: dict[str, Any], right: dict[str, Any]) -> di
     return merged
 
 
-def _tool_catalog(description: Any) -> tuple[str, list[tuple[str, str]], str] | None:
-    """Recognize a single Available tools list while retaining surrounding prose."""
-    if not isinstance(description, str):
-        return None
-    lines = description.splitlines(keepends=True)
-    headings = [index for index, line in enumerate(lines) if line.strip() == "Available tools:"]
-    if len(headings) != 1:
-        return None
-    start = headings[0] + 1
-    entries: list[tuple[str, str]] = []
-    names: set[str] = set()
-    end = start
-    for line in lines[start:]:
-        text = line.rstrip("\r\n")
-        match = re.fullmatch(r"[ \t]*- ([A-Za-z0-9_.:/-]+) \(integration: [^\r\n()]+\)[ \t]*", text)
-        if match is None:
-            break
-        name = match[1]
-        if name in names:
-            return None
-        entries.append((name, text))
-        names.add(name)
-        end += 1
-    if not entries:
-        return None
-    return "".join(lines[:start]), entries, "".join(lines[end:])
-
-
 def _merge_tool_definitions(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
-    """Allow catalog growth and compatible optional arguments, retaining all other fields."""
+    """Use the later description while preserving argument compatibility checks."""
     merged = copy.deepcopy(left)
-    old_description = left["function"].get("description")
-    new_description = right["function"].get("description")
-    if old_description != new_description:
-        first, second = _tool_catalog(old_description), _tool_catalog(new_description)
-        if first is None or second is None or first[0] != second[0] or first[2] != second[2]:
-            return None
-        old_entries, new_entries = first[1], second[1]
-        old_names = {name for name, _ in old_entries}
-        # Existing entries must survive byte-for-byte and in their original order.
-        if len(new_entries) <= len(old_entries) or [
-            entry for entry in new_entries if entry[0] in old_names
-        ] != old_entries:
-            return None
-        merged["function"]["description"] = new_description
+    if "description" in right["function"]:
+        merged["function"]["description"] = right["function"]["description"]
+    else:
+        merged["function"].pop("description", None)
     if json_sha256(merged) == json_sha256(right):
         return merged
     return _merge_optional_arguments(merged, right)
+
+
+def _run_timestamp(run: Mapping[str, Any]) -> datetime:
+    value = run.get("start_time")
+    if value is None:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except (ValueError, TypeError) as exc:
+        raise ContractError(f"run {run['id']}: invalid start_time") from exc
+    return timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp.astimezone(UTC)
 
 
 def contract_from_runs(
@@ -467,8 +443,11 @@ def contract_from_runs(
         raise ContractError("no LLM runs were returned for the source trajectory")
     tools: dict[str, dict[str, Any]] = {}
     tool_sources: dict[str, str] = {}
+    source_times = {run["id"]: run.get("start_time") for run in runs}
+    description_replacements: list[dict[str, Any]] = []
+    undated_tools: set[str] = set()
     source_run = None
-    for run in sorted(runs, key=lambda item: (item.get("start_time") or "", item["id"])):
+    for run in sorted(runs, key=lambda item: (_run_timestamp(item), item["id"])):
         run_id = run["id"]
         if run.get("run_type") != "llm":
             raise ContractError(f"run {run_id} is not an LLM run")
@@ -491,12 +470,29 @@ def contract_from_runs(
             raise ContractError(f"run {run_id}: {exc}") from exc
         for tool in captured:
             name = tool["function"]["name"]
+            if run.get("start_time") is None:
+                undated_tools.add(name)
             if name in tools and json_sha256(tools[name]) != json_sha256(tool):
                 merged = _merge_tool_definitions(tools[name], tool)
                 if merged is None:
                     raise ContractError(
                         f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
                     )
+                old_description = tools[name]["function"].get("description")
+                new_description = tool["function"].get("description")
+                if old_description != new_description:
+                    previous_run_id = tool_sources[name]
+                    if name in undated_tools:
+                        raise ContractError(f"tool {name!r}: changed descriptions require source run start_time")
+                    description_replacements.append({
+                        "tool_name": name,
+                        "previous_run_id": previous_run_id,
+                        "selected_run_id": run_id,
+                        "previous_run_start_time": source_times[previous_run_id],
+                        "selected_run_start_time": run["start_time"],
+                        "previous_description_sha256": json_sha256(old_description),
+                        "selected_description_sha256": json_sha256(new_description),
+                    })
                 tool = merged
             tools[name] = tool
             tool_sources[name] = run_id
@@ -519,6 +515,7 @@ def contract_from_runs(
                 "source_thread_id": thread_id,
                 "source_run_ids": sorted(run["id"] for run in runs),
                 "source_trace_ids": sorted({run["trace_id"] for run in runs}),
+                **({"tool_description_replacements": description_replacements} if description_replacements else {}),
             },
         }
     if source_run is None:
@@ -534,6 +531,7 @@ def contract_from_runs(
     combined["extra"]["invocation_params"] = {**invocation, "tools": [tools[name] for name in sorted(tools)]}
     payload = contract_from_run(combined, workspace_id=workspace_id)
     payload["provenance"].update({
+        **({"tool_description_replacements": description_replacements} if description_replacements else {}),
         "source_thread_id": thread_id,
         "source_run_ids": sorted(run["id"] for run in runs),
         "source_trace_ids": sorted({run["trace_id"] for run in runs}),

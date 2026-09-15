@@ -124,7 +124,7 @@ automatically and select the appropriate tokenizer and formatting.
 Preparation uses these defaults:
 
 - LoRA training on text and tool conversations; images are unsupported
-- Tool definitions are combined across each conversation, including optional argument additions and growing `Available tools` lists; earlier turns see the expanded definitions
+- Tool definitions are combined by name across each conversation, using the latest recorded description and compatible optional arguments; earlier turns see the combined definitions
 - 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
@@ -137,6 +137,9 @@ takes precedence over this flag, which defaults to the dataset workspace. Your
 LangSmith API key must have access to both. `dataset create` saves the source
 workspace automatically; existing examples still need valid source thread/trace
 and project IDs.
+
+Description changes are reported in `prepared/tool_description_replacements.json`
+without rejecting examples. Incompatible argument schemas still fail preparation.
 
 Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
 tokenizer loading still run. To supply the same tools for every example, use
