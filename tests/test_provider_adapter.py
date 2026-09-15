@@ -429,7 +429,7 @@ def test_cli_cross_workspace_preparation(tmp_path, monkeypatch, capsys, provider
         (raw / "dataset-export.json").write_text(json.dumps([{"inputs": examples[0]["inputs"]}]))
         (raw / "dataset.json").write_text(json.dumps({"id": dataset_id, "example_count": 1}))
 
-    def capture(workspace, examples, *, source_workspace_id):
+    def capture(workspace, examples, *, source_workspace_id, checkpoint_path):
         calls.append(("capture", workspace, source_workspace_id))
         payload = contract_from_runs([llm("run-1", [])], workspace_id=source_workspace_id)
         payload["provenance"]["source_example_id"] = examples[0]["id"]

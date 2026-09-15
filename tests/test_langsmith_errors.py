@@ -8,6 +8,10 @@ from smithtune.cli import main
 from smithtune.providers.base import PipelineError
 
 
+REQUEST_TIMEOUT = ('HTTP POST /api/v1/runs/query: Post "https://api.smith.langchain.com/api/v1/runs/query": '
+                   'context deadline exceeded (Client.Timeout exceeded while awaiting headers)')
+
+
 @pytest.fixture
 def retry_sleeps(monkeypatch):
     sleeps = []
@@ -63,7 +67,11 @@ def test_curation_retains_existing_error_handling(monkeypatch):
     assert "private" not in str(error.value)
 
 
-def test_rate_limit_retries_only_current_page(monkeypatch, retry_sleeps, capsys):
+@pytest.mark.parametrize(("diagnostic", "reason"), [
+    ('{"detail":"Rate limit exceeded."}\nHTTP 429', "rate limit reached"),
+    (REQUEST_TIMEOUT, "request timed out"),
+])
+def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, capsys, diagnostic, reason):
     cursors = []
 
     def run(argv, **kwargs):
@@ -71,7 +79,7 @@ def test_rate_limit_retries_only_current_page(monkeypatch, retry_sleeps, capsys)
         cursor = body.get("cursor")
         cursors.append(cursor)
         if len(cursors) in (2, 3):
-            raise subprocess.CalledProcessError(1, argv, output='{"detail":"Rate limit exceeded."}\nHTTP 429')
+            raise subprocess.CalledProcessError(1, argv, output=diagnostic)
         response = ({"runs": [{"id": "first"}], "cursors": {"next": "page-2"}} if cursor is None
                     else {"runs": [{"id": "second"}], "cursors": {}})
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(response))
@@ -81,13 +89,17 @@ def test_rate_limit_retries_only_current_page(monkeypatch, retry_sleeps, capsys)
     assert [run["id"] for run in runs] == ["first", "second"]
     assert cursors == [None, "page-2", "page-2", "page-2"]
     assert retry_sleeps == [5.5, 10.5]
-    assert "retrying in 5.5s (1/5)" in capsys.readouterr().err
+    assert f"LangSmith {reason}; retrying in 5.5s (1/5)" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("diagnostic", "attempts"), [
     ('{"detail":"Rate limit exceeded."}\nHTTP 429', 6),
     ("HTTP 403", 1),
-    ("request timed out", 1),
+    ("HTTP 500", 1),
+    ("context canceled", 1),
+    ("request timed out", 6),
+    (REQUEST_TIMEOUT, 6),
+    ("Client.Timeout exceeded while awaiting headers", 6),
 ])
 def test_query_retry_limit_preserves_original_error(monkeypatch, retry_sleeps, diagnostic, attempts):
     calls = []
@@ -104,11 +116,12 @@ def test_query_retry_limit_preserves_original_error(monkeypatch, retry_sleeps, d
     assert retry_sleeps == ([5.5, 10.5, 20.5, 40.5, 60] if attempts == 6 else [])
 
 
-def test_rate_limit_outside_trace_queries_is_not_retried(monkeypatch, retry_sleeps):
+@pytest.mark.parametrize("diagnostic", ["HTTP 429", REQUEST_TIMEOUT])
+def test_transient_error_outside_trace_queries_is_not_retried(monkeypatch, retry_sleeps, diagnostic):
     def fail(argv, **kwargs):
-        raise subprocess.CalledProcessError(1, argv, stderr="HTTP 429")
+        raise subprocess.CalledProcessError(1, argv, stderr=diagnostic)
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
-    with pytest.raises(PipelineError, match="HTTP 429"):
+    with pytest.raises(PipelineError):
         curation._api("workspace-123", "POST", "/api/v1/datasets", {"name": "test"})
     assert retry_sleeps == []

@@ -126,10 +126,12 @@ def _query_contract_runs(
                 ], capture=True)
                 break
             except PipelineError as exc:
-                if attempt == 5 or not re.search(r"\bHTTP 429\b", str(exc)):
+                retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out)\b", str(exc), re.I)
+                if attempt == 5 or not retryable:
                     raise
                 delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
-                print(f"LangSmith rate limit reached; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+                reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
+                print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
                 time.sleep(delay)
         try:
             response = json.loads(result.stdout)
@@ -572,12 +574,30 @@ def _source_workspace(
 def capture_example_contracts(
     workspace_id: str, examples: list[dict[str, Any]], *,
     source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
+    checkpoint_path: Path | None = None,
 ) -> dict[str, InferenceContract]:
     """Collect a separate union of function tools for each source trajectory."""
     contracts: dict[str, InferenceContract] = {}
+    checkpoint_identity = json_sha256({
+        "schema_version": 1, "workspace_id": workspace_id,
+        "source_workspace_id": source_workspace_id, "examples": examples,
+        "tool_merge_policy": TOOL_MERGE_POLICY,
+    })
+    if checkpoint_path is not None and checkpoint_path.exists():
+        checkpoint = _load_json(checkpoint_path)
+        if isinstance(checkpoint, dict) and checkpoint.get("identity") == checkpoint_identity:
+            payload = checkpoint.get("contracts")
+            if checkpoint.get("contracts_sha256") != json_sha256(payload):
+                raise PipelineError(f"capture checkpoint hash mismatch; remove {checkpoint_path} and retry")
+            contracts = _parse_example_contracts(payload)
+            if not set(contracts).issubset(example["id"] for example in examples):
+                raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
+            print(f"Resuming tool capture: {len(contracts)}/{len(examples)} examples already saved", file=sys.stderr)
     sources: dict[tuple[str, str, str | None, str | None], dict[str, Any]] = {}
     for example in examples:
         example_id = example["id"]
+        if example_id in contracts:
+            continue
         try:
             source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
             identity = _source_identity(example)
@@ -608,6 +628,10 @@ def capture_example_contracts(
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
+            if checkpoint_path is not None:
+                saved = {key: contract.to_dict() for key, contract in contracts.items()}
+                _json_dump(checkpoint_path, {"identity": checkpoint_identity, "contracts": saved,
+                                            "contracts_sha256": json_sha256(saved)})
         except (ContractError, PipelineError) as exc:
             raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
     return contracts
@@ -635,9 +659,12 @@ def _example_contract_snapshot(
                 "dataset_id": dataset_id, "source_examples_sha256": source_sha,
                 "tool_merge_policy": TOOL_MERGE_POLICY}
     if fetch:
-        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id)
+        checkpoint_path = raw_dir / "example_contracts.partial.json"
+        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id,
+                                             checkpoint_path=checkpoint_path)
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
         _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
+        checkpoint_path.unlink(missing_ok=True)
     if not path.exists():
         raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
     snapshot = _load_json(path)
