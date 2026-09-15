@@ -410,7 +410,7 @@ def test_create_download_prepare(tmp_path):
     manifest = dataset.prepare_dataset(uid(100), imported["dataset_id"], DEFAULT_MODEL, data_dir,
                                        fetch=False, check_render=False)
     split = [manifest["split"][key] for key in ("train", "validation", "test")]
-    assert sum(split) == 12 and min(split) >= 1
+    assert sum(split) == 12
     rows = [json.loads(line) for line in (data_dir / "prepared" / "train.jsonl").read_text().splitlines()]
     # Provider JSONL strips provenance; the preserved raw examples keep it.
     assert all(row["messages"][0]["role"] == "user" for row in rows)

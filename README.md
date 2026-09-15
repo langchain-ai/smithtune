@@ -250,10 +250,19 @@ Preparation uses these defaults:
 - One complete trajectory per source conversation; repeated source identities fail validation before tool capture, including with `--no-fetch`
 - LoRA training on text and tool conversations; images are unsupported
 - Tool definitions are combined by name across each conversation, using the latest recorded description and compatible optional arguments; earlier turns see the combined definitions
-- 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
+- Approximately 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; use `--max-seq-len 32768` to lower the limit
+
+Preparation saves conversation assignments in `prepared/split_assignments.json`
+and reuses them as the dataset grows. Existing prepared splits are recovered
+from their saved rows and source provenance. Keep the same fractions when rerunning;
+small datasets may have empty splits, which are reported without reshuffling.
+
+When continuing training in a new data directory, add
+`--split-from <previous-data-dir>` to `prepare` to preserve prior assignments.
+Keep the assignments file, including entries for removed conversations.
 
 If source traces live in another workspace, add
 `--source-workspace-id '<traces-workspace-id>'` to `prepare`; `--workspace-id`
