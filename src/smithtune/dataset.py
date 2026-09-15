@@ -531,15 +531,27 @@ def validate_trajectories(
     )
 
 
+def _source_workspace(
+    example: dict[str, Any], workspace_id: str, source_workspace_id: str | None,
+) -> str:
+    metadata = example.get("metadata") or {}
+    value = metadata.get("source_workspace_id", source_workspace_id if source_workspace_id is not None else workspace_id)
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise PipelineError(f"example {example['id']}: source workspace ID must be a non-empty string without surrounding whitespace")
+    return value
+
+
 def capture_example_contracts(
-    workspace_id: str, examples: list[dict[str, Any]], *, runner: Callable[..., Any] = _run,
+    workspace_id: str, examples: list[dict[str, Any]], *,
+    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run,
 ) -> dict[str, InferenceContract]:
     """Collect a separate union of function tools for each source trajectory."""
     contracts: dict[str, InferenceContract] = {}
-    sources: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
+    sources: dict[tuple[str, str, str | None, str | None], dict[str, Any]] = {}
     for example in examples:
         example_id = example["id"]
         try:
+            source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
             identity = _source_identity(example)
             thread_id, trace_id = identity["source_thread_id"], identity["source_trace_id"]
             metadata = example.get("metadata") or {}
@@ -547,24 +559,24 @@ def capture_example_contracts(
             if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
                 raise PipelineError("conflicting source project IDs")
             if project_id is None and trace_id:
-                roots = _query_contract_runs(workspace_id, {"id": [trace_id], "limit": 1}, runner=runner)
+                roots = _query_contract_runs(source_workspace, {"id": [trace_id], "limit": 1}, runner=runner)
                 if len(roots) != 1 or roots[0]["id"] != trace_id:
                     raise PipelineError(f"source trace root {trace_id} was not found")
                 project_id = roots[0].get("session_id")
             if not isinstance(project_id, str) or not project_id:
                 raise PipelineError("missing source project ID; use source_session_id or metadata.source_project_id, or supply --inference-contract")
-            key = (project_id, thread_id, None if thread_id else trace_id)
+            key = (source_workspace, project_id, thread_id, None if thread_id else trace_id)
             if key not in sources:
                 if thread_id:
-                    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, runner=runner)
+                    runs = _query_thread_llm_runs(source_workspace, project_id, thread_id, runner=runner)
                 else:
-                    runs = _query_contract_runs(workspace_id, {
+                    runs = _query_contract_runs(source_workspace, {
                         "session": [project_id], "run_type": "llm",
                         "filter": f"eq(trace_id,{json.dumps(trace_id)})",
                     }, runner=runner)
                     if any(run.get("trace_id") != trace_id for run in runs):
                         raise PipelineError("LangSmith returned a run from a different trace")
-                sources[key] = contract_from_runs(runs, workspace_id=workspace_id, thread_id=thread_id)
+                sources[key] = contract_from_runs(runs, workspace_id=source_workspace, thread_id=thread_id)
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
@@ -588,13 +600,13 @@ def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
 
 def _example_contract_snapshot(
     workspace_id: str, dataset_id: str, examples: list[dict[str, Any]],
-    source_sha: str, raw_dir: Path, *, fetch: bool,
+    source_sha: str, raw_dir: Path, *, fetch: bool, source_workspace_id: str | None = None,
 ) -> dict[str, InferenceContract]:
     path = raw_dir / "example_contracts.json"
     identity = {"schema_version": 1, "workspace_id": workspace_id,
                 "dataset_id": dataset_id, "source_examples_sha256": source_sha}
     if fetch:
-        contracts = capture_example_contracts(workspace_id, examples)
+        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id)
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
         _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
     if not path.exists():
@@ -608,6 +620,13 @@ def _example_contract_snapshot(
     contracts = _parse_example_contracts(payload)
     if set(contracts) != {example["id"] for example in examples}:
         raise PipelineError("cached inference contracts do not cover every example")
+    for example in examples:
+        expected_workspace = _source_workspace(example, workspace_id, source_workspace_id)
+        if contracts[example["id"]].provenance.get("source_workspace_id") != expected_workspace:
+            raise PipelineError(
+                f"cached inference contract for example {example['id']} has a different source workspace; "
+                "prepare again without --no-fetch"
+            )
     return contracts
 
 
@@ -809,6 +828,7 @@ def prepare_dataset(
     data_dir: Path,
     *,
     inference_contract: InferenceContract | None = None,
+    source_workspace_id: str | None = None,
     reasoning_policy: ReasoningPolicy = "omit",
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
@@ -830,6 +850,7 @@ def prepare_dataset(
     if inference_contract is None:
         example_contracts = _example_contract_snapshot(
             workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
+            source_workspace_id=source_workspace_id,
         )
     rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
                             reasoning_policy=reasoning_policy, model=model)

@@ -407,3 +407,53 @@ def test_fireworks_provider_train_rejects_a_baseten_prepared_manifest(tmp_path):
             confirm=True,
             init_from_checkpoint=None,
         )
+
+
+@pytest.mark.parametrize("provider", ["baseten", "fireworks"])
+def test_cli_cross_workspace_preparation(tmp_path, monkeypatch, capsys, provider):
+    from test_example_tools import example
+    from test_tool_capture import llm
+    from smithtune.inference_contract import contract_from_runs, parse_inference_contract
+
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
+    module = baseten if provider == "baseten" else fireworks
+    monkeypatch.setattr(module, "preflight_model", lambda model, **kwargs: model)
+    monkeypatch.setattr(module, "resolve_rendering_model", lambda model: model)
+    calls = []
+
+    def download(workspace, dataset_id, raw):
+        calls.append(("download", workspace))
+        examples = [example(1)]
+        raw.mkdir(parents=True)
+        (raw / "examples.json").write_text(json.dumps(examples))
+        (raw / "dataset-export.json").write_text(json.dumps([{"inputs": examples[0]["inputs"]}]))
+        (raw / "dataset.json").write_text(json.dumps({"id": dataset_id, "example_count": 1}))
+
+    def capture(workspace, examples, *, source_workspace_id):
+        calls.append(("capture", workspace, source_workspace_id))
+        payload = contract_from_runs([llm("run-1", [])], workspace_id=source_workspace_id)
+        payload["provenance"]["source_example_id"] = examples[0]["id"]
+        return {examples[0]["id"]: parse_inference_contract(payload)}
+
+    monkeypatch.setattr(dataset, "download_dataset", download)
+    monkeypatch.setattr(dataset, "capture_example_contracts", capture)
+    monkeypatch.setattr(sys, "argv", [
+        "smithtune", "prepare", "--provider", provider, "--model", "qwen3p8-27b",
+        "--workspace-id", "dataset-workspace", "--source-workspace-id", "trace-workspace",
+        "--dataset-id", "dataset-id", "--data-dir", str(tmp_path), "--skip-render-check",
+        "--validation-fraction", "0", "--test-fraction", "0",
+    ])
+    assert pipeline.main() is None
+    assert calls == [("download", "dataset-workspace"), ("capture", "dataset-workspace", "trace-workspace")]
+    manifest = json.loads((tmp_path / "prepared" / "manifest.json").read_text())
+    assert manifest["langsmith"]["workspace_id"] == "dataset-workspace"
+
+    calls.clear()
+    sys.argv.append("--no-fetch")
+    assert pipeline.main() is None
+    assert calls == []
+    sys.argv[sys.argv.index("--source-workspace-id") + 1] = "other-workspace"
+    with pytest.raises(SystemExit) as exc:
+        pipeline.main()
+    assert exc.value.code == 2
+    assert "different source workspace" in capsys.readouterr().err

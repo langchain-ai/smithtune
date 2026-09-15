@@ -155,7 +155,8 @@ def test_create_imports_saved_threads_server_side(tmp_path):
         (f"/v1/platform/datasets/{uid(200)}/examples/thread-imports", {
             "project_id": uid(101), "thread_ids": ["a"],
             "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
-                         "source_project_id": uid(101), "selection_scope": "thread"},
+                         "source_project_id": uid(101), "source_workspace_id": uid(100),
+                         "selection_scope": "thread"},
         }),
     ]
     receipt = json.loads(Path(result["receipt"]).read_text())
