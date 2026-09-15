@@ -8,9 +8,11 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -69,6 +71,13 @@ def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise PipelineError(f"{field} must be a nonempty string")
     return value
+
+
+def _destination(name, dataset_id):
+    if (name is None) == (dataset_id is None):
+        raise PipelineError("use --name for a new dataset or --dataset-id for an existing dataset")
+    return (_text(name, "name") if name is not None else None,
+            _uuid(dataset_id, "dataset ID") if dataset_id is not None else None)
 
 
 def _time(value: str) -> str:
@@ -202,12 +211,13 @@ def _select_dataset(
 
 def create_dataset(
     *, workspace_id: str, project_id: str, start_time: str, end_time: str,
-    name: str, limit: int, filter: str | None = None, output: Path | None = None,
+    limit: int, name: str | None = None, dataset_id: str | None = None,
+    filter: str | None = None, output: Path | None = None,
     run_dir: Path | None = None,
     concurrency: int = DEFAULT_CONCURRENCY, runner: Callable[..., Any] = _run,
 ) -> dict:
     """Filter root runs and import the selected conversations in one operation."""
-    name = _text(name, "name")
+    name, dataset_id = _destination(name, dataset_id)
     _check_concurrency(concurrency)
     if output is not None and run_dir is not None:
         raise PipelineError("use --run-dir or --output, not both")
@@ -219,8 +229,8 @@ def create_dataset(
         filter=filter, limit=limit, runner=runner,
     )
     if selected["selected_examples"] == 0:
-        raise PipelineError(f"no conversations matched the filters; no dataset was created; selection={output}")
-    imported = _import_selection(selection=output, name=name, concurrency=concurrency, runner=runner)
+        raise PipelineError(f"no conversations matched the filters; no dataset was created or updated; selection={output}")
+    imported = _import_selection(selection=output, name=name, dataset_id=dataset_id, concurrency=concurrency, runner=runner)
     return {
         **imported, "selection": str(output), "run_dir": str(run_dir),
         "matching_roots": selected["matching_roots"],
@@ -281,8 +291,36 @@ def _check_concurrency(concurrency: Any) -> None:
         raise PipelineError(f"concurrency must be an integer between 1 and {MAX_CONCURRENCY}")
 
 
+def _source_example(workspace, project, item):
+    return {"inputs": {}, "outputs": None, "metadata": {
+        "trajectory_format": "messages", "conversation_scope": "root",
+        "source_workspace_id": workspace, "source_project_id": project,
+        "source_scope": item["key"].removesuffix("_id"), "source_scope_id": item["id"],
+    }}
+
+
+def _download_examples(workspace, project, selected, run_dir, concurrency, *, runner):
+    def download(item):
+        example = _source_example(workspace, project, item)
+        example["inputs"]["messages"] = _fetch_trajectory(workspace, project, item, runner=runner)
+        return save_conversation(run_dir, example)
+
+    remaining = iter(selected)
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        pending = deque(pool.submit(download, item) for item in islice(remaining, concurrency))
+        try:
+            while pending:
+                yield load_conversation(pending.popleft().result())
+                item = next(remaining, None)
+                if item is not None:
+                    pending.append(pool.submit(download, item))
+        finally:
+            for future in pending:
+                future.cancel()
+
+
 def _import_selection(
-    *, selection: Path, name: str, concurrency: int = DEFAULT_CONCURRENCY,
+    *, selection: Path, name: str | None = None, dataset_id: str | None = None, concurrency: int = DEFAULT_CONCURRENCY,
     runner: Callable[..., Any] = _run,
 ) -> dict:
     _check_concurrency(concurrency)
@@ -295,10 +333,20 @@ def _import_selection(
     project_id = _uuid(value.get("project_id"), "project_id")
     matches = _matches(value.get("matches"))
     selected = _selected(value.get("selected"), matches)
-    name = _text(name, "name")
+    name, dataset_id = _destination(name, dataset_id)
     receipt_path = selection.with_suffix(".import.json")
     if receipt_path == selection:
         raise PipelineError("selection path must differ from its import receipt path")
+    if dataset_id is not None:
+        from smithtune.dataset import _source_key
+        from smithtune.dataset_import import update_dataset
+
+        keys = {_source_key(_source_example(workspace_id, project_id, item), workspace_id, None) for item in selected}
+        examples = _download_examples(workspace_id, project_id, selected, selection.parent, concurrency, runner=runner)
+        try:
+            return update_dataset(workspace_id, dataset_id, examples, keys, selection.parent, receipt_path, runner=runner)
+        finally:
+            examples.close()
     # in_flight lists conversations whose fetch or write has started but not been
     # confirmed; after a failure it names exactly the sources with unknown outcomes.
     receipt = {
@@ -321,10 +369,9 @@ def _import_selection(
             receipt["in_flight"].append(entry)
             _save_receipt(receipt_path, receipt)
         messages = _fetch_trajectory(workspace_id, project_id, item, runner=runner)
-        metadata = {**common, "source_scope": item["key"].removesuffix("_id"), "source_scope_id": item["id"]}
-        conversation_path = save_conversation(selection.parent, {
-            "inputs": {"messages": messages}, "outputs": None, "metadata": metadata,
-        })
+        example = _source_example(workspace_id, project_id, item)
+        example["inputs"]["messages"] = messages
+        conversation_path = save_conversation(selection.parent, example)
         example = load_conversation(conversation_path)
         with lock:
             entry["conversation"] = str(conversation_path)
@@ -345,8 +392,6 @@ def _import_selection(
         dataset = _api(workspace_id, "POST", "/api/v1/datasets", {"name": name, "data_type": "kv"}, runner=runner)
         dataset_id = _uuid(dataset.get("id") if isinstance(dataset, dict) else None, "returned dataset ID")
         update(dataset_id=dataset_id, pending_write=None)
-        common = {"trajectory_format": "messages", "conversation_scope": "root",
-                  "source_project_id": project_id, "source_workspace_id": workspace_id}
         remaining, pending, failure = iter(selected), set(), None
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             while True:
