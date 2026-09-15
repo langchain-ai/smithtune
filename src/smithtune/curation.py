@@ -249,19 +249,28 @@ def _fetch_trajectory(
 ) -> list:
     body = {"project_id": project_id, item["key"]: item["id"],
             "format": "messages", "include": {"system_messages": True}}
-    for attempt in range(1, FETCH_ATTEMPTS + 1):
-        try:
-            trajectory = _api(workspace_id, "POST", "/v1/trajectory", body, runner=runner)
-            break
-        except PipelineError as exc:
-            if attempt == FETCH_ATTEMPTS or "returned invalid JSON" in str(exc):
-                raise PipelineError(f"{exc} after {attempt} attempt(s)") from exc
-            _sleep(FETCH_BACKOFF_SECONDS * attempt)
-    if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list) or not trajectory["messages"]:
-        raise PipelineError(f"{item['key']} {item['id']} returned no messages")
-    if trajectory.get("next_cursor") or trajectory.get("prev_cursor"):
-        raise PipelineError(f"{item['key']} {item['id']} returned an unexpected continuation cursor")
-    return trajectory["messages"]
+    messages, cursors = [], set()
+    while True:
+        for attempt in range(1, FETCH_ATTEMPTS + 1):
+            try:
+                trajectory = _api(workspace_id, "POST", "/v1/trajectory", body, runner=runner)
+                break
+            except PipelineError as exc:
+                if attempt == FETCH_ATTEMPTS or "returned invalid JSON" in str(exc):
+                    raise PipelineError(f"{exc} after {attempt} attempt(s)") from exc
+                _sleep(FETCH_BACKOFF_SECONDS * attempt)
+        if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list):
+            raise PipelineError(f"{item['key']} {item['id']} returned invalid messages")
+        messages.extend(trajectory["messages"])
+        cursor = trajectory.get("next_cursor")
+        if cursor is None:
+            if not messages:
+                raise PipelineError(f"{item['key']} {item['id']} returned no messages")
+            return messages
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise PipelineError(f"{item['key']} {item['id']} returned an invalid or repeated continuation cursor")
+        cursors.add(cursor)
+        body["cursor"] = cursor
 
 
 def _check_concurrency(concurrency: Any) -> None:
