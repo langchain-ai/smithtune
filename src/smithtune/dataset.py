@@ -126,10 +126,12 @@ def _query_contract_runs(
                 ], capture=True)
                 break
             except PipelineError as exc:
-                if attempt == 5 or not re.search(r"\bHTTP 429\b", str(exc)):
+                retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out)\b", str(exc), re.I)
+                if attempt == 5 or not retryable:
                     raise
                 delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
-                print(f"LangSmith rate limit reached; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+                reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
+                print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
                 time.sleep(delay)
         try:
             response = json.loads(result.stdout)
