@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import math
+import subprocess
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -60,6 +61,14 @@ class Audit:
     max_context_tokens: int = 0
     reasoning_blocks: int = 0
     readable_reasoning_blocks: int = 0
+
+
+def _run_langsmith(command: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    try:
+        return _run(command, capture=capture)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or f"langsmith exited with status {exc.returncode}"
+        raise PipelineError(detail) from None
 
 
 def _langsmith_dataset_command(workspace_id: str, dataset_id: str) -> list[str]:
@@ -157,7 +166,7 @@ def capture_inference_contract(
     run_id: str,
     output: Path,
     *,
-    runner: Callable[..., Any] = _run,
+    runner: Callable[..., Any] = _run_langsmith,
 ) -> dict[str, Any]:
     """Collect all function tools in the selected LLM run's conversation thread."""
     sources = _query_contract_runs(workspace_id, {"id": [run_id], "limit": 1}, runner=runner)
@@ -202,7 +211,7 @@ def download_dataset(
     workspace_id: str,
     dataset_id: str,
     raw_dir: Path,
-    runner: Callable[..., Any] = _run,
+    runner: Callable[..., Any] = _run_langsmith,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Download every example and preserve the raw LangSmith data."""
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -549,7 +558,7 @@ def _source_workspace(
 
 def capture_example_contracts(
     workspace_id: str, examples: list[dict[str, Any]], *,
-    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run,
+    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
 ) -> dict[str, InferenceContract]:
     """Collect a separate union of function tools for each source trajectory."""
     contracts: dict[str, InferenceContract] = {}
