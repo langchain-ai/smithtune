@@ -19,22 +19,23 @@ uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage_coordinator
 ```
 
 Deep Agents, its OpenAI adapter, and Monty are pinned in the optional `deepagents` extra.
-Tests use the actual agent graph with a deterministic local model. They check
-coordinator skill loading, Python sandbox execution, subagent dispatch, bounded
-concurrency, fresh judge context, full evidence retention, and resume.
+Tests use the actual coordinator graph with a deterministic local model. They
+check skill loading, Python dispatch, bounded concurrency, one full-message
+request per judge, provider context rejection, and resume.
 Monty is the Pydantic project's MIT-licensed Python sandbox. Version 0.0.23
 was checked against its source, PyPI metadata, and OSV on 2026-09-14; no published
 advisories were returned. Code gets no host mounts or OS handlers. Only the
-reviewed trace/task functions cross the sandbox boundary. Judges can only
-read saved runs; the coordinator can dispatch bounded judge batches.
+reviewed trace/task functions cross the sandbox boundary. The coordinator can dispatch bounded judge batches. Judges receive full
+conversation messages and have no tools.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
 The default council is read from the packaged `config.example.json`; CLI,
 Python, and exported skill defaults must agree. Terra uses OpenAI Responses
-for reasoning with tools. Fireworks chat responses preserve `reasoning_content`
-through the pinned OpenAI adapter, with streaming disabled. Keep the tool
-round-trip checks when changing either transport. Bump the triage agent version
+with `reasoning.effort=none`; Fireworks calls set `reasoning_effort=none`.
+GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the saved plan
+records that exception.
+Keep the request checks when changing either transport. Bump the triage agent version
 when model transport or evidence presentation changes.
 
 `sfw` is used for contributor dependency installation. It is not a smithtune runtime

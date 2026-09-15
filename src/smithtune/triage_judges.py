@@ -1,9 +1,10 @@
-"""One fresh model call (or constrained Deep Agent) per trace and judge slot."""
+"""One model request per full trajectory and council member."""
 
 from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from importlib.resources import files
 
@@ -15,67 +16,51 @@ from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL, _set_ski
 
 
 PROVIDERS = ("fireworks", "openai", "anthropic", "anthropic-gateway")
+# GLM-5.3 rejects requests that disable reasoning.
+FIREWORKS_REASONING = {"accounts/fireworks/models/glm-5p3-flash": "low"}
 RESULT_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["trace_id", "keep", "reason", "evidence"],
-    "properties": {
-        "trace_id": {"type": "string"}, "keep": {"type": "integer", "enum": [0, 1]},
-        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
-        "evidence": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
-            "type": "object", "additionalProperties": False, "required": ["quote"],
-            "properties": {"message_index": {"type": "integer", "minimum": 0},
-                           "run_id": {"type": "string"}, "quote": {"type": "string", "minLength": 1, "maxLength": 500}},
-            "oneOf": [{"required": ["message_index"]}, {"required": ["run_id"]}],
-        }},
-    },
+    "required": ["keep", "reason"],
+    "properties": {"keep": {"type": "integer", "enum": [0, 1]},
+                   "reason": {"type": "string", "minLength": 1}},
 }
-INCOMPLETE_SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "required": ["trace_id", "status", "reason"],
-    "properties": {"trace_id": {"type": "string"}, "status": {"const": "incomplete"},
-                   "reason": {"type": "string", "minLength": 1, "maxLength": 1000}},
-}
-
-
-class IncompleteJudgment(PipelineError):
-    """A judge explicitly reports missing evidence instead of a quality vote."""
 
 
 def rubric_text() -> str:
     return files("smithtune").joinpath("skills/sft-trace-triage/judge.md").read_text(encoding="utf-8")
 
 
-def _strings(value):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _strings(item)
-
-
-def validate_judgment(value: dict, trace: dict) -> dict:
-    if not list(Draft202012Validator(INCOMPLETE_SCHEMA).iter_errors(value)) and value["trace_id"] == trace["trace_id"]:
-        raise IncompleteJudgment(value["reason"])
-    if list(Draft202012Validator(RESULT_SCHEMA).iter_errors(value)):
-        raise PipelineError("judge response does not match the result schema")
-    if type(value["keep"]) is not int or value["trace_id"] != trace["trace_id"]:
-        raise PipelineError("judge response has an invalid decision or trace identity")
-    for evidence in value["evidence"]:
-        if "message_index" in evidence:
-            index = evidence["message_index"]
-            if type(index) is not int or index >= len(trace["messages"]):
-                raise PipelineError("judge evidence references an unknown message")
-            source = trace["messages"][index]
-        else:
-            source = next((run for run in trace["runs"] if run["id"] == evidence["run_id"]), None)
-            if source is None:
-                raise PipelineError("judge evidence references an unknown run")
-        if not any(evidence["quote"] in text for text in [json.dumps(source, ensure_ascii=False), *_strings(source)]):
-            raise PipelineError("judge evidence quote does not occur in the source")
+def validate_judgment(value: dict) -> dict:
+    if list(Draft202012Validator(RESULT_SCHEMA).iter_errors(value)) or type(value.get("keep")) is not int:
+        raise PipelineError("judge must return keep (0 or 1) and a reason")
     return value
+
+
+def context_window_exceeded(exc: Exception) -> bool:
+    """Use the provider's context rejection, never a guessed character limit."""
+    error = exc.__cause__ if isinstance(exc.__cause__, urllib.error.HTTPError) else exc
+    status = error.code if isinstance(error, urllib.error.HTTPError) else getattr(error, "status_code", None)
+    if status not in {400, 413}:
+        return False
+    if isinstance(error, urllib.error.HTTPError):
+        try:
+            body = json.loads(error.read())
+        except (ValueError, OSError):
+            return False
+    else:
+        body = getattr(error, "body", None)
+    if not isinstance(body, dict):
+        return False
+    detail = body.get("error", body)
+    if not isinstance(detail, dict):
+        return False
+    if detail.get("code") in {"context_length_exceeded", "max_context_length_exceeded"}:
+        return True
+    message = str(detail.get("message", "")).lower()
+    return any(phrase in message for phrase in (
+        "maximum context length", "context window exceeded", "exceeds the context window",
+        "prompt is too long", "input is too long", "exceeds the model's context",
+    ))
 
 
 def credential_name(provider: str) -> str:
@@ -91,36 +76,10 @@ def check_credentials(judges: list[dict]) -> None:
             raise PipelineError(f"{name} is not set for judge {judge['name']}")
 
 
-def judge_messages(trace: dict, rubric: str, rules: list[str]) -> list[dict]:
-    evidence = {**trace, "messages": [{**message, "message_index": index}
-                                     for index, message in enumerate(trace["messages"])]}
-    return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps({"oneOf": [RESULT_SCHEMA, INCOMPLETE_SCHEMA]})
-             + "\nAdditional reviewed selection rules:\n" + json.dumps(rules)},
-            {"role": "user", "content": json.dumps({"untrusted_trace_evidence": evidence}, ensure_ascii=False)}]
-
-
-def indexed_messages(messages: list[dict]) -> list[dict]:
-    """Expose large messages and run payloads through read-only code."""
-    trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
-    index = {**trace, "runs": [
-        {key: run[key] for key in ("id", "parent_run_id", "run_type", "name", "start_time", "end_time", "error") if key in run}
-        for run in trace["runs"]
-    ]}
-    for threshold in (4000, 1000, 0):
-        indexed = []
-        for i, message in enumerate(trace["messages"]):
-            content = json.dumps(message, ensure_ascii=False)
-            if len(content) <= threshold:
-                indexed.append(message)
-            else:
-                indexed.append({**{key: message[key] for key in ("role", "id", "name", "tool_call_id") if key in message},
-                                "message_index": i, "chars": len(content),
-                                "preview": content[:300] if threshold else "",
-                                "read_full": f"read_message({i})"})
-        index["messages"] = indexed
-        if len(json.dumps(index, ensure_ascii=False)) <= 100_000:
-            break
-    return [*messages[:-1], {"role": "user", "content": json.dumps({"untrusted_trace_evidence": index}, ensure_ascii=False)}]
+def judge_messages(trajectory: dict, rubric: str, rules: list[str]) -> list[dict]:
+    return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps(RESULT_SCHEMA)
+             + "\nAdditional selection rules:\n" + json.dumps(rules)},
+            {"role": "user", "content": json.dumps({"untrusted_trajectory": trajectory["messages"]}, ensure_ascii=False)}]
 
 
 def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
@@ -134,6 +93,8 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
         headers["Authorization"] = f"Bearer {os.environ[credential_name(provider)]}"
         body = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
                 "max_tokens" if provider == "fireworks" else "max_completion_tokens": max_tokens}
+        if provider == "fireworks" or model == "gpt-5.6-terra":
+            body["reasoning_effort"] = FIREWORKS_REASONING.get(model, "none") if provider == "fireworks" else "none"
         if provider == "fireworks":
             _set_skill_session()
             headers.update({"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})
@@ -150,15 +111,18 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
 
 
 def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagnostics=None) -> dict:
-    from smithtune.triage_agent import make_agent
-    trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
-    messages = indexed_messages(messages)
-    agent, skill_files = make_agent(judge, messages[0]["content"], max_tokens, trace=trace, diagnostics=diagnostics)
-    result = agent.invoke({"messages": messages[1:], "files": skill_files}, config={"recursion_limit": 24})
+    """One model request per subagent, with full messages and no tool loop."""
+    from smithtune.triage_agent import _model
+    model = _model(judge, max_tokens)
+    if judge["provider"] in {"fireworks", "openai"}:
+        model = model.bind(response_format={"type": "json_object"})
+    result = model.invoke(messages)
+    if diagnostics is not None:
+        diagnostics["finish_reason"] = result.response_metadata.get("finish_reason")
+    content = result.content
+    if isinstance(content, list):
+        content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
     try:
-        content = result["messages"][-1].content
-        if isinstance(content, list):
-            content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
         return json.loads(content)
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise PipelineError("Deep Agent returned invalid judge JSON") from None
+    except (TypeError, ValueError):
+        raise PipelineError("judge returned invalid JSON") from None

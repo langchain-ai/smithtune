@@ -3,6 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from uuid import UUID
 
 import pytest
@@ -79,10 +80,7 @@ def source():
 
 
 def judge_call(judge, messages_, max_tokens):
-    trace = json.loads(messages_[-1]["content"])["untrusted_trace_evidence"]
-    index = len(trace["messages"]) - 1
-    return {"trace_id": trace["trace_id"], "keep": 1, "reason": "The answer completes the request.",
-            "evidence": [{"message_index": index, "quote": trace["messages"][index]["content"]}]}
+    return {"keep": 1, "reason": "The answer completes the request."}
 
 
 def run(tmp_path, api=None, **kwargs):
@@ -139,9 +137,9 @@ def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
     result = run(tmp_path, missing_root)
     frozen = triage_source.load_snapshot(tmp_path)
     assert all(trace["root_run_id"] is None and trace["source_warnings"] for trace in frozen["traces"])
-    assert result["kept"] == 2 and result["eligible_conversations"] == 0
+    assert result["kept"] == 1 and result["eligible_conversations"] == 0
     assert frozen["units"][0]["training_error"] == "conversation source has a missing root run"
-    with pytest.raises(PipelineError, match="no complete, all-pass"):
+    with pytest.raises(PipelineError, match="no complete, kept"):
         triage.selected_examples(tmp_path)
 
 
@@ -154,7 +152,7 @@ def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
     assert frozen["units"][0]["training_error"]
     result = triage.run_triage(source(), tmp_path, runner=api, confirm=True,
                               judge_call=lambda *_: pytest.fail("multimodal trace reached a judge"))
-    assert result["filtered_multimodal"] == 2 and result["incomplete"] == 0
+    assert result["filtered_multimodal"] == 1 and result["incomplete"] == 0
     assert (tmp_path / "judgments.jsonl").read_text() == ""
     assert all(json.loads(line)["keep"] == 0 and "Filtered before judging" in json.loads(line)["reason"]
                for line in (tmp_path / "labels.jsonl").read_text().splitlines())
@@ -200,7 +198,7 @@ def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, 
             patch.setattr(triage, "training_error", lambda _: None)
             assert run(tmp_path, api)["eligible_conversations"] == 1
         original = (tmp_path / "snapshot.json").read_bytes()
-        with pytest.raises(PipelineError, match="no complete, all-pass"):
+        with pytest.raises(PipelineError, match="no complete, kept"):
             triage.selected_examples(tmp_path)
 
         def api(*_a, **_kw):
@@ -208,10 +206,10 @@ def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, 
     summary = run(tmp_path, api)
     frozen = triage_source.load_snapshot(tmp_path)
     assert error in triage_source.training_error(frozen["units"][0])
-    assert summary["kept"] == 2  # Compatibility does not change the quality votes.
+    assert summary["kept"] == 1  # Compatibility does not change the quality votes.
     assert summary["eligible_conversations"] == 0
     assert summary["unsupported_training_conversations"] == 1
-    with pytest.raises(PipelineError, match="no complete, all-pass"):
+    with pytest.raises(PipelineError, match="no complete, kept"):
         triage.selected_examples(tmp_path)
     if cached:
         assert (tmp_path / "snapshot.json").read_bytes() == original
@@ -255,7 +253,7 @@ def test_standalone_traces_are_labeled(tmp_path):
     result = run(tmp_path, api)
     assert result["kept"] == 1
     assert json.loads((tmp_path / "labels.jsonl").read_text()) == {
-        "trace_id": uid(2), "keep": 1, "reason": "3/3 judges voted 1. The answer completes the request.",
+        "trajectory_id": triage_source.load_snapshot(tmp_path)["units"][0]["example"]["id"], "keep": 1, "reason": "3/3 judges voted 1. The answer completes the request.",
     }
 
 
@@ -264,39 +262,39 @@ def test_dry_run_does_not_judge_and_single_judge_is_supported(tmp_path):
         pytest.fail("dry-run must not judge")
     path = config(tmp_path, count=1)
     plan = triage.run_triage(source(), tmp_path, runner=API(), dry_run=True, judge_call=no_judge, config_path=path)
-    assert plan["judges"] == 1 and plan["judge_tasks"] == 2
+    assert plan["judges"] == 1 and plan["judge_tasks"] == 1
     assert not (tmp_path / "judgments.jsonl").exists()
     result = run(tmp_path, config_path=path)
-    assert result["kept"] == 2 and result["status"] == "complete"
+    assert result["kept"] == 1 and result["status"] == "complete"
 
 
 def test_rerun_retains_one_successful_vote_per_slot(tmp_path):
     run(tmp_path)
     before = (tmp_path / "judgments.jsonl").read_text()
     result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=lambda *_: pytest.fail("completed vote repeated"), confirm=True)
-    assert result["kept"] == 2
+    assert result["kept"] == 1
     assert (tmp_path / "judgments.jsonl").read_text() == before
 
 
 def test_failed_judge_is_incomplete_then_retried(tmp_path):
     result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=lambda *_: {"keep": 1}, confirm=True, attempts=1)
-    assert result["incomplete"] == 2 and result["kept"] == 0
-    assert run(tmp_path)["kept"] == 2
+    assert result["incomplete"] == 1 and result["kept"] == 0
+    assert run(tmp_path)["kept"] == 1
     seen = {}
 
-    def fix_citation(judge, messages_, max_tokens):
+    def fix_result(judge, messages_, max_tokens):
         value = judge_call(judge, messages_, max_tokens)
-        key = (judge["name"], value["trace_id"])
+        key = judge["name"]
         seen[key] = seen.get(key, 0) + 1
         if seen[key] == 1:
-            value["evidence"][0]["message_index"] = 999
+            value["reason"] = ""
         else:
             assert "previous attempt failed validation" in messages_[0]["content"]
         return value
 
-    result = triage.run_triage(source(), tmp_path / "retry", runner=API(), judge_call=fix_citation,
+    result = triage.run_triage(source(), tmp_path / "retry", runner=API(), judge_call=fix_result,
                                confirm=True, attempts=2, sleeper=lambda _: None)
-    assert result["kept"] == 2 and all(count == 2 for count in seen.values())
+    assert result["kept"] == 1 and all(count == 2 for count in seen.values())
 
 
 def config(tmp_path, count=2):
@@ -314,20 +312,20 @@ def test_multiple_judges_ties_drop(tmp_path):
         return result
 
     result = triage.run_triage(source(), tmp_path / "work", runner=API(), judge_call=disagree, confirm=True, config_path=path)
-    assert result["kept"] == 0 and result["disagreement"] == 2 and result["incomplete"] == 0
+    assert result["kept"] == 0 and result["disagreement"] == 1 and result["incomplete"] == 0
     labels = [json.loads(line) for line in (tmp_path / "work/labels.jsonl").read_text().splitlines()]
     assert all(label["keep"] == 0 and label["reason"].startswith("Tied vote") for label in labels)
 
 
-def test_one_drop_blocks_whole_conversation(tmp_path):
-    def drop_first(judge, *args):
+def test_majority_drop_blocks_whole_conversation(tmp_path):
+    def drop(judge, *args):
         result = judge_call(judge, *args)
-        result["keep"] = int(result["trace_id"] != uid(1))
+        result["keep"] = int(judge["name"] == "judge-1")
         return result
 
-    result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=drop_first, confirm=True)
-    assert result["kept"] == 1
-    with pytest.raises(PipelineError, match="no complete, all-pass"):
+    result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=drop, confirm=True)
+    assert result["kept"] == 0 and result["dropped"] == 1
+    with pytest.raises(PipelineError, match="no complete, kept"):
         triage.selected_examples(tmp_path)
 
 
@@ -414,19 +412,12 @@ def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeyp
     assert "supply a saved run directory" in capsys.readouterr().err
 
 
-def test_directory_docs_keep_saved_votes_but_coordinator_changes_do_not(tmp_path, monkeypatch):
+def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
     resource_dir = tmp_path / "resources"
     skill_path = resource_dir / "skills/sft-trace-triage/SKILL.md"
     skill_path.parent.mkdir(parents=True)
     current = triage.files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text()
-    previous = current.replace(
-        "Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses\n`LANGSMITH_GATEWAY_API_KEY`.",
-        "Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`; `anthropic-gateway` uses the\nLangSmith gateway credential.",
-    )
-    skill_path.write_text(previous.replace(
-        "flag is needed. Use the run directory printed by the preview command.",
-        "flag is needed. The directory defaults to `data/triage` when omitted.",
-    ))
+    skill_path.write_text(current)
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(triage.load_config(None)))
     run_dir = tmp_path / "run"
@@ -482,23 +473,35 @@ def test_resume_and_import_reject_mixed_or_tampered_artifacts(tmp_path, changed)
             run(tmp_path)
 
 
-@pytest.mark.parametrize("change", [{"keep": True}, {"keep": 2}, {"trace_id": "wrong"}, {"reason": ""},
-                                   {"evidence": []}, {"evidence": [{"message_index": 999, "quote": "answer"}]},
-                                   {"evidence": [{"message_index": 1, "quote": "not in evidence"}]}])
-def test_judge_output_must_be_typed_and_grounded(change):
-    trace = {"trace_id": uid(1), "messages": messages(1), "runs": []}
-    value = {"trace_id": uid(1), "keep": 1, "reason": "complete", "evidence": [{"message_index": 1, "quote": "answer-1"}], **change}
+@pytest.mark.parametrize("change", [{"keep": True}, {"keep": 2}, {"reason": ""}, {"extra": "wrong"}])
+def test_judge_output_is_a_score_and_reason(change):
     with pytest.raises(PipelineError):
-        triage_judges.validate_judgment(value, trace)
+        triage_judges.validate_judgment({"keep": 1, "reason": "complete", **change})
 
 
-def test_oversize_input_is_not_truncated_or_judged(tmp_path):
+def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path):
     api = API()
     api.thread_pages["older"]["groups"][1]["message"]["content"] = "x" * 20_000
     calls = []
-    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=lambda *args: calls.append(args), confirm=True, max_input_chars=5000)
-    assert result["incomplete"] == 2 and calls == []
-    assert len(json.loads((tmp_path / "snapshot.json").read_text())["traces"][0]["messages"][0]["content"]) == 20_000
+
+    class ContextError(Exception):
+        status_code = 400
+        body: ClassVar[dict] = {"error": {"code": "context_length_exceeded"}}
+
+    def reject(judge, prompt, tokens):
+        assert json.loads(prompt[-1]["content"])["untrusted_trajectory"][0]["content"] == "x" * 20_000
+        calls.append(judge["name"])
+        raise ContextError()
+
+    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True)
+    assert result["incomplete"] == 0 and result["filtered_context"] == 1
+    assert len(calls) == 3
+    label = json.loads((tmp_path / "labels.jsonl").read_text())
+    assert label["keep"] == 0 and "context window" in label["reason"]
+    assert triage.run_triage(source(), tmp_path, confirm=True,
+        judge_call=lambda *_: pytest.fail("filtered trajectory retried"))["filtered_context"] == 1
+    with pytest.raises(PipelineError, match="no complete, kept"):
+        triage.selected_examples(tmp_path)
 
 
 def test_skill_export_works_outside_checkout(tmp_path):
@@ -529,13 +532,13 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     assert plan["config"]["rules"] == ["Keep supported answers."]
     assert plan["config"]["judges"] == triage.load_config(None)["judges"]
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 2
+    assert json.loads(capsys.readouterr().out)["kept"] == 1
     saved = (tmp_path / "judgments.jsonl").read_bytes()
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 2
+    assert json.loads(capsys.readouterr().out)["kept"] == 1
     assert (tmp_path / "judgments.jsonl").read_bytes() == saved
     labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
-    assert all(set(label) == {"trace_id", "keep", "reason"} for label in labels)
+    assert all(set(label) == {"trajectory_id", "keep", "reason"} for label in labels)
     assert all(label["reason"] in (tmp_path / "report.md").read_text() for label in labels)
     # A changed package default must not replace a saved council.
     monkeypatch.setattr(triage, "load_config", lambda *_: pytest.fail("saved council ignored"))
@@ -570,7 +573,7 @@ def test_cli_incomplete_triage_prints_summary_and_exits_nonzero(tmp_path, monkey
     with pytest.raises(SystemExit) as exc:
         cli.main(args)
     assert exc.value.code == 1
-    assert json.loads(capsys.readouterr().out)["incomplete"] == 2
+    assert json.loads(capsys.readouterr().out)["incomplete"] == 1
 
 
 def test_dataset_import_failure_has_receipt_and_cannot_repeat_writes(tmp_path):
@@ -639,6 +642,8 @@ def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch
     assert requests[0].full_url == url
     header = "X-api-key" if provider.startswith("anthropic") else "Authorization"
     assert requests[0].get_header(header) == ("test-credential" if provider.startswith("anthropic") else "Bearer test-credential")
+    if provider == "fireworks":
+        assert json.loads(requests[0].data)["reasoning_effort"] == "none"
 
 
 def test_missing_thread_pages_and_changed_turns_fail_closed(tmp_path):
@@ -664,21 +669,12 @@ def test_paid_and_remote_writes_require_confirmation(tmp_path, monkeypatch):
     assert run(tmp_path, config_path=config(tmp_path, count=1))["status"] == "complete"
 
 
-def test_judge_missing_evidence_is_incomplete_not_a_drop(tmp_path):
-    calls = []
-
-    def incomplete(judge, messages_, tokens):
-        trace = json.loads(messages_[-1]["content"])["untrusted_trace_evidence"]
-        calls.append(trace["trace_id"])
-        return {"trace_id": trace["trace_id"], "status": "incomplete", "reason": "The relevant tool result is missing."}
-
-    result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=incomplete, confirm=True)
-    assert result["incomplete"] == 2 and result["dropped"] == 0
-    assert len(calls) == 6
-    records = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
-    assert all(r["error_kind"] == "insufficient_evidence" for r in records)
-    labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
-    assert all(r["keep"] == 0 and "Labeling incomplete" in r["reason"] for r in labels)
+def test_judge_can_drop_a_trajectory_with_missing_evidence(tmp_path):
+    result = triage.run_triage(source(), tmp_path, runner=API(), confirm=True,
+        judge_call=lambda *_: {"keep": 0, "reason": "The recorded outcome is missing."})
+    assert result["incomplete"] == 0 and result["dropped"] == 1
+    label = json.loads((tmp_path / "labels.jsonl").read_text())
+    assert label["keep"] == 0 and "recorded outcome is missing" in label["reason"]
 
 
 def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, capsys):
@@ -688,7 +684,7 @@ def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, c
         *args, **kwargs, judge_call=judge_call,
         runner=lambda *_a, **_kw: pytest.fail("local snapshot must not query LangSmith")))
     cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 2
+    assert json.loads(capsys.readouterr().out)["kept"] == 1
 
 
 def test_cli_requires_source_when_no_snapshot_exists(tmp_path, capsys):
@@ -704,3 +700,71 @@ def test_empty_source_does_not_create_a_misleading_completed_run(tmp_path):
         triage.run_triage(source(), tmp_path, runner=api, dry_run=True)
     assert not (tmp_path / "snapshot.json").exists()
     assert not (tmp_path / "summary.json").exists()
+
+
+@pytest.mark.parametrize("media_turn", [None, 1, 2])
+def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_path, media_turn):
+    api = API()
+    api.root_pages[0] += [
+        {**api.root_pages[0][0], "trace_id": uid(1)},
+        {**api.root_pages[0][0], "trace_id": uid(3), "thread_id": None},
+    ]
+
+    def source_api(command, **kwargs):
+        response = api(command, **kwargs)
+        if media_turn and f"/traces/{uid(media_turn)}/runs?" in command[2]:
+            page = json.loads(response.stdout)
+            page["items"][-1]["attachments"] = {"image.png": "recorded"}
+            response.stdout = json.dumps(page)
+        return response
+
+    seen = []
+
+    def judge(slot, prompt, tokens):
+        evidence = json.loads(prompt[-1]["content"])["untrusted_trajectory"]
+        seen.append((slot["name"], evidence))
+        if len(evidence) == 4:
+            assert media_turn is None
+            assert [m["content"] for m in evidence] == ["question-1", "answer-1", "question-2", "answer-2"]
+        return judge_call(slot, prompt, tokens)
+
+    summary = triage.run_triage(source(), tmp_path, runner=source_api, judge_call=judge, confirm=True)
+    plan = json.loads((tmp_path / "plan.json").read_text())
+    assert plan["selected_traces"] == 3 and plan["source_traces"] == 3
+    assert plan["trajectories"] == 2
+    assert plan["judge_tasks"] == len(seen) == (3 if media_turn else 6)
+    assert summary["filtered_multimodal"] == int(media_turn is not None)
+    labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
+    assert len(labels) == 2
+    examples = triage.selected_examples(tmp_path)
+    assert {e["id"] for e in examples} == {label["trajectory_id"] for label in labels if label["keep"]}
+    for example in examples:
+        judged = [e for _, e in seen if e == example["inputs"]["messages"]]
+        assert len(judged) == 3
+        assert all(e == example["inputs"]["messages"] for e in judged)
+
+
+def test_old_trace_votes_cannot_be_reused_or_imported(tmp_path):
+    run(tmp_path)
+    manifest = tmp_path / "triage-config.json"
+    identity = json.loads(manifest.read_text())
+    identity.pop("judging_unit")
+    manifest.write_text(json.dumps(identity))
+    saved = (tmp_path / "judgments.jsonl").read_bytes()
+    with pytest.raises(PipelineError, match="new output directory"):
+        triage.run_triage(source(), tmp_path, confirm=True, judge_call=lambda *_: pytest.fail("old votes triggered inference"))
+    with pytest.raises(PipelineError, match="per-trace votes"):
+        triage.selected_examples(tmp_path)
+    assert (tmp_path / "judgments.jsonl").read_bytes() == saved
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (400, {"code": "context_length_exceeded"}, True),
+    (400, {"error": {"message": "prompt is too long: 120000 tokens > 100000 maximum"}}, True),
+    (429, {"message": "Rate limit reached"}, False),
+    (400, {"message": "max_tokens exceeds the output limit"}, False),
+])
+def test_only_context_rejections_filter_trajectories(status, body, expected):
+    error = RuntimeError("provider error")
+    error.status_code, error.body = status, body
+    assert triage_judges.context_window_exceeded(error) is expected

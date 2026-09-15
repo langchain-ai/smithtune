@@ -229,7 +229,7 @@ def test_failed_triage_never_reaches_destination(tmp_path):
 
     triage.run_triage(source(), tmp_path, runner=SourceAPI(), judge_call=lambda *_: {"keep": 1}, confirm=True, attempts=1)
     api = API()
-    with pytest.raises(PipelineError, match="no complete, all-pass"):
+    with pytest.raises(PipelineError, match="no complete, kept"):
         triage.create_triaged_dataset(tmp_path, dataset_id=uid(200), confirm=True, runner=api)
     assert not api.calls
 
