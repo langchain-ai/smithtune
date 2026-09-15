@@ -14,8 +14,10 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
 from smithtune.inference_contract import (
@@ -107,60 +109,110 @@ def _langsmith_page_command(
     ]
 
 
+def _contract_read(command: list[str], *, runner: Callable[..., Any]) -> Any:
+    for attempt in range(6):
+        try:
+            result = runner(command, capture=True)
+            break
+        except PipelineError as exc:
+            retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out|Query timeout exceeded)\b", str(exc), re.I)
+            if attempt == 5 or not retryable:
+                raise
+            delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
+            reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
+            print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+            time.sleep(delay)
+    try:
+        return json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        raise PipelineError("LangSmith run query returned invalid JSON") from exc
+
+
+def _read_contract_run(workspace_id: str, run_id: str, *, runner: Callable[..., Any]) -> dict[str, Any]:
+    # V2 queries require a project. A direct lookup resolves it when only a run ID is known.
+    run = _contract_read([
+        "langsmith", "api", f"/api/v1/runs/{quote(run_id, safe='')}",
+        "--workspace", workspace_id, "--method", "GET",
+    ], runner=runner)
+    if not isinstance(run, dict) or run.get("id") != run_id:
+        raise PipelineError(f"LangSmith did not return the requested run {run_id}")
+    return run
+
+
+def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[..., Any]) -> str:
+    project = _contract_read([
+        "langsmith", "api", f"/api/v1/sessions/{quote(project_id, safe='')}",
+        "--workspace", workspace_id, "--method", "GET",
+    ], runner=runner)
+    if not isinstance(project, dict) or project.get("id") != project_id:
+        raise PipelineError(f"LangSmith did not return the requested project {project_id}")
+    start = project.get("start_time")
+    try:
+        parsed = datetime.fromisoformat(start)
+        if parsed.tzinfo is None:
+            raise ValueError("missing timezone")
+    except (TypeError, ValueError) as exc:
+        raise PipelineError(f"source project {project_id} has no valid start time") from exc
+    return start
+
+
 def _query_contract_runs(
     workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any],
 ) -> list[dict[str, Any]]:
     body = {
-        "limit": LANGSMITH_PAGE_SIZE,
-        "select": ["id", "trace_id", "session_id", "name", "run_type", "start_time", "extra"],
+        "page_size": LANGSMITH_PAGE_SIZE,
+        "selects": ["ID", "TRACE_ID", "PROJECT_ID", "NAME", "RUN_TYPE", "START_TIME", "EXTRA", "METADATA"],
+        "max_start_time": _utc_now(),
         **query,
     }
     runs: dict[str, dict[str, Any]] = {}
-    cursors: set[str] = set()
-    while True:
-        for attempt in range(6):
-            try:
-                result = runner([
-                    "langsmith", "api", "runs/query", "--workspace", workspace_id,
-                    "--body", _canonical(body),
-                ], capture=True)
+    # V2 defaults to one day and caps each query at 401 days. Walk the full
+    # project history in bounded windows, deduplicating boundary runs by ID.
+    start = datetime.fromisoformat(body["min_start_time"])
+    end = datetime.fromisoformat(body["max_start_time"])
+    while start <= end:
+        window_end = min(start + timedelta(days=400), end)
+        body.update(min_start_time=start.isoformat(), max_start_time=window_end.isoformat())
+        body.pop("cursor", None)
+        cursors: set[str] = set()
+        while True:
+            response = _contract_read([
+                "langsmith", "api", "/api/v2/runs/query", "--workspace", workspace_id,
+                "--method", "POST", "--body", _canonical(body),
+            ], runner=runner)
+            if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+                raise PipelineError("LangSmith returned an invalid run query page")
+            for item in response["items"]:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+                    raise PipelineError("LangSmith returned an invalid run")
+                if item.get("project_id") not in body["project_ids"]:
+                    raise PipelineError("LangSmith returned a run from a different project")
+                # Keep the contract's existing representation independent of API wire names.
+                run = {**item, "session_id": item["project_id"]}
+                run.pop("project_id")
+                if isinstance(run.get("run_type"), str):
+                    run["run_type"] = run["run_type"].lower()
+                metadata = run.pop("metadata", None)
+                if metadata is not None:
+                    run["extra"] = {**(run.get("extra") or {}), "metadata": metadata}
+                if run["id"] in runs and runs[run["id"]] != run:
+                    raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; capture again")
+                runs[run["id"]] = run
+            cursor = response.get("next_cursor")
+            if cursor is None:
                 break
-            except PipelineError as exc:
-                retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out)\b", str(exc), re.I)
-                if attempt == 5 or not retryable:
-                    raise
-                delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
-                reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
-                print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
-                time.sleep(delay)
-        try:
-            response = json.loads(result.stdout)
-        except (ValueError, TypeError) as exc:
-            raise PipelineError("LangSmith run query returned invalid JSON") from exc
-        if not isinstance(response, dict) or not isinstance(response.get("runs"), list):
-            raise PipelineError("LangSmith returned an invalid run query page")
-        for run in response["runs"]:
-            if not isinstance(run, dict) or not isinstance(run.get("id"), str) or not run["id"]:
-                raise PipelineError("LangSmith returned an invalid run")
-            if body.get("session") and run.get("session_id") not in body["session"]:
-                raise PipelineError("LangSmith returned a run from a different project")
-            if run["id"] in runs and runs[run["id"]] != run:
-                raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; capture again")
-            runs[run["id"]] = run
-        page_cursors = response.get("cursors") or {}
-        if not isinstance(page_cursors, dict):
-            raise PipelineError("LangSmith returned invalid query cursors")
-        cursor = page_cursors.get("next")
-        if cursor is None:
-            return list(runs.values())
-        if not isinstance(cursor, str) or not cursor or cursor in cursors:
-            raise PipelineError("LangSmith returned an invalid or repeated query cursor")
-        cursors.add(cursor)
-        body["cursor"] = cursor
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                raise PipelineError("LangSmith returned an invalid or repeated query cursor")
+            cursors.add(cursor)
+            body["cursor"] = cursor
+        if window_end == end:
+            break
+        start = window_end
+    return list(runs.values())
 
 
 def _query_thread_llm_runs(
-    workspace_id: str, project_id: str, thread_id: str, *, runner: Callable[..., Any],
+    workspace_id: str, project_id: str, thread_id: str, *, start_time: str, runner: Callable[..., Any],
 ) -> list[dict[str, Any]]:
     # Child calls need not repeat their thread ID. Query each root metadata
     # alias separately: the run API does not support OR across these joins.
@@ -168,7 +220,8 @@ def _query_thread_llm_runs(
     for key in ("thread_id", "conversation_id", "session_id"):
         thread_filter = f"and(eq(metadata_key,{json.dumps(key)}),eq(metadata_value,{json.dumps(thread_id)}))"
         for run in _query_contract_runs(workspace_id, {
-            "session": [project_id], "run_type": "llm", "trace_filter": thread_filter,
+            "project_ids": [project_id], "run_type": "LLM", "trace_filter": thread_filter,
+            "min_start_time": start_time,
         }, runner=runner):
             if run["id"] in thread_runs and thread_runs[run["id"]] != run:
                 raise PipelineError(f"run {run['id']} changed during the thread scan; capture again")
@@ -184,17 +237,15 @@ def capture_inference_contract(
     runner: Callable[..., Any] = _run_langsmith,
 ) -> dict[str, Any]:
     """Collect all function tools in the selected LLM run's conversation thread."""
-    sources = _query_contract_runs(workspace_id, {"id": [run_id], "limit": 1}, runner=runner)
-    if len(sources) != 1 or sources[0]["id"] != run_id:
-        raise PipelineError(f"LangSmith did not return the requested run {run_id}")
-    source = sources[0]
+    source = _read_contract_run(workspace_id, run_id, runner=runner)
     if source.get("run_type") != "llm":
         raise PipelineError("contract capture requires an LLM run ID inside the sample conversation")
     project_id, trace_id = source.get("session_id"), source.get("trace_id")
     if not isinstance(project_id, str) or not project_id or not isinstance(trace_id, str) or not trace_id:
         raise PipelineError("source LLM run has no project or trace ID")
+    start_time = _project_start_time(workspace_id, project_id, runner=runner)
     roots = _query_contract_runs(
-        workspace_id, {"session": [project_id], "id": [trace_id], "limit": 1}, runner=runner,
+        workspace_id, {"project_ids": [project_id], "ids": [trace_id], "page_size": 1, "min_start_time": start_time}, runner=runner,
     )
     if len(roots) != 1 or roots[0]["id"] != trace_id:
         raise PipelineError(f"LangSmith did not return the source trace root {trace_id}")
@@ -203,7 +254,7 @@ def capture_inference_contract(
     thread_id = next((metadata[key] for key in thread_keys if isinstance(metadata.get(key), str) and metadata[key]), None)
     if thread_id is None:
         raise PipelineError("source trace has no thread ID; choose an LLM run from a conversation thread")
-    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, runner=runner)
+    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, start_time=start_time, runner=runner)
     try:
         payload = contract_from_runs(runs, workspace_id=workspace_id, source_run_id=run_id, thread_id=thread_id)
     except ContractError as exc:
@@ -582,6 +633,7 @@ def capture_example_contracts(
                 raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
             print(f"Resuming tool capture: {len(contracts)}/{len(examples)} examples already saved", file=sys.stderr)
     sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    project_starts: dict[tuple[str, str], str] = {}
     for example in examples:
         example_id = example["id"]
         if example_id in contracts:
@@ -595,20 +647,22 @@ def capture_example_contracts(
             if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
                 raise PipelineError("conflicting source project IDs")
             if project_id is None and scope == "trace":
-                roots = _query_contract_runs(source_workspace, {"id": [scope_id], "limit": 1}, runner=runner)
-                if len(roots) != 1 or roots[0]["id"] != scope_id:
-                    raise PipelineError(f"source trace root {scope_id} was not found")
-                project_id = roots[0].get("session_id")
+                root = _read_contract_run(source_workspace, scope_id, runner=runner)
+                project_id = root.get("session_id")
             if not isinstance(project_id, str) or not project_id:
                 raise PipelineError("missing source project ID; use source_session_id or metadata.source_project_id, or supply --inference-contract")
+            project_key = (source_workspace, project_id)
+            if project_key not in project_starts:
+                project_starts[project_key] = _project_start_time(source_workspace, project_id, runner=runner)
+            start_time = project_starts[project_key]
             key = (source_workspace, project_id, scope, scope_id)
             if key not in sources:
                 if scope == "thread":
-                    runs = _query_thread_llm_runs(source_workspace, project_id, scope_id, runner=runner)
+                    runs = _query_thread_llm_runs(source_workspace, project_id, scope_id, start_time=start_time, runner=runner)
                 else:
                     runs = _query_contract_runs(source_workspace, {
-                        "session": [project_id], "run_type": "llm",
-                        "filter": f"eq(trace_id,{json.dumps(scope_id)})",
+                        "project_ids": [project_id], "run_type": "LLM",
+                        "trace_id": scope_id, "min_start_time": start_time,
                     }, runner=runner)
                     if any(run.get("trace_id") != scope_id for run in runs):
                         raise PipelineError("LangSmith returned a run from a different trace")

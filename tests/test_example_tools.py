@@ -32,10 +32,13 @@ def source_runner(groups):
     queries = []
 
     def run(command, capture=False):
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         assert command[command.index("--workspace") + 1] == "workspace-id"
         queries.append(body)
-        project = body["session"][0]
+        project = body["project_ids"][0]
         for (source_project, thread), runs in groups.items():
             if project == source_project and json.dumps(thread) in body.get("trace_filter", ""):
                 if '"thread_id"' in body["trace_filter"]:
@@ -99,13 +102,17 @@ def test_trace_only_example_queries_every_llm_in_that_trace(native):
     queries = []
 
     def runner(command, capture=False):
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
+        if command[2] == "/api/v1/runs/trace-1":
+            queries.append({"lookup": "trace-1"})
+            return SimpleNamespace(stdout=json.dumps({"id": "trace-1", "session_id": "project-1"}))
         body = json.loads(command[command.index("--body") + 1])
         queries.append(body)
-        if body.get("id"):
-            return SimpleNamespace(stdout=json.dumps(page([{"id": "trace-1", "session_id": "project-1"}])))
-        assert body["session"] == ["project-1"]
-        assert body["run_type"] == "llm"
-        assert body["filter"] == 'eq(trace_id,"trace-1")'
+        assert body["project_ids"] == ["project-1"]
+        assert body["run_type"] == "LLM"
+        assert body["trace_id"] == "trace-1"
         return SimpleNamespace(stdout=json.dumps(page([llm("run-1", [tool("weather")]), llm("run-2", [tool("swell")])])))
 
     contracts = dataset.capture_example_contracts("workspace-id", [ex], runner=runner)
@@ -387,6 +394,9 @@ def test_mixed_workspaces_route_and_cache_sources_separately():
 
     def runner(command, capture=False):
         workspace = command[command.index("--workspace") + 1]
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         calls.append(workspace)
         runs = [llm(f"run-{workspace}", [tool(workspace)])] if '"thread_id"' in body["trace_filter"] else []
@@ -410,9 +420,15 @@ def test_trace_project_discovery_uses_source_workspace():
 
     def runner(command, capture=False):
         assert command[command.index("--workspace") + 1] == "source-workspace"
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
+        if command[2] == "/api/v1/runs/trace-1":
+            queries.append({"lookup": "trace-1"})
+            return SimpleNamespace(stdout=json.dumps({"id": "trace-1", "session_id": "project-1"}))
         body = json.loads(command[command.index("--body") + 1])
         queries.append(body)
-        runs = [{"id": "trace-1", "session_id": "project-1"}] if body.get("id") else [llm("run-1", [])]
+        runs = [llm("run-1", [])]
         return SimpleNamespace(stdout=json.dumps(page(runs)))
 
     contracts = dataset.capture_example_contracts(
@@ -514,6 +530,7 @@ def test_interrupted_capture_resumes_and_publishes_complete_snapshot(tmp_path, m
             raise PipelineError("context deadline exceeded")
         return [llm(f"run-{thread}", [tool("weather")])]
 
+    monkeypatch.setattr(dataset, "_project_start_time", lambda *args, **kwargs: "2026-09-01T00:00:00Z")
     monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
 
     def capture(fetch=True):
@@ -555,6 +572,7 @@ def test_capture_checkpoint_invalidated_by_changed_inputs(tmp_path, monkeypatch,
             raise PipelineError("request failed")
         return [llm("run-1", [])]
 
+    monkeypatch.setattr(dataset, "_project_start_time", lambda *args, **kwargs: "2026-09-01T00:00:00Z")
     monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
     with pytest.raises(PipelineError, match="request failed"):
         dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
@@ -585,6 +603,7 @@ def test_capture_rejects_corrupted_checkpoint(tmp_path, monkeypatch):
             raise PipelineError("request failed")
         return [llm("run-1", [])]
 
+    monkeypatch.setattr(dataset, "_project_start_time", lambda *args, **kwargs: "2026-09-01T00:00:00Z")
     monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
     with pytest.raises(PipelineError, match="request failed"):
         dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
@@ -593,3 +612,20 @@ def test_capture_rejects_corrupted_checkpoint(tmp_path, monkeypatch):
     path.write_text(json.dumps(checkpoint))
     with pytest.raises(PipelineError, match="checkpoint hash mismatch"):
         dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
+
+
+def test_project_history_start_is_fetched_once_per_workspace_and_project():
+    examples = [example(1), example(2)]
+    inner, _ = source_runner({
+        ("project-1", "thread-1"): [llm("run-1", [])],
+        ("project-1", "thread-2"): [llm("run-2", [])],
+    })
+    lookups = []
+
+    def runner(command, capture=False):
+        if command[2].startswith("/api/v1/sessions/"):
+            lookups.append(command[2])
+        return inner(command, capture=capture)
+
+    assert len(dataset.capture_example_contracts("workspace-id", examples, runner=runner)) == 2
+    assert lookups == ["/api/v1/sessions/project-1"]

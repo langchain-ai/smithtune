@@ -194,14 +194,21 @@ def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
     commands = []
 
     def runner(command, capture=False):
-        commands.append(command)
+        if not command[2].startswith("/api/v1/sessions/"):
+            commands.append(command)
+        if command[2] == "/api/v1/runs/run-id":
+            return SimpleNamespace(stdout=json.dumps(run))
+        if command[2].startswith("/api/v1/sessions/"):
+            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
+                                                      "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
-        if body.get("id") == ["trace-id"]:
+        if body.get("ids") == ["trace-id"]:
             result = {"id": "trace-id", "session_id": "project-id",
                       "extra": {"metadata": {"thread_id": "thread-id"}}}
         else:
             result = run
-        return SimpleNamespace(stdout=json.dumps({"runs": [result], "cursors": {"next": None}}))
+        from test_tool_capture import page
+        return SimpleNamespace(stdout=json.dumps(page([result])))
 
     output = tmp_path / "contract.json"
     summary = dataset_ops.capture_inference_contract(
@@ -211,13 +218,13 @@ def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
         runner=runner,
     )
     contract = inference_contract.load_inference_contract(output)
-    request_body = json.loads(commands[0][commands[0].index("--body") + 1])
+    request_body = json.loads(commands[1][commands[1].index("--body") + 1])
 
-    assert commands[0][:3] == ["langsmith", "api", "runs/query"]
+    assert commands[1][:3] == ["langsmith", "api", "/api/v2/runs/query"]
     assert commands[0][commands[0].index("--workspace") + 1] == "workspace-id"
-    assert request_body["id"] == ["run-id"]
-    assert "extra" in request_body["select"]
-    assert "inputs" not in request_body["select"]
+    assert request_body["ids"] == ["trace-id"]
+    assert "EXTRA" in request_body["selects"]
+    assert "INPUTS" not in request_body["selects"]
     assert "system_prompt" not in json.loads(output.read_text())
     assert summary["contract_sha256"] == contract.contract_sha256
     assert summary["source_run_id"] == "run-id"
