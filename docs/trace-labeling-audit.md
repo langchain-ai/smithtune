@@ -23,7 +23,8 @@ and `store=false`; encrypted reasoning state stays in the local agent context.
 
 | Area | Finding and result |
 | --- | --- |
-| Command surface | One labeling command: `dataset triage <directory>`. Without `--confirm`, it downloads/previews. With it, it labels/resumes. Source flags are needed only for the first download. Custom judges and rules are repeatable flags. Older advanced flags remain accepted but hidden from normal help. |
+| Command surface | One labeling command: `dataset triage <directory>`. Without `--confirm`, it downloads/previews. With it, it labels/resumes. Source flags are needed only for the first download. One comma-separated `--judges` list sets models; `--rule` adds project rules. The three default models have short names; other models use `provider:model`. Older advanced flags remain accepted but hidden from normal help. |
+| Result surface | `labels.jsonl` has only `trace_id`, `keep` (1/0), and `reason` per trace. Reasons combine the votes for the final label. `report.md` explains every label; the command ends with counts and the result path. Detailed votes stay in `judgments.jsonl`. Incomplete rows use 0 with an explicit retry reason, and the command exits 1. |
 | Defaults | Fixed three different definitions of the default council. The CLI and Python helper now load the packaged config; skill export copies the same file. Existing plans retain their selected models. `models list` remains the training-model registry, not a judge catalog. |
 | Provider compatibility | Live Terra tool calls failed on Chat Completions with reasoning. Routing Terra through Responses fixed this. The generic OpenAI adapter dropped Fireworks `reasoning_content`; a small adapter now preserves it between tool calls. Streaming is disabled so that this preservation path is always used. No new dependencies were added. |
 | Evidence citations | Live judges sometimes counted message indexes incorrectly. One Terra result cited index 14 when both exact quotes were in message 10 of an 11-message conversation. Judge inputs now carry explicit indexes. Retry prompts give validation feedback. Source messages and exact-quote checks are unchanged. |
@@ -46,13 +47,14 @@ No verdict was edited to force acceptance.
 | Partial resume | Reused all five completed votes unchanged. Retried only GLM's incomplete vote, which again reported missing evidence. No attempt was made to convert that abstention into a quality vote. |
 | Completed resume | Passed with Fireworks, OpenAI, and LangSmith keys removed and PATH limited to the virtual environment. Snapshot, votes, labels, and agent state were unchanged. |
 | Live dataset and preparation | Imported the accepted conversation and prepared it for Fireworks Qwen3.8-27B: 11 messages, four tool calls, four tool results, no removed messages. Messages and tool schemas matched the snapshot. |
+| Simple model list and output | A fresh CLI download with `--judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra` completed all three votes in 34.47 seconds. Votes were 1, 1, 0. The label file contained only `trace_id`, `keep`, and `reason`. Resume without keys left source, votes, labels, and agent state unchanged. Live dataset import passed with the compact labels and preserved the saved messages. |
 
 The one-conversation preparation test used zero validation/test fractions.
 It checks the handoff, not a training evaluation. No training or deployment
 was started. Private source data, provider responses, and test artifacts are
 excluded from Git.
 
-Local checks passed: 766 tests, with 11 optional tokenizer tests skipped;
+Local checks passed: 772 tests, with 11 optional tokenizer tests skipped;
 Ruff; skill validation; and clean distribution checks. The distribution checks
 cover default wheel tests, optional agent graph tests, a wheel rebuilt from the
 source archive, dependency compatibility, isolated CLI installation, and skill

@@ -23,6 +23,13 @@ from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, ch
 from smithtune.triage_source import load_snapshot, snapshot
 
 
+JUDGE_ALIASES = {
+    "deepseek-v4.1-flash": ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
+    "glm-5.3-flash": ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
+    "gpt-5.6-terra": ("openai", "gpt-5.6-terra"),
+}
+
+
 def load_config(path: Path | None) -> dict:
     value = _load_json(path) if path else json.loads(files("smithtune").joinpath("skills/sft-trace-triage/config.example.json").read_text(encoding="utf-8"))
     return validate_config(value)
@@ -58,14 +65,20 @@ def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=N
     config = copy.deepcopy(saved["config"]) if "config" in saved else load_config(None)
     if config_path is not None:
         if judges is not None or rules is not None:
-            raise PipelineError("use --config or --judge/--rule, not both")
+            raise PipelineError("use --config or --judges/--rule, not both")
         config = load_config(config_path)
     if judges is not None:
         slots = []
         for index, value in enumerate(judges, 1):
-            provider, separator, model = value.partition(":")
-            if not separator or provider not in PROVIDERS or not model.strip():
-                raise PipelineError("--judge must be provider:model, for example fireworks:accounts/fireworks/models/deepseek-v4p1-flash")
+            value = value.strip()
+            if value.lower() in JUDGE_ALIASES:
+                provider, model = JUDGE_ALIASES[value.lower()]
+            else:
+                provider, separator, model = value.partition(":")
+                provider, model = provider.strip(), model.strip()
+                if not separator or provider not in PROVIDERS or not model:
+                    raise PipelineError("--judges needs comma-separated model names: " + ",".join(JUDGE_ALIASES)
+                                        + "; for other models use provider:model")
             slots.append({"name": f"judge-{index}", "provider": provider, "model": model})
         config["judges"] = slots
     if rules is not None:
@@ -91,6 +104,20 @@ def _label(trace: dict, records: dict, judges: list[dict]) -> dict:
             "status": "complete" if complete else "incomplete", "valid_judges": len(valid), "expected_judges": len(judges),
             "disagreement": len({record["judgment"]["keep"] for record in valid}) > 1,
             "votes": votes}
+
+
+def _result(label: dict) -> dict:
+    """A small public result, explained by the votes without another model call."""
+    if label["status"] != "complete":
+        reason = (f"Labeling incomplete: {label['valid_judges']}/{label['expected_judges']} judges finished. "
+                  "Not selected; rerun the command to finish labeling.")
+    else:
+        votes = [vote["judgment"] for vote in label["votes"]]
+        matching = [vote for vote in votes if vote["keep"] == label["keep"]]
+        reasons = list(dict.fromkeys(" ".join(vote["reason"].split()) for vote in matching))
+        tied = len(matching) * 2 == len(votes)
+        reason = ("Tied vote; no majority for 1. " if tied else f"{len(matching)}/{len(votes)} judges voted {label['keep']}. ") + " ".join(reasons)
+    return {"trace_id": label["trace_id"], "keep": label["keep"], "reason": reason}
 
 
 @exclusive_output("output_dir")
@@ -219,14 +246,13 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
             _run_direct(pending, judge_one, save_record, concurrency)
     finally:
         labels = [_label(trace, records, config["judges"]) for trace in frozen["traces"]]
-        for label in labels:
-            label["identity_sha256"] = identity_hash
-        _jsonl_dump(output_dir / "labels.jsonl", labels)
+        results = [_result(label) for label in labels]
+        _jsonl_dump(output_dir / "labels.jsonl", results)
         summary = {"traces": len(labels), "kept": sum(label["keep"] for label in labels),
                    "dropped": sum(label["status"] == "complete" and not label["keep"] for label in labels),
                    "incomplete": sum(label["status"] != "complete" for label in labels),
                    "disagreement": sum(label["disagreement"] for label in labels),
-                   "identity_sha256": identity_hash, "labels_sha256": json_sha256(labels),
+                   "identity_sha256": identity_hash, "labels_sha256": json_sha256(results),
                    "labels": str(output_dir / "labels.jsonl"), "report": str(output_dir / "report.md")}
         summary["status"] = "complete" if summary["incomplete"] == 0 else "incomplete"
         by_id = {label["trace_id"]: label for label in labels}
@@ -236,15 +262,14 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         )
         summary["unsupported_tool_contracts"] = sum(bool(unit["training_error"]) for unit in frozen["units"])
         _json_dump(output_dir / "summary.json", summary)
-        report = ["# SFT trace selection", "", f"Traces: {summary['traces']}. Kept: {summary['kept']}. Dropped: {summary['dropped']}. Incomplete: {summary['incomplete']}.",
-                  f"Disagreement: {summary['disagreement']}. Ties drop. Errors are not quality votes.", "",
-                  f"Eligible training conversations: {summary['eligible_conversations']}. Unsupported tool contracts: {summary['unsupported_tool_contracts']}.",
-                  "Training uses only whole frozen conversations whose traces all pass.", "", "Sample decisions:"]
-        for keep in (1, 0):
-            for label in [item for item in labels if item["keep"] == keep][:3]:
-                reasons = [vote["judgment"]["reason"] for vote in label["votes"] if vote and vote["status"] == "complete"]
-                report.append(f"- {label['trace_id']}: keep={keep}, {label['status']}. " + " ".join(reasons).replace("\n", " "))
+        explanation = f"Labeled {summary['traces'] - summary['incomplete']}/{summary['traces']} traces: {summary['kept']} with 1, {summary['dropped']} with 0."
+        if summary["incomplete"]:
+            explanation += f" {summary['incomplete']} still need labeling; rerun the command to retry."
+        report = ["# Trace labels", "", explanation, "", "1 = use for SFT. 0 = do not use for SFT.", ""]
+        for result in results:
+            report.append(f"- {result['trace_id']}: {result['keep']} — {result['reason']}")
         _atomic_text(output_dir / "report.md", "\n".join(report) + "\n")
+        print(explanation + f" Labels and reasons: {output_dir / 'labels.jsonl'}.", file=sys.stderr)
     return summary
 
 
@@ -289,8 +314,10 @@ def selected_examples(triage_dir: Path) -> list[dict]:
     for tid, trace in traces.items():
         calculated = _label(trace, records, identity["config"]["judges"])
         calculated["identity_sha256"] = json_sha256(identity)
-        if calculated != by_id[tid]:
+        # Read older detailed label files as well as the compact public format.
+        if _result(calculated) != by_id[tid] and calculated != by_id[tid]:
             raise PipelineError("labels do not match validated judge votes")
+        by_id[tid] = calculated
     selected = []
     for unit in frozen["units"]:
         if unit["training_error"] or not all(by_id[tid]["keep"] == 1 and by_id[tid]["status"] == "complete" for tid in unit["trace_ids"]):

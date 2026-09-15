@@ -1,6 +1,6 @@
 ---
 name: sft-trace-triage
-description: Label locally saved LangSmith traces for SFT with a Deep Agent coordinator, Python code mode, and judge subagents. Use the CLI to save validated 0/1 labels and build a dataset from accepted conversations.
+description: Label locally saved LangSmith traces for SFT with a Deep Agent coordinator, Python code mode, and judge subagents. Save a 1/0 and a reason per trace, then explain the results to the user.
 ---
 
 # SFT trace selection
@@ -66,9 +66,11 @@ report; only validated subagent votes determine `labels.jsonl`.
    needs the optional `[deepagents]` install, which includes code mode.
 2. Default to DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks, plus
    GPT-5.6 Terra on OpenAI. Both `FIREWORKS_API_KEY` and `OPENAI_API_KEY`
-   are required for new default runs. Use repeatable
-   `--judge provider:model` or `--rule` only when the task needs other models
-   or project rules. Ask only for source details that are missing.
+   are required for new default runs. Set models with one list:
+   `--judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra`.
+   Any subset or repeated model is allowed. Other models use `provider:model`
+   in the same list. Use `--rule` for project rules. Ask only for source
+   details that are missing.
 3. Preview with `smithtune dataset triage <triage-dir>` and source flags:
    `--workspace-id`, `--project-id`, `--start-time`, `--end-time`, and optional
    `--limit` / `--filter`. This downloads without paid judging. Whole threads
@@ -81,9 +83,13 @@ report; only validated subagent votes determine `labels.jsonl`.
 
    The CLI reuses saved source and council settings. No config file or runner
    flag is needed. The directory defaults to `data/triage` when omitted.
-5. Read `summary.json`, `report.md`, `labels.jsonl`, and `agent-state.json`.
-   Check kept, dropped, incomplete, and eligible-conversation counts. Reasons,
-   exact quotes, and judge code-use counts are in `judgments.jsonl`.
+5. Read `labels.jsonl` and `report.md`. Each trace has only `trace_id`, `keep`
+   (1 = use for SFT, 0 = do not use), and `reason`. Explain the counts and
+   main reasons to the user, and give the result path. The CLI combines reasons
+   from judges who voted for the final label; do not invent a new verdict.
+   If work is incomplete, say how many traces need a retry. These rows have 0
+   with a "Labeling incomplete" reason until labeling finishes. Detailed votes,
+   quotes, and code-use counts are in `judgments.jsonl` if needed.
 6. Repeat the same short command to retry incomplete votes. Completed runs
    make no new agent calls. Changed evidence, skill, rubric, models, or
    input/output limits require a new run directory once judging has started.

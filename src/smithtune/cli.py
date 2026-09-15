@@ -84,7 +84,9 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--end-time")
     source.add_argument("--filter", help="optional root trace filter")
     source.add_argument("--limit", type=int, help="roots to select before expanding whole threads (default: 100)")
-    triage_cmd.add_argument("--judge", action="append", help="provider:model; repeat once per judge (default: DeepSeek V4.1 Flash, GLM-5.3-Flash, GPT-5.6 Terra)")
+    council = triage_cmd.add_mutually_exclusive_group()
+    council.add_argument("--judges", help="comma-separated models (default: deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra); other models use provider:model")
+    council.add_argument("--judge", action="append", help=argparse.SUPPRESS)
     triage_cmd.add_argument("--rule", action="append", help="additional selection rule; repeat for multiple rules")
     triage_cmd.add_argument("--concurrency", type=int, help="maximum concurrent judge tasks (default: 4)")
     approval = triage_cmd.add_mutually_exclusive_group()
@@ -342,11 +344,14 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     raise PipelineError("no local snapshot; supply workspace, project, start time, and end time to download traces")
                 settings = triage.council_settings(
-                    directory, judges=args.judge, rules=args.rule, config_path=args.config,
+                    directory, judges=args.judges.split(",") if args.judges is not None else args.judge,
+                    rules=args.rule, config_path=args.config,
                     runner_mode=args.runner, concurrency=args.concurrency, attempts=args.attempts,
                     max_input_chars=args.max_input_chars, max_output_tokens=args.max_output_tokens,
                 )
                 value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
+                if args.confirm:
+                    value = {key: value[key] for key in ("status", "traces", "kept", "dropped", "incomplete", "labels", "report")}
             elif args.triage_dir is not None:
                 if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output)):
                     raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")

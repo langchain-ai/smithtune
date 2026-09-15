@@ -153,12 +153,22 @@ stay out of the initial prompt. Evidence is never silently shortened. Judges
 cannot run recorded tools, access host files or secrets, or delegate further.
 The coordinator cannot write a verdict in place of a judge.
 
-Every judge must return a valid vote with a reason and exact evidence quotes.
-A strict majority keeps the trace; ties drop it. A failed vote leaves the trace
-incomplete, which is separate from a quality rejection. Read `report.md` for
-sample decisions, `summary.json` for counts, `labels.jsonl` for per-trace 0/1
-labels, and `judgments.jsonl` for all votes and evidence. Labels stay local;
-triage does not write feedback to LangSmith. Check a sample of model decisions.
+The result is one line per trace in `labels.jsonl`:
+
+```json
+{"trace_id":"...","keep":1,"reason":"2/3 judges voted 1. The answer completes the request and the tool results support it."}
+```
+
+`1` means use for SFT; `0` means do not use. A majority of the council decides
+the label; a tie gives `0`. The reason combines the reasons from judges who
+voted for that label. The CLI ends with counts and the result path. `report.md`
+explains each label in plain text. Detailed votes and source quotes stay in
+`judgments.jsonl` for inspection. No extra model call is needed for the report.
+
+If a judge cannot finish, the reason says "Labeling incomplete" and the trace
+has `0` until a retry completes it. The command reports the unfinished count
+and exits with code 1. Repeat the same command to retry. Labels stay local;
+triage does not write feedback to LangSmith.
 
 **3. Create a dataset from accepted conversations:**
 
@@ -178,20 +188,22 @@ be imported when some trace labels are incomplete.
 
 ### Change the council or selection rules
 
-Use `--judge provider:model` once per desired judge and `--rule` for project
-rules on the preview command. These replace the default council and rules:
+Use one `--judges` list. Omit it to use these three defaults. Use `--rule`
+to add project rules:
 
 ```bash
 smithtune dataset triage data/custom-council \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --judge fireworks:accounts/fireworks/models/deepseek-v4p1-flash \
-  --judge fireworks:accounts/fireworks/models/glm-5p3-flash \
-  --judge openai:gpt-5.6-terra \
+  --judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra \
   --rule 'Drop answers that claim an action succeeded without evidence.'
 ```
 
-Use model IDs available to your accounts. The first judge model also runs the
+Choose any subset, or repeat a model to give it independent judge slots.
+For other models, use `provider:model` in the same list, for example
+`--judges openai:<model-id>,fireworks:accounts/fireworks/models/<model-id>`.
+The list replaces the council and is saved for confirm and resume; you do not
+need to repeat it. The first judge model also runs the
 coordinator. Terra uses OpenAI Responses for reasoning with tools. The Fireworks
 adapter preserves reasoning fields between tool calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
 uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.

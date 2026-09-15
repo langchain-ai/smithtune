@@ -106,7 +106,9 @@ def test_standalone_traces_are_labeled(tmp_path):
     api.root_pages[0][0]["thread_id"] = None
     result = run(tmp_path, api)
     assert result["kept"] == 1
-    assert json.loads((tmp_path / "labels.jsonl").read_text())["thread_id"] is None
+    assert json.loads((tmp_path / "labels.jsonl").read_text()) == {
+        "trace_id": uid(2), "keep": 1, "reason": "3/3 judges voted 1. The answer completes the request.",
+    }
 
 
 def test_dry_run_does_not_judge_and_single_judge_is_supported(tmp_path):
@@ -165,6 +167,8 @@ def test_multiple_judges_ties_drop(tmp_path):
 
     result = triage.run_triage(source(), tmp_path / "work", runner=API(), judge_call=disagree, confirm=True, config_path=path)
     assert result["kept"] == 0 and result["disagreement"] == 2 and result["incomplete"] == 0
+    labels = [json.loads(line) for line in (tmp_path / "work/labels.jsonl").read_text().splitlines()]
+    assert all(label["keep"] == 0 and label["reason"].startswith("Tied vote") for label in labels)
 
 
 def test_one_drop_blocks_whole_conversation(tmp_path):
@@ -296,17 +300,22 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     original = triage.run_triage
     monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
     args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"], str(tmp_path), "--rule", "Keep supported answers."]
+            "--start-time", source()["start_time"], "--end-time", source()["end_time"], str(tmp_path),
+            "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra", "--rule", "Keep supported answers."]
     cli.main(args)
     plan = json.loads(capsys.readouterr().out)
     assert plan["judges"] == 3 and plan["runner"] == "deepagent"
     assert plan["config"]["rules"] == ["Keep supported answers."]
+    assert plan["config"]["judges"] == triage.load_config(None)["judges"]
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
     assert json.loads(capsys.readouterr().out)["kept"] == 2
     saved = (tmp_path / "judgments.jsonl").read_bytes()
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
     assert json.loads(capsys.readouterr().out)["kept"] == 2
     assert (tmp_path / "judgments.jsonl").read_bytes() == saved
+    labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
+    assert all(set(label) == {"trace_id", "keep", "reason"} for label in labels)
+    assert all(label["reason"] in (tmp_path / "report.md").read_text() for label in labels)
     # A changed package default must not replace a saved council.
     monkeypatch.setattr(triage, "load_config", lambda *_: pytest.fail("saved council ignored"))
     assert triage.council_settings(tmp_path)["config"] == plan["config"]
@@ -314,6 +323,22 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: create(*args, **kwargs, runner=api))
     cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--name", "selected", "--confirm"])
     assert json.loads(capsys.readouterr().out)["example_count"] == 1
+
+
+@pytest.mark.parametrize("judges,expected", [
+    ([" GPT-5.6-Terra ", "gpt-5.6-terra"], [("openai", "gpt-5.6-terra")] * 2),
+    (["openai:custom-model", "fireworks:accounts/fireworks/models/custom"],
+     [("openai", "custom-model"), ("fireworks", "accounts/fireworks/models/custom")]),
+    ([""], None), (["gpt-5.6-terra", ""], None), (["unknown"], None), (["openai:"], None),
+])
+def test_council_model_selection(tmp_path, judges, expected):
+    if expected is None:
+        with pytest.raises(PipelineError, match="--judges"):
+            triage.council_settings(tmp_path, judges=judges)
+    else:
+        slots = triage.council_settings(tmp_path, judges=judges)["config"]["judges"]
+        assert [(j["provider"], j["model"]) for j in slots] == expected
+        assert len({j["name"] for j in slots}) == len(judges)
 
 
 def test_cli_incomplete_triage_prints_summary_and_exits_nonzero(tmp_path, monkeypatch, capsys):
@@ -431,6 +456,8 @@ def test_judge_missing_evidence_is_incomplete_not_a_drop(tmp_path):
     assert len(calls) == 6
     records = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
     assert all(r["error_kind"] == "insufficient_evidence" for r in records)
+    labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
+    assert all(r["keep"] == 0 and "Labeling incomplete" in r["reason"] for r in labels)
 
 
 def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, capsys):
