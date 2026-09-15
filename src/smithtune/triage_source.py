@@ -18,8 +18,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run
 from smithtune.curation import _api, _matches, _time, _uuid
-from smithtune.dataset import validate_trajectories
-from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256
+from smithtune.dataset import convert_message, validate_trajectories
+from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 
 
@@ -270,6 +270,19 @@ def source_options(workspace_id, project_id, start_time, end_time, *, filter=Non
     return value
 
 
+def training_error(unit: dict) -> str | None:
+    """Check saved conversations with preparation's provider-neutral validation."""
+    if unit["training_error"]:
+        return unit["training_error"]
+    try:
+        validate_trajectories([unit["example"]], 1)
+        contract = parse_inference_contract(unit["contract"])
+        contract.validate_messages([convert_message(message) for message in unit["example"]["inputs"]["messages"]])
+    except (PipelineError, ContractError) as exc:
+        return str(exc)
+    return None
+
+
 def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
     path = output_dir / "snapshot.json"
     if path.exists():
@@ -341,16 +354,14 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         contract = None
         error = None
         try:
-            validate_trajectories([example], 1)
-        except PipelineError:
-            error = "conversation content is not supported by the current training format"
-        try:
             contract = contract_from_runs([run for run in all_runs if run.get("run_type") == "llm"], workspace_id=workspace, thread_id=thread)
         except ContractError:
             error = "tool schemas cannot be represented by the current training contract"
         if any(trace["root_run_id"] is None for trace in traces if trace["trace_id"] in unit_traces):
             error = "conversation source has a missing root run"
-        units.append({"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error})
+        unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error}
+        unit["training_error"] = training_error(unit)
+        units.append(unit)
         if len(units) % 10 == 0:
             print(f"Downloaded {len(units)} conversations, {len(traces)} traces.", file=sys.stderr)
     value = {"schema_version": 1, "source": source, "selected_trace_ids": [root["trace_id"] for root in roots],

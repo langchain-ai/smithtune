@@ -157,6 +157,83 @@ def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
                for line in (tmp_path / "labels.jsonl").read_text().splitlines())
 
 
+def tool_conversation(name="lookup", args=None, result=True):
+    api = API()
+    conversation = [
+        {"role": "ai", "content": [{"type": "text", "text": "Looking it up."},
+            {"type": "tool_call", "name": name, "args": args or {}, "id": "call-1"}]},
+    ]
+    if result:
+        conversation.append({"role": "tool", "content": "done", "tool_call_id": "call-1"})
+    api.thread_pages["older"]["groups"][2:2] = [
+        {"type": "message", "message": message} for message in conversation
+    ]
+    tool = {"type": "function", "function": {"name": "lookup", "description": "Look up a record.",
+        "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}}}
+
+    def runner(command, **kwargs):
+        response = api(command, **kwargs)
+        if "/runs?" in command[2]:
+            page = json.loads(response.stdout)
+            page["items"][1]["extra"]["invocation_params"]["tools"] = [tool]
+            response.stdout = json.dumps(page)
+        return response
+
+    return runner
+
+
+@pytest.mark.parametrize("kwargs,error", [
+    ({"name": "missing_tool"}, "unknown tool missing_tool"),
+    ({"args": {"limit": "many"}}, "do not match its JSON Schema"),
+    ({"result": False}, "unmatched tool calls or results"),
+])
+@pytest.mark.parametrize("cached", [False, True])
+def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, error, cached):
+    api = tool_conversation(**kwargs)
+    if cached:
+        # Simulate a snapshot saved before tool-call validation was introduced.
+        with monkeypatch.context() as patch:
+            patch.setattr(triage_source, "training_error", lambda _: None)
+            patch.setattr(triage, "training_error", lambda _: None)
+            assert run(tmp_path, api)["eligible_conversations"] == 1
+        original = (tmp_path / "snapshot.json").read_bytes()
+        with pytest.raises(PipelineError, match="no complete, all-pass"):
+            triage.selected_examples(tmp_path)
+
+        def api(*_a, **_kw):
+            pytest.fail("cached source was fetched again")
+    summary = run(tmp_path, api)
+    frozen = triage_source.load_snapshot(tmp_path)
+    assert error in triage_source.training_error(frozen["units"][0])
+    assert summary["kept"] == 2  # Compatibility does not change the quality votes.
+    assert summary["eligible_conversations"] == 0
+    assert summary["unsupported_training_conversations"] == 1
+    with pytest.raises(PipelineError, match="no complete, all-pass"):
+        triage.selected_examples(tmp_path)
+    if cached:
+        assert (tmp_path / "snapshot.json").read_bytes() == original
+
+
+def test_triage_accepts_valid_tool_calls_and_keeps_saved_contract(tmp_path):
+    assert run(tmp_path, tool_conversation())["eligible_conversations"] == 1
+    frozen = triage_source.load_snapshot(tmp_path)
+    example, = triage.selected_examples(tmp_path)
+    assert example["inputs"] == frozen["units"][0]["example"]["inputs"]
+    assert example["metadata"]["smithtune_triage"]["contract"] == frozen["units"][0]["contract"]
+    contract = parse_inference_contract(example["metadata"]["smithtune_triage"]["contract"])
+    assert dataset.prepare_sft_rows([example], contract=contract)
+
+
+def test_triage_defers_reasoning_policy_to_preparation(tmp_path):
+    frozen = triage_source.snapshot(source(), tmp_path, runner=API())
+    unit = copy.deepcopy(frozen["units"][0])
+    for message in unit["example"]["inputs"]["messages"]:
+        if message["role"] == "ai":
+            message["content"] = [{"type": "reasoning", "reasoning": "Working through the answer."}]
+    assert triage_source.training_error(unit) is None
+    assert dataset.prepare_sft_rows([unit["example"]], model=DEFAULT_MODEL, reasoning_policy="preserve")
+
+
 @pytest.mark.parametrize("evidence,expected", [
     ({"messages": [{"content": [{"type": "input_audio", "data": "recorded"}]}]}, ["input_audio"]),
     ({"runs": [{"outputs": {"content": [{"type": "image_url", "image_url": {"url": "https://example.invalid/a.png"}}]}}]}, ["image_url"]),

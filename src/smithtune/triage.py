@@ -20,7 +20,7 @@ from smithtune.dataset import validate_trajectories
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, indexed_messages, judge_messages, rubric_text, validate_judgment
-from smithtune.triage_source import load_snapshot, multimodal_types, snapshot
+from smithtune.triage_source import load_snapshot, multimodal_types, snapshot, training_error
 
 
 JUDGE_ALIASES = {
@@ -271,12 +271,14 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                    "labels": str(output_dir / "labels.jsonl"), "report": str(output_dir / "report.md")}
         summary["status"] = "complete" if summary["incomplete"] == 0 else "incomplete"
         by_id = {label["trace_id"]: label for label in labels}
+        # Recheck cached snapshots without changing their frozen evidence or hashes.
+        training_errors = [training_error(unit) for unit in frozen["units"]]
         summary["eligible_conversations"] = sum(
-            not unit["training_error"] and all(by_id[tid]["keep"] for tid in unit["trace_ids"])
-            for unit in frozen["units"]
+            not error and all(by_id[tid]["keep"] for tid in unit["trace_ids"])
+            for unit, error in zip(frozen["units"], training_errors, strict=True)
         )
-        summary["unsupported_training_conversations"] = sum(bool(unit["training_error"]) for unit in frozen["units"])
-        summary["unsupported_tool_contracts"] = sum(unit["training_error"] == "tool schemas cannot be represented by the current training contract" for unit in frozen["units"])
+        summary["unsupported_training_conversations"] = sum(bool(error) for error in training_errors)
+        summary["unsupported_tool_contracts"] = sum(error == "tool schemas cannot be represented by the current training contract" for error in training_errors)
         _json_dump(output_dir / "summary.json", summary)
         eligible = summary["traces"] - len(filtered)
         explanation = f"Labeled {eligible - summary['incomplete']}/{eligible} text traces: {summary['kept']} with 1, {summary['dropped']} with 0. Filtered {len(filtered)} multimodal traces before judging."
@@ -337,7 +339,7 @@ def selected_examples(triage_dir: Path) -> list[dict]:
         by_id[tid] = calculated
     selected = []
     for unit in frozen["units"]:
-        if unit["training_error"] or not all(by_id[tid]["keep"] == 1 and by_id[tid]["status"] == "complete" for tid in unit["trace_ids"]):
+        if training_error(unit) or not all(by_id[tid]["keep"] == 1 and by_id[tid]["status"] == "complete" for tid in unit["trace_ids"]):
             continue
         example = copy.deepcopy(unit["example"])
         contract = parse_inference_contract(unit["contract"])
