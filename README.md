@@ -182,8 +182,9 @@ Deep Agent coordinator -> Python code -> independent judge subagents
                                      prepare -> plan -> train
 ```
 
-Judges read the conversation and a run index. Long messages carry a `read_full`
-reference. Judges use read-only Python with `read_message(index)` and
+Judges receive the full conversation messages inline when they fit the input
+budget, plus a run index. Larger inputs use marked message previews with a
+`read_full` reference. Judges use read-only Python with `read_message(index)` and
 `read_run(id)` to inspect original messages and run inputs/outputs. Previews
 are marked as incomplete; the full saved content remains available through
 code. Media references are saved as JSON, not rendered for the judges. Judges

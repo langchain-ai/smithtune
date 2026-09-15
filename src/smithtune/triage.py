@@ -88,7 +88,7 @@ def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=N
                 "runner_mode": saved.get("runner", "deepagent"),
                 "concurrency": saved.get("concurrency", 4),
                 "attempts": saved.get("max_attempts_per_task", 3),
-                "max_input_chars": saved.get("max_input_chars", 200_000),
+                "max_input_chars": saved.get("max_input_chars", 2_000_000),
                 "max_output_tokens": saved.get("max_output_tokens", 4096)}
     settings.update({key: value for key, value in overrides.items() if value is not None})
     return settings
@@ -129,7 +129,7 @@ def _result(label: dict) -> dict:
 
 @exclusive_output("output_dir")
 def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = None, runner_mode="api", dry_run=False,
-               confirm=False, concurrency=4, max_input_chars=200_000, max_output_tokens=4096, attempts=3,
+               confirm=False, concurrency=4, max_input_chars=2_000_000, max_output_tokens=4096, attempts=3,
                runner=_run, judge_call=None, sleeper=time.sleep, config: dict | None = None) -> dict:
     config = validate_config(config) if config is not None else load_config(config_path)
     if runner_mode not in {"api", "deepagent"}:
@@ -150,7 +150,7 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        identity.update(agent_version=7, skill_sha256=json_sha256(skill))
+        identity.update(agent_version=9, skill_sha256=json_sha256(skill))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(filtered),
@@ -197,7 +197,7 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         feedback = ""
         for attempt in range(attempts):
             messages[0] = {"role": "system", "content": base_prompt + feedback}
-            prompt = indexed_messages(messages) if runner_mode == "deepagent" else messages
+            prompt = indexed_messages(messages, max_chars=max_input_chars) if runner_mode == "deepagent" else messages
             if sum(len(message["content"]) for message in prompt) > max_input_chars:
                 return {**record, "status": "input_too_large", "error": "input exceeds configured limit; no evidence was truncated"}
             record["attempts"] = attempt + 1
@@ -206,7 +206,7 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                 if runner_mode == "deepagent" and judge_call is None:
                     diagnostics = {}
                     record["agent"] = diagnostics
-                    response = call(judge, messages, max_output_tokens, diagnostics=diagnostics)
+                    response = call(judge, messages, max_output_tokens, diagnostics=diagnostics, max_input_chars=max_input_chars)
                 else:
                     response = call(judge, messages, max_output_tokens)
                 error_kind = "invalid_result"

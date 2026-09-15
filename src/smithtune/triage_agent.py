@@ -29,7 +29,7 @@ def _model(judge: dict, max_tokens: int):
     provider = judge["provider"]
     if provider in {"anthropic", "anthropic-gateway"}:
         key = _anthropic_gateway_key() if provider == "anthropic-gateway" else os.environ[credential_name(provider)]
-        return ChatAnthropic(model=judge["model"], api_key=key, max_tokens=max_tokens, timeout=60, max_retries=0,
+        return ChatAnthropic(model=judge["model"], api_key=key, max_tokens=max_tokens, timeout=180, max_retries=0,
                              base_url="https://gateway.smith.langchain.com/anthropic" if provider == "anthropic-gateway" else "https://api.anthropic.com")
     headers = {}
     if provider == "fireworks":
@@ -66,7 +66,7 @@ def _model(judge: dict, max_tokens: int):
                    "reasoning": {"effort": "medium"}, "include": ["reasoning.encrypted_content"]}
     return model_class(model=judge["model"], api_key=os.environ[credential_name(provider)],
                        base_url="https://api.fireworks.ai/inference/v1" if provider == "fireworks" else "https://api.openai.com/v1",
-                       default_headers=headers, max_tokens=max_tokens, timeout=60, max_retries=0,
+                       default_headers=headers, max_tokens=max_tokens, timeout=180, max_retries=0,
                        disable_streaming=True, **options)
 
 

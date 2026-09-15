@@ -114,8 +114,13 @@ def test_judge_reads_indexed_evidence_with_code_without_changing_source(monkeypa
              {"role": "tool", "content": "x" * 200_000 + "original tail"}],
              "runs": [{"id": "run", "run_type": "tool", "inputs": {"repeated": "x" * 200_000},
                        "outputs": {"result": "saved"}}]}
+    # Long messages that fit together stay inline; no tool read is needed.
+    inline = {**trace, "messages": [{"role": "assistant", "content": "x" * 20_000},
+                                     {"role": "tool", "content": "y" * 20_000}]}
+    presented = json.loads(indexed_messages(judge_messages(inline, "Judge.", []))[-1]["content"])["untrusted_trajectory_evidence"]
+    assert [m["content"] for m in presented["messages"]] == [m["content"] for m in inline["messages"]]
     original = json.dumps(trace)
-    prompt = indexed_messages(judge_messages(trace, "Judge the trace.", []))
+    prompt = indexed_messages(judge_messages(trace, "Judge the trace.", []), max_chars=200_000)
     assert len(prompt[-1]["content"]) < 1000
     assert json.loads(prompt[-1]["content"])["untrusted_trajectory_evidence"]["messages"][0]["message_index"] == 0
     assert json.loads(prompt[-1]["content"])["untrusted_trajectory_evidence"]["messages"][1]["read_full"] == "read_message(1)"

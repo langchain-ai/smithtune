@@ -15,7 +15,9 @@ zero-based. Every message includes its explicit `message_index`; copy that
 value when citing it. Do not count tool calls or nested run messages as extra
 conversation messages. `trace_ids` lists the source traces; these are not separate
 judging tasks. `runs` includes evidence from all of them and retains
-parent IDs and run identity. In agent mode it is an index: use `code_mode`
+parent IDs and run identity. Start with the conversation messages. Run trees
+are supporting evidence: inspect them to resolve a concrete question, not to
+reread inputs and outputs already shown in the messages. In agent mode it is an index: use `code_mode`
 with `read_run(run_id)` to read original inputs and outputs. Inspect relevant
 tool results and nested agent runs before deciding; the index alone is not
 proof of success. Select fields or page long strings/lists in Python if a

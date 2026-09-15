@@ -98,18 +98,20 @@ def judge_messages(trajectory: dict, rubric: str, rules: list[str]) -> list[dict
             {"role": "user", "content": json.dumps({"untrusted_trajectory_evidence": evidence}, ensure_ascii=False)}]
 
 
-def indexed_messages(messages: list[dict]) -> list[dict]:
+def indexed_messages(messages: list[dict], max_chars: int = 2_000_000) -> list[dict]:
     """Expose large messages and run payloads through read-only code."""
     trajectory = json.loads(messages[-1]["content"])["untrusted_trajectory_evidence"]
     index = {**trajectory, "runs": [
         {key: run[key] for key in ("id", "parent_run_id", "run_type", "name", "start_time", "end_time", "error") if key in run}
         for run in trajectory["runs"]
     ]}
-    for threshold in (4000, 1000, 0):
+    # Keep all messages inline when they fit; reserve space for the rubric.
+    budget = max_chars - sum(len(message["content"]) for message in messages[:-1])
+    for threshold in (None, 4000, 1000, 0):
         indexed = []
         for i, message in enumerate(trajectory["messages"]):
             content = json.dumps(message, ensure_ascii=False)
-            if len(content) <= threshold:
+            if threshold is None or len(content) <= threshold:
                 indexed.append(message)
             else:
                 indexed.append({**{key: message[key] for key in ("role", "id", "name", "tool_call_id") if key in message},
@@ -117,7 +119,7 @@ def indexed_messages(messages: list[dict]) -> list[dict]:
                                 "preview": content[:300] if threshold else "",
                                 "read_full": f"read_message({i})"})
         index["messages"] = indexed
-        if len(json.dumps(index, ensure_ascii=False)) <= 100_000:
+        if len(json.dumps({"untrusted_trajectory_evidence": index}, ensure_ascii=False)) <= budget:
             break
     return [*messages[:-1], {"role": "user", "content": json.dumps({"untrusted_trajectory_evidence": index}, ensure_ascii=False)}]
 
@@ -156,14 +158,17 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
         raise PipelineError("judge returned invalid JSON") from None
 
 
-def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagnostics=None) -> dict:
+def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagnostics=None, max_input_chars=2_000_000) -> dict:
     from smithtune.triage_agent import make_agent
     trajectory = json.loads(messages[-1]["content"])["untrusted_trajectory_evidence"]
-    messages = indexed_messages(messages)
+    messages = indexed_messages(messages, max_chars=max_input_chars)
     agent, skill_files = make_agent(judge, messages[0]["content"], max_tokens, trajectory=trajectory, diagnostics=diagnostics)
     result = agent.invoke({"messages": messages[1:], "files": skill_files}, config={"recursion_limit": 24})
     try:
-        content = result["messages"][-1].content
+        final_message = result["messages"][-1]
+        if diagnostics is not None:
+            diagnostics["finish_reason"] = final_message.response_metadata.get("finish_reason")
+        content = final_message.content
         if isinstance(content, list):
             content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
         return json.loads(content)
