@@ -1627,6 +1627,40 @@ def test_early_stopping_selects_best_checkpoint():
     assert result["stopped_early"] is True
 
 
+@pytest.mark.parametrize(
+    "losses,patience,min_delta,best_epoch",
+    [
+        ([1.0, 0.95], 1, 0.1, 2),
+        ([1.0, 0.96, 0.89, 0.87, 0.86], 2, 0.1, 5),
+        ([1.0, 0.9, 0.9], 1, 0.0, 2),
+    ],
+)
+def test_early_stopping_keeps_lowest_loss_separate_from_patience(
+    losses, patience, min_delta, best_epoch,
+):
+    checkpoints = []
+
+    def run_epoch(epoch, checkpoint):
+        checkpoints.append(checkpoint)
+        return {"eval_loss": losses[epoch - 1], "resume_checkpoint": f"checkpoint-{epoch}"}
+
+    result = fireworks.run_early_stopping(
+        fireworks.SFTSettings(
+            max_epochs=len(losses) + 1,
+            early_stopping_patience=patience,
+            early_stopping_min_delta=min_delta,
+        ),
+        run_epoch,
+        "initial-checkpoint",
+    )
+    assert len(result["epochs"]) == len(losses)
+    assert result["best"]["epoch"] == best_epoch
+    assert result["best"]["eval_loss"] == min(losses)
+    assert result["best"]["resume_checkpoint"] == f"checkpoint-{best_epoch}"
+    assert result["stopped_early"] is True
+    assert checkpoints == ["initial-checkpoint"] + [f"checkpoint-{e}" for e in range(1, len(losses))]
+
+
 def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest.MonkeyPatch):
     calls = []
     run_id = "run-0123456789abcdef0123456789abcdef"
