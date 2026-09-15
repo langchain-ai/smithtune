@@ -120,6 +120,20 @@ This saves the messages and full run trees in `snapshot.json`, and the council
 settings and vote count in `plan.json`. It makes no judge calls. Selected
 threads expand to their full history, including turns outside the time window.
 Thus the number of traces to judge can exceed `--limit`.
+Successful read responses are saved under `download/`. If downloading stops,
+repeat the command to reuse them. The CLI waits and retries when LangSmith
+returns a rate limit. Trace run data comes from the V2 endpoint,
+`GET /api/v2/traces/{trace_id}/runs`. Empty turns remain in the saved evidence;
+training-format checks do not stop the download.
+If a root run is missing, the saved trace includes a warning for the judges.
+That conversation cannot enter training through this import flow.
+
+Before judging, the CLI filters traces with multimodal content in their
+messages, run inputs/outputs, or media attachments. Those traces get `0` with
+a filter reason and incur no judge calls. Every remaining trace is sent to
+the three default judges, or to your chosen council.
+The check includes conversation history supplied to the judge. It does not
+remove media blocks and then judge an altered trace.
 
 **2. Label, or resume an interrupted run:**
 
@@ -147,9 +161,11 @@ Local snapshot -> Deep Agent coordinator -> Python code -> judge subagents
                                                    prepare -> plan -> train
 ```
 
-Judges read the conversation and a run index. They use read-only Python code
-to inspect original run inputs and outputs as needed. Repeated run payloads
-stay out of the initial prompt. Evidence is never silently shortened. Judges
+Judges read the conversation and a run index. Long messages carry a `read_full`
+reference. Judges use read-only Python with `read_message(index)` and
+`read_run(id)` to inspect original messages and run inputs/outputs. Previews
+are marked as incomplete; the full saved content remains available through
+code. Media references are saved as JSON, not rendered for the judges. Judges
 cannot run recorded tools, access host files or secrets, or delegate further.
 The coordinator cannot write a verdict in place of a judge.
 
@@ -177,7 +193,7 @@ smithtune dataset create --triage-dir data/triage --name selected-sft --confirm
 ```
 
 Every trace in a conversation must pass. This prevents a passing turn from
-bringing rejected earlier behavior into training. Unsupported tool contracts
+bringing rejected earlier behavior into training. Unsupported content and tool contracts
 are excluded and counted in the summary. Import uses the saved messages and
 tool schemas without fetching the source again. Pass the returned dataset ID
 to `prepare` below. Keep a separate test set for model comparisons.

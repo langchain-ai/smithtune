@@ -20,7 +20,7 @@ from smithtune.dataset import validate_trajectories
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, indexed_messages, judge_messages, rubric_text, validate_judgment
-from smithtune.triage_source import load_snapshot, snapshot
+from smithtune.triage_source import load_snapshot, multimodal_types, snapshot
 
 
 JUDGE_ALIASES = {
@@ -94,6 +94,10 @@ def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=N
 
 
 def _label(trace: dict, records: dict, judges: list[dict]) -> dict:
+    media = trace["multimodal_types"] if "multimodal_types" in trace else multimodal_types(trace)
+    if media:
+        return {"trace_id": trace["trace_id"], "keep": 0, "status": "filtered", "votes": [],
+                "disagreement": False, "reason": "Filtered before judging: multimodal content (" + ", ".join(media) + ")."}
     votes = [records.get((trace["trace_id"], judge["name"])) for judge in judges]
     valid = [record for record in votes if record and record["status"] == "complete"]
     complete = len(valid) == len(judges)
@@ -108,7 +112,9 @@ def _label(trace: dict, records: dict, judges: list[dict]) -> dict:
 
 def _result(label: dict) -> dict:
     """A small public result, explained by the votes without another model call."""
-    if label["status"] != "complete":
+    if label["status"] == "filtered":
+        reason = label["reason"]
+    elif label["status"] != "complete":
         reason = (f"Labeling incomplete: {label['valid_judges']}/{label['expected_judges']} judges finished. "
                   "Not selected; rerun the command to finish labeling.")
     else:
@@ -132,17 +138,21 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     if not dry_run and not confirm:
         raise PipelineError("trace judging incurs cost; review --dry-run, then use --confirm")
     frozen = snapshot(source, output_dir, runner=runner)
+    filtered = {trace["trace_id"] for trace in frozen["traces"]
+                if (trace["multimodal_types"] if "multimodal_types" in trace else multimodal_types(trace))}
     rubric = rubric_text()
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
-                "runner": runner_mode, "max_input_chars": max_input_chars, "max_output_tokens": max_output_tokens}
+                "runner": runner_mode, "max_input_chars": max_input_chars, "max_output_tokens": max_output_tokens,
+                "prefilter": "exclude-multimodal-v1"}
     if runner_mode == "deepagent":
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        identity.update(agent_version=5, skill_sha256=json_sha256(skill))
+        identity.update(agent_version=6, skill_sha256=json_sha256(skill))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "traces": len(frozen["traces"]),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
-            "judge_tasks": len(frozen["traces"]) * len(config["judges"]), "max_attempts_per_task": attempts,
+            "filtered_multimodal": len(filtered),
+            "judge_tasks": (len(frozen["traces"]) - len(filtered)) * len(config["judges"]), "max_attempts_per_task": attempts,
             "concurrency": concurrency, "aggregation": "all slots required; strict majority; ties drop",
             "training_selection": "whole frozen conversation only if every trace passes",
             "cost": "provider input/output rates; deepagent adds coordinator calls and up to 24 judge graph steps per attempt"}
@@ -155,6 +165,7 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     _json_dump(output_dir / "plan.json", plan)
     if dry_run:
         print(f"Preview: {plan['traces']} traces, {plan['judges']} judges, {plan['judge_tasks']} votes. No judge calls made.", file=sys.stderr)
+        print(f"Filtered {len(filtered)} traces with multimodal content before judging.", file=sys.stderr)
         print(f"Run: smithtune dataset triage {shlex.quote(str(output_dir))} --confirm", file=sys.stderr)
         return plan
     identity_hash = json_sha256(identity)
@@ -219,14 +230,17 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         return {**record, **failure, "status": "error", "error_kind": error_kind, "error": "judge request or result validation failed; rerun to retry"}
 
     pending = [(trace, judge) for trace in frozen["traces"] for judge in config["judges"]
-               if records.get((trace["trace_id"], judge["name"]), {}).get("status") != "complete"]
+               if trace["trace_id"] not in filtered and records.get((trace["trace_id"], judge["name"]), {}).get("status") != "complete"]
     if pending and judge_call is None:
         check_credentials(config["judges"])
         if runner_mode == "deepagent":
             from smithtune.triage_agent import check_installation
             check_installation()
     _json_dump(manifest_path, identity)
-    total = len(frozen["traces"]) * len(config["judges"])
+    if not results_path.exists():
+        _jsonl_dump(results_path, [])
+    total = plan["judge_tasks"]
+    print(f"Filtered {len(filtered)} traces with multimodal content before judging.", file=sys.stderr)
     print(f"Council: {len(config['judges'])} judges; {len(pending)}/{total} votes pending.", file=sys.stderr)
     record_lock = Lock()
 
@@ -250,7 +264,8 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         _jsonl_dump(output_dir / "labels.jsonl", results)
         summary = {"traces": len(labels), "kept": sum(label["keep"] for label in labels),
                    "dropped": sum(label["status"] == "complete" and not label["keep"] for label in labels),
-                   "incomplete": sum(label["status"] != "complete" for label in labels),
+                   "incomplete": sum(label["status"] == "incomplete" for label in labels),
+                   "filtered_multimodal": len(filtered),
                    "disagreement": sum(label["disagreement"] for label in labels),
                    "identity_sha256": identity_hash, "labels_sha256": json_sha256(results),
                    "labels": str(output_dir / "labels.jsonl"), "report": str(output_dir / "report.md")}
@@ -260,9 +275,11 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
             not unit["training_error"] and all(by_id[tid]["keep"] for tid in unit["trace_ids"])
             for unit in frozen["units"]
         )
-        summary["unsupported_tool_contracts"] = sum(bool(unit["training_error"]) for unit in frozen["units"])
+        summary["unsupported_training_conversations"] = sum(bool(unit["training_error"]) for unit in frozen["units"])
+        summary["unsupported_tool_contracts"] = sum(unit["training_error"] == "tool schemas cannot be represented by the current training contract" for unit in frozen["units"])
         _json_dump(output_dir / "summary.json", summary)
-        explanation = f"Labeled {summary['traces'] - summary['incomplete']}/{summary['traces']} traces: {summary['kept']} with 1, {summary['dropped']} with 0."
+        eligible = summary["traces"] - len(filtered)
+        explanation = f"Labeled {eligible - summary['incomplete']}/{eligible} text traces: {summary['kept']} with 1, {summary['dropped']} with 0. Filtered {len(filtered)} multimodal traces before judging."
         if summary["incomplete"]:
             explanation += f" {summary['incomplete']} still need labeling; rerun the command to retry."
         report = ["# Trace labels", "", explanation, "", "1 = use for SFT. 0 = do not use for SFT.", ""]

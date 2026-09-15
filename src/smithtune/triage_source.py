@@ -5,14 +5,20 @@ from __future__ import annotations
 import copy
 import json
 import random
+import re
+import subprocess
+import sys
+import time
 from collections import deque
 from datetime import datetime
+from functools import partial
 from pathlib import Path
+from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
-from smithtune.artifacts import _json_dump, _load_json, _run
+from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run
 from smithtune.curation import _api, _matches, _time, _uuid
-from smithtune.dataset import _validate_source_message, validate_trajectories
+from smithtune.dataset import validate_trajectories
 from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256
 from smithtune.providers.base import PipelineError
 
@@ -21,33 +27,107 @@ MAX_SOURCE_PAGES = 1000
 MAX_EXPANDED_TRACES = 10_000
 
 
+def _fetch(command, *, runner, cache_dir, **kwargs):
+    """Retry idempotent source reads; never wrap dataset writes."""
+    path = cache_dir / (json_sha256({"command": command, "input": kwargs.get("input")}) + ".json")
+    if path.exists():
+        return subprocess.CompletedProcess(command, 0, stdout=path.read_text(encoding="utf-8"), stderr="")
+    for attempt in range(3):
+        try:
+            result = runner(command, **kwargs)
+        except subprocess.CalledProcessError as exc:
+            if attempt == 2:
+                raise
+            # The LangSmith CLI can write request errors to stdout.
+            error = (exc.stdout or "") + (exc.stderr or "")
+            limited = bool(re.search(r"\b429\b|rate.limit", error, re.IGNORECASE))
+            delay = 30 * (attempt + 1) if limited else 2 ** attempt
+            print(f"{'LangSmith rate limit. ' if limited else ''}Retrying trace download in {delay}s (attempt {attempt + 2}/3).", file=sys.stderr)
+            time.sleep(delay)
+            continue
+        # Cache only successful JSON responses, never request errors.
+        try:
+            json.loads(result.stdout)
+        except (ValueError, TypeError):
+            return result
+        _atomic_text(path, result.stdout)
+        return result
+
+
 def query_runs(workspace: str, project: str, query: dict, *, runner=_run) -> list[dict]:
-    body = {"session": [project], "limit": 100,
-            "select": ["id", "trace_id", "parent_run_id", "session_id", "name", "run_type", "start_time", "end_time", "inputs", "outputs", "error", "extra"], **query}
-    rows, cursors = {}, set()
-    while True:
-        if len(cursors) >= MAX_SOURCE_PAGES:
-            raise PipelineError("run query exceeds the page limit; use a smaller source")
-        page = _api(workspace, "POST", "/api/v1/runs/query", body, runner=runner)
-        if not isinstance(page, dict) or not isinstance(page.get("runs"), list):
-            raise PipelineError("invalid LangSmith run page")
-        for row in page["runs"]:
-            if not isinstance(row, dict) or row.get("session_id") != project:
-                raise PipelineError("run query returned another project")
-            rid = _uuid(row.get("id"), "run id")
-            if rid in rows and rows[rid] != row:
-                raise PipelineError("source run changed during snapshot")
-            rows[rid] = row
-        page_cursors = page.get("cursors") or {}
-        if not isinstance(page_cursors, dict):
-            raise PipelineError("invalid LangSmith run cursors")
-        cursor = page_cursors.get("next")
-        if cursor is None:
-            return sorted(rows.values(), key=lambda r: (r.get("start_time") or "", r["id"]))
-        if not isinstance(cursor, str) or not cursor or cursor in cursors:
-            raise PipelineError("invalid or repeated LangSmith run cursor")
-        cursors.add(cursor)
-        body["cursor"] = cursor
+    tid = _uuid(query.get("trace"), "trace id")
+    selects = ["ID", "TRACE_ID", "PARENT_RUN_IDS", "PROJECT_ID", "IS_ROOT", "NAME", "RUN_TYPE",
+               "START_TIME", "END_TIME", "INPUTS", "OUTPUTS", "ERROR", "EXTRA", "ATTACHMENTS"]
+    path = f"/api/v2/traces/{tid}/runs?" + urlencode([("project_id", project), *[("selects", field) for field in selects]])
+    # V2's trace endpoint returns the complete tree. Omit time bounds so turns
+    # outside the root-selection window retain their full evidence too.
+    page = _api(workspace, "GET", path, runner=runner)
+    if not isinstance(page, dict) or not isinstance(page.get("items"), list) or page.get("next_cursor"):
+        raise PipelineError("invalid or incomplete V2 trace run response")
+    rows = {}
+    for row in page["items"]:
+        if not isinstance(row, dict) or row.get("project_id") != project or row.get("trace_id") != tid:
+            raise PipelineError("V2 run response returned another project or trace")
+        rid = _uuid(row.get("id"), "run id")
+        parents = row.get("parent_run_ids", [])
+        if not isinstance(parents, list) or any(not isinstance(parent, str) for parent in parents):
+            raise PipelineError("invalid V2 run ancestry")
+        if row.get("is_root") is False and not parents:
+            raise PipelineError("V2 child run has no parent")
+        normalized = {**row, "session_id": project, "parent_run_id": parents[-1] if parents else None,
+                      "run_type": str(row.get("run_type", "")).lower()}
+        if rid in rows and rows[rid] != normalized:
+            raise PipelineError("source run changed during snapshot")
+        rows[rid] = normalized
+    return sorted(rows.values(), key=lambda r: (r.get("start_time") or "", r["id"]))
+
+
+def multimodal_types(trace: dict) -> list[str]:
+    """Detect media payloads, not ordinary text that mentions images or audio."""
+    found = set()
+    kinds = {"image", "image_url", "input_image", "output_image", "audio", "audio_url", "input_audio",
+             "output_audio", "video", "video_url", "file", "input_file", "document"}
+
+    def visit(value):
+        if isinstance(value, dict):
+            kind = value.get("type")
+            kind = kind.lower() if isinstance(kind, str) else None
+            file_payload = kind not in {"file", "input_file", "document"} or any(key in value for key in ("file", "file_id", "file_data", "source", "source_type", "data"))
+            if isinstance(kind, str) and kind.lower() in kinds and file_payload:
+                found.add(kind.lower())
+            for key in ("mime_type", "media_type", "mimeType"):
+                mime = value.get(key)
+                if isinstance(mime, str) and mime.split("/")[0] in {"image", "audio", "video"}:
+                    found.add(mime.split("/")[0])
+                elif mime == "application/pdf":
+                    found.add("document")
+            for key in ("image", "image_url", "audio", "input_audio", "video"):
+                payload = value.get(key)
+                if isinstance(payload, dict) and any(field in payload for field in ("data", "url", "file_id", "source")):
+                    found.add(key)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, str):
+            if re.search(r"data:(?:(?:image|audio|video)/[^;,\s]+|application/pdf);base64,[A-Za-z0-9+/]{20}", value):
+                found.add("embedded media")
+            # Tool results can hold a JSON-encoded content block.
+            if value.lstrip().startswith(("{", "[")) and re.search(r'"type"\s*:\s*"(?:image|audio|video|input_image|input_audio|image_url|file|document)"', value):
+                try:
+                    visit(json.loads(value))
+                except ValueError:
+                    pass
+
+    visit(trace.get("messages", []))
+    text_suffixes = {".txt", ".md", ".json", ".csv", ".log", ".yaml", ".yml", ".py", ".js", ".ts", ".html", ".xml"}
+    for run in trace.get("runs", []):
+        visit(run.get("inputs"))
+        visit(run.get("outputs"))
+        if any(Path(name).suffix.lower() not in text_suffixes for name in (run.get("attachments") or {})):
+            found.add("attachment")
+    return sorted(found)
 
 
 def _root_selection(source: dict, *, runner) -> list[dict]:
@@ -111,7 +191,8 @@ def group_messages(groups: list[dict]) -> list[dict]:
         else:
             raise PipelineError("unsupported conversation group; cannot preserve training messages")
     for message in messages:
-        _validate_source_message(message)
+        if not isinstance(message, dict) or not isinstance(message.get("role"), str):
+            raise PipelineError("conversation message requires an object with a role")
     return messages
 
 
@@ -196,10 +277,18 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         if value["source"] != source:
             raise PipelineError("triage snapshot uses a different source query; use a new output directory")
         return value
+    cache_dir = output_dir / "download"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    source_path = cache_dir / "source.json"
+    if source_path.exists() and _load_json(source_path) != source:
+        raise PipelineError("partial download uses a different source query; use a new output directory")
+    _json_dump(source_path, source)
+    runner = partial(_fetch, runner=runner, cache_dir=cache_dir)
     roots = _root_selection(source, runner=runner)
     if not roots:
         raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
+    print(f"Downloading conversations for {len(roots)} selected traces...", file=sys.stderr)
     units, traces, visited = [], [], set()
     for root in roots:
         thread, tid = root["thread_id"], root["trace_id"]
@@ -225,19 +314,20 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
                 raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
             trace_id = turn["trace_id"]
             messages = group_messages(turn["groups"])
-            if not messages:
-                raise PipelineError(f"trace {trace_id} has no conversation messages")
             runs = query_runs(workspace, project, {"trace": trace_id}, runner=runner)
             if not runs or any(run.get("trace_id") != trace_id for run in runs):
                 raise PipelineError("trace run evidence is missing or belongs to another trace")
             roots_for_trace = [run for run in runs if not run.get("parent_run_id")]
-            if len(roots_for_trace) != 1 or not roots_for_trace[0].get("end_time"):
-                raise PipelineError("trace is still running or has no unique root")
+            if len(roots_for_trace) > 1:
+                raise PipelineError("trace has multiple root runs")
             all_messages.extend(messages)
             all_runs.extend(runs)
-            record = {"trace_id": trace_id, "root_run_id": roots_for_trace[0]["id"], "thread_id": thread,
+            record = {"trace_id": trace_id, "root_run_id": roots_for_trace[0]["id"] if roots_for_trace else None, "thread_id": thread,
                       "project_id": project, "messages": copy.deepcopy(all_messages),
                       "turn_start": len(all_messages) - len(messages), "runs": runs}
+            if not roots_for_trace:
+                record["source_warnings"] = ["Root run missing from the saved source; assess only the available evidence."]
+            record["multimodal_types"] = multimodal_types(record)
             record["source_sha256"] = json_sha256(record)
             traces.append(record)
             unit_traces.append(trace_id)
@@ -248,14 +338,21 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
                                 "source_workspace_id": workspace, "source_scope": "thread" if thread else "trace",
                                 "source_scope_id": thread or unit_traces[0],
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
-        validate_trajectories([example], 1)
         contract = None
         error = None
+        try:
+            validate_trajectories([example], 1)
+        except PipelineError:
+            error = "conversation content is not supported by the current training format"
         try:
             contract = contract_from_runs([run for run in all_runs if run.get("run_type") == "llm"], workspace_id=workspace, thread_id=thread)
         except ContractError:
             error = "tool schemas cannot be represented by the current training contract"
+        if any(trace["root_run_id"] is None for trace in traces if trace["trace_id"] in unit_traces):
+            error = "conversation source has a missing root run"
         units.append({"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error})
+        if len(units) % 10 == 0:
+            print(f"Downloaded {len(units)} conversations, {len(traces)} traces.", file=sys.stderr)
     value = {"schema_version": 1, "source": source, "selected_trace_ids": [root["trace_id"] for root in roots],
              "traces": traces, "units": units}
     value["snapshot_sha256"] = json_sha256(value)

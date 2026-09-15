@@ -20,6 +20,10 @@ proof of success. Select fields or page long strings/lists in Python if a
 result is too large. Read the remaining relevant pages; do not treat a partial
 page as complete evidence. Code is read-only and has fresh state per call.
 In direct API mode, original run inputs and outputs are included inline.
+Large messages can also be indexed. For each relevant message marked
+`read_full`, use `read_message(message_index)` in code mode to read its original
+content. The preview is not complete evidence. Select fields or page long
+content in Python, including the remaining relevant pages before deciding.
 Nested agent runs are separate executions. Do not assume a subagent saw the
 main agent's full context, or treat its response as a main-agent response.
 
@@ -42,12 +46,18 @@ model should not learn. Check step decisions against evidence available at
 that step. Do not use a later tool result to justify an earlier unsupported
 claim. A successful final answer does not excuse a bad process.
 
+Evidence is supplied as JSON text. Image, audio, and video blocks are recorded
+references, not rendered media. Do not claim to have seen or heard their
+contents. If the decision needs that content, report missing evidence.
+
 Make one decision for the whole current trace. Do not keep only its final
 answer or propose a shortened training example. Do not infer quality from
 trace length, a success status, or another judge's vote. If required evidence
 is missing and you cannot make a supported decision, return
 `{"trace_id":"<the supplied trace ID>","status":"incomplete","reason":"<missing evidence>"}`.
 The CLI records this as an incomplete task, never as a quality drop vote.
+An empty message list or unfinished root can still have useful evidence in
+the saved runs. Inspect those runs before deciding that evidence is missing.
 
 SFT targets assistant messages. User messages and tool results provide context.
 Privacy or tool-version restrictions are project-specific selection rules;

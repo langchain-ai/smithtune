@@ -99,12 +99,26 @@ def judge_messages(trace: dict, rubric: str, rules: list[str]) -> list[dict]:
 
 
 def indexed_messages(messages: list[dict]) -> list[dict]:
-    """Keep conversation text intact; expose repeated run payloads on demand."""
+    """Expose large messages and run payloads through read-only code."""
     trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
     index = {**trace, "runs": [
         {key: run[key] for key in ("id", "parent_run_id", "run_type", "name", "start_time", "end_time", "error") if key in run}
         for run in trace["runs"]
     ]}
+    for threshold in (4000, 1000, 0):
+        indexed = []
+        for i, message in enumerate(trace["messages"]):
+            content = json.dumps(message, ensure_ascii=False)
+            if len(content) <= threshold:
+                indexed.append(message)
+            else:
+                indexed.append({**{key: message[key] for key in ("role", "id", "name", "tool_call_id") if key in message},
+                                "message_index": i, "chars": len(content),
+                                "preview": content[:300] if threshold else "",
+                                "read_full": f"read_message({i})"})
+        index["messages"] = indexed
+        if len(json.dumps(index, ensure_ascii=False)) <= 100_000:
+            break
     return [*messages[:-1], {"role": "user", "content": json.dumps({"untrusted_trace_evidence": index}, ensure_ascii=False)}]
 
 

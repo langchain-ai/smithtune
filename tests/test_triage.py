@@ -1,5 +1,6 @@
 import copy
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -51,13 +52,13 @@ class API:
         if path == "/api/v2/runs/query":
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
-        elif path == "/api/v1/runs/query":
-            tid = body["trace"]
+        elif path.startswith("/api/v2/traces/") and "/runs?" in path:
+            tid = path.split("/")[4]
             n = UUID(tid).int
-            value = {"runs": [{"id": tid, "trace_id": tid, "parent_run_id": None,
-                               "session_id": uid(101), "run_type": "chain", "end_time": "2026-09-02T00:01:00Z",
+            value = {"items": [{"id": tid, "trace_id": tid, "parent_run_ids": [], "is_root": True,
+                               "project_id": uid(101), "run_type": "chain", "end_time": "2026-09-02T00:01:00Z",
                                "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)}, "extra": {}},
-                              {"id": uid(n + 1000), "trace_id": tid, "parent_run_id": tid, "session_id": uid(101),
+                              {"id": uid(n + 1000), "trace_id": tid, "parent_run_ids": [tid], "is_root": False, "project_id": uid(101),
                                "run_type": "llm", "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)[1:]},
                                "extra": {"invocation_params": {"tools": []}}}], "cursors": {}}
         elif path == "/api/v2/traces/messages":
@@ -99,6 +100,73 @@ def test_snapshot_expands_to_earlier_turns_and_preserves_tree(tmp_path):
     api.calls.clear()
     assert triage_source.snapshot(source(), tmp_path, runner=api) == frozen
     assert api.calls == []
+
+
+def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
+    api = API()
+    failures = []
+    delays = []
+    monkeypatch.setattr(triage_source.time, "sleep", delays.append)
+
+    def flaky(command, **kwargs):
+        if "/runs?" in command[2] and not failures:
+            failures.append(command)
+            raise subprocess.CalledProcessError(1, command, output="429: rate limit exceeded")
+        return api(command, **kwargs)
+
+    frozen = triage_source.snapshot(source(), tmp_path, runner=flaky)
+    assert len(failures) == 1 and len(frozen["traces"]) == 2
+    assert delays == [30]
+    # A retry after an interrupted download reuses completed reads.
+    (tmp_path / "snapshot.json").unlink()
+    assert triage_source.snapshot(source(), tmp_path, runner=lambda *_a, **_k: pytest.fail("read repeated")) == frozen
+
+
+def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
+    api = API()
+
+    def missing_root(command, **kwargs):
+        response = api(command, **kwargs)
+        if "/runs?" in command[2]:
+            page = json.loads(response.stdout)
+            page["items"] = page["items"][1:]
+            response.stdout = json.dumps(page)
+        return response
+
+    result = run(tmp_path, missing_root)
+    frozen = triage_source.load_snapshot(tmp_path)
+    assert all(trace["root_run_id"] is None and trace["source_warnings"] for trace in frozen["traces"])
+    assert result["kept"] == 2 and result["eligible_conversations"] == 0
+    assert frozen["units"][0]["training_error"] == "conversation source has a missing root run"
+    with pytest.raises(PipelineError, match="no complete, all-pass"):
+        triage.selected_examples(tmp_path)
+
+
+def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
+    api = API()
+    image = {"type": "image", "url": "https://example.invalid/image.png"}
+    api.thread_pages["older"]["groups"][1]["message"]["content"] = [image]
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    assert frozen["traces"][0]["messages"][0]["content"] == [image]
+    assert frozen["units"][0]["training_error"]
+    result = triage.run_triage(source(), tmp_path, runner=api, confirm=True,
+                              judge_call=lambda *_: pytest.fail("multimodal trace reached a judge"))
+    assert result["filtered_multimodal"] == 2 and result["incomplete"] == 0
+    assert (tmp_path / "judgments.jsonl").read_text() == ""
+    assert all(json.loads(line)["keep"] == 0 and "Filtered before judging" in json.loads(line)["reason"]
+               for line in (tmp_path / "labels.jsonl").read_text().splitlines())
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ({"messages": [{"content": [{"type": "input_audio", "data": "recorded"}]}]}, ["input_audio"]),
+    ({"runs": [{"outputs": {"content": [{"type": "image_url", "image_url": {"url": "https://example.invalid/a.png"}}]}}]}, ["image_url"]),
+    ({"runs": [{"attachments": {"photo.png": "https://example.invalid/a.png"}}]}, ["attachment"]),
+    ({"runs": [{"outputs": {"message": {"role": "assistant", "audio": {"data": "recorded"}}}}]}, ["audio"]),
+    ({"messages": [{"content": "Explain image and audio formats."}], "runs": [{"outputs": {"type": "file", "path": "main.py", "url": "https://example.invalid/main.py"}}]}, []),
+    ({"runs": [{"inputs": {"schema": {"type": ["string", "null"]}}, "attachments": {"readme.md": "https://example.invalid/readme.md"}}]}, []),
+])
+def test_multimodal_prefilter(evidence, expected):
+    assert triage_source.multimodal_types(evidence) == expected
 
 
 def test_standalone_traces_are_labeled(tmp_path):
