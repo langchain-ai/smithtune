@@ -23,14 +23,14 @@ def _model(judge: dict, max_tokens: int):
     from langchain_anthropic import ChatAnthropic
     from langchain_openai import ChatOpenAI
 
-    from smithtune.inference import _anthropic_gateway_key
+    from smithtune.inference import anthropic_connection
     from smithtune.providers.fireworks import CLIENT_SOURCE, _set_skill_session
 
     provider = judge["provider"]
     if provider in {"anthropic", "anthropic-gateway"}:
-        key = _anthropic_gateway_key() if provider == "anthropic-gateway" else os.environ[credential_name(provider)]
+        base_url, key = anthropic_connection(provider)
         return ChatAnthropic(model=judge["model"], api_key=key, max_tokens=max_tokens, timeout=60, max_retries=0,
-                             base_url="https://gateway.smith.langchain.com/anthropic" if provider == "anthropic-gateway" else "https://api.anthropic.com")
+                             base_url=base_url)
     headers = {}
     if provider == "fireworks":
         _set_skill_session()

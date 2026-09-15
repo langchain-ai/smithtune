@@ -34,7 +34,7 @@ def diagnose() -> dict:
         "tools": tools,
         "credentials": {
             name: "set" if os.environ.get(name) else "unset"
-            for name in ("LANGSMITH_API_KEY", "FIREWORKS_API_KEY", "OPENAI_API_KEY", "SMITHTUNE_ANTHROPIC_API_KEY", "BASETEN_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS")
+            for name in ("LANGSMITH_API_KEY", "FIREWORKS_API_KEY", "OPENAI_API_KEY", "BASETEN_API_KEY", "ANTHROPIC_API_KEY", "LANGSMITH_GATEWAY_API_KEY")
         },
         "note": "Offline checks only; credential validity and service access have not been tested. Missing prerequisites are required only for the operations that use them.",
     }

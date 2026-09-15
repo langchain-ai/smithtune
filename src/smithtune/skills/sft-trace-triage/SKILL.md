@@ -119,5 +119,5 @@ read-only code with `read_run(run_id)` and `read_message(message_index)` to insp
 exceed the limit stay incomplete; never silently shorten evidence to fit. Exact quotes are checked against the source, but the model's quality
 judgment still needs human review on a sample.
 
-Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`; `anthropic-gateway` uses the
-LangSmith gateway credential. Fireworks always uses its official API.
+Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses
+`LANGSMITH_GATEWAY_API_KEY`. Fireworks always uses its official API.

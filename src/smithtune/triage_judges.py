@@ -9,7 +9,7 @@ from importlib.resources import files
 
 from jsonschema import Draft202012Validator
 
-from smithtune.inference import _anthropic_chat_completion, _post_json
+from smithtune.inference import ANTHROPIC_ENDPOINTS, _anthropic_chat_completion, _post_json
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL, _set_skill_session
 
@@ -79,14 +79,15 @@ def validate_judgment(value: dict, trace: dict) -> dict:
 
 
 def credential_name(provider: str) -> str:
-    return {"fireworks": "FIREWORKS_API_KEY", "openai": "OPENAI_API_KEY",
-            "anthropic": "SMITHTUNE_ANTHROPIC_API_KEY", "anthropic-gateway": "ANTHROPIC_API_KEY"}[provider]
+    if provider in ANTHROPIC_ENDPOINTS:
+        return ANTHROPIC_ENDPOINTS[provider][1]
+    return {"fireworks": "FIREWORKS_API_KEY", "openai": "OPENAI_API_KEY"}[provider]
 
 
 def check_credentials(judges: list[dict]) -> None:
     for judge in judges:
         name = credential_name(judge["provider"])
-        if not os.environ.get(name) and not (judge["provider"] == "anthropic-gateway" and os.environ.get("ANTHROPIC_CUSTOM_HEADERS")):
+        if not os.environ.get(name):
             raise PipelineError(f"{name} is not set for judge {judge['name']}")
 
 
@@ -124,30 +125,22 @@ def indexed_messages(messages: list[dict]) -> list[dict]:
 
 def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
     provider, model = judge["provider"], judge["model"]
-    if provider == "anthropic-gateway":
-        response = _anthropic_chat_completion(model, messages, max_tokens, True)
+    if provider in ANTHROPIC_ENDPOINTS:
+        response = _anthropic_chat_completion(model, messages, max_tokens, True, provider=provider)
         text = response["content"]
     else:
         headers = {"Content-Type": "application/json"}
-        if provider == "anthropic":
-            url = "https://api.anthropic.com/v1/messages"
-            headers.update({"x-api-key": os.environ[credential_name(provider)], "anthropic-version": "2023-06-01"})
-            body = {"model": model, "system": messages[0]["content"], "messages": messages[1:], "max_tokens": max_tokens}
-        else:
-            url = INFERENCE_URL if provider == "fireworks" else "https://api.openai.com/v1/chat/completions"
-            headers["Authorization"] = f"Bearer {os.environ[credential_name(provider)]}"
-            body = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
-                    "max_tokens" if provider == "fireworks" else "max_completion_tokens": max_tokens}
-            if provider == "fireworks":
-                _set_skill_session()
-                headers.update({"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})
-                body["temperature"] = 0
+        url = INFERENCE_URL if provider == "fireworks" else "https://api.openai.com/v1/chat/completions"
+        headers["Authorization"] = f"Bearer {os.environ[credential_name(provider)]}"
+        body = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
+                "max_tokens" if provider == "fireworks" else "max_completion_tokens": max_tokens}
+        if provider == "fireworks":
+            _set_skill_session()
+            headers.update({"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})
+            body["temperature"] = 0
         response = _post_json(urllib.request.Request(url, method="POST", headers=headers, data=json.dumps(body).encode()), "triage judge")
         try:
-            if provider == "anthropic":
-                text = "".join(block["text"] for block in response["content"] if block.get("type") == "text")
-            else:
-                text = response["choices"][0]["message"]["content"]
+            text = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
             raise PipelineError("judge returned no text response") from None
     try:

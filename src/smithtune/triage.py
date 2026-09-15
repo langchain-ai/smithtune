@@ -150,9 +150,10 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
         skill_hash = json_sha256(skill)
-        # A CLI-directory documentation correction leaves coordinator instructions
-        # unchanged. Preserve its prior identity so saved votes remain reusable.
-        if skill_hash == "244f088d563cb64cfbd337b5f80e6fffa3f4d3a95dadb6e2c47f182f6e636e98":
+        # Directory and credential documentation changes leave judging behavior
+        # unchanged. Preserve their prior identity so saved votes remain reusable.
+        if skill_hash in {"244f088d563cb64cfbd337b5f80e6fffa3f4d3a95dadb6e2c47f182f6e636e98",
+                          "cdb97ed635dccbe49fecf1772731e7d8b174e2476de05e08c28991afcb7e4923"}:
             skill_hash = "b7b79171217e4f4b22f488f9f8e1de9fc96c2b8744d3607adaa375131f91fcf5"
         identity.update(agent_version=6, skill_sha256=skill_hash)
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "traces": len(frozen["traces"]),

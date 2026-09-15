@@ -46,7 +46,8 @@ Configure credentials in your environment:
 | Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
 | Baseten preparation and training | `BASETEN_API_KEY` |
-| Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
+| Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
+| Optional LangSmith gateway judging | `LANGSMITH_GATEWAY_API_KEY` |
 
 Fireworks calls use `https://api.fireworks.ai` for training and deployment control,
 and `https://api.fireworks.ai/inference/v1` for inference. Temporary evaluation
@@ -268,8 +269,8 @@ The list replaces the council and is saved for confirm and resume; you do not
 need to repeat it. The first judge model also runs the
 coordinator. Terra uses OpenAI Responses for reasoning with tools. The Fireworks
 adapter preserves reasoning fields between tool calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
-uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
-`anthropic-gateway` uses the LangSmith Anthropic gateway credential.
+uses `OPENAI_API_KEY`. Direct Anthropic uses `ANTHROPIC_API_KEY`.
+`anthropic-gateway` uses `LANGSMITH_GATEWAY_API_KEY`.
 
 `--concurrency` sets the maximum active judge tasks (default 4). Advanced
 options remain supported: `--config` for a judge JSON file, `--runner api` for
@@ -481,6 +482,17 @@ are saved to `<run-dir>/replay/summary.json`.
 Add `--base-model '<deployed-base-model-route>'` for a before/after comparison.
 The base route must already be available; the temporary deployment serves only
 the tuned model. Model and judge inference use current provider rates.
+
+Replay judging calls Anthropic directly by default, using `ANTHROPIC_API_KEY`.
+For internal LangSmith gateway testing, set `LANGSMITH_GATEWAY_API_KEY` and add
+`--judge-model anthropic-gateway/claude-sonnet-5` to `evaluate`. For triage, use
+`anthropic-gateway:<model-id>` in `--judges`.
+
+If upgrading from gateway-based replay, move that credential out of
+`ANTHROPIC_API_KEY` into `LANGSMITH_GATEWAY_API_KEY` and select the gateway
+explicitly. `ANTHROPIC_CUSTOM_HEADERS` and `SMITHTUNE_ANTHROPIC_API_KEY` are no
+longer used. Start a new evaluation output directory for older replay results;
+they do not record which judge endpoint was used.
 
 The default readiness timeout is 600 seconds; use `--deployment-timeout` to
 change it. Capacity loss leaves the evaluation interrupted, rather than scoring
