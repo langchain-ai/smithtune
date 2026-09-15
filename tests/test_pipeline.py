@@ -40,6 +40,7 @@ def example(index: int, messages: list[dict] | None = None, thread: str | None =
         },
         "outputs": None,
         "metadata": {
+            "source_project_id": "project-1",
             "source_scope": "thread",
             "source_scope_id": thread or f"thread-{index}",
             "trajectory_format": "messages",
@@ -452,6 +453,49 @@ def test_split_isolation_rejects_duplicate_content_across_conversations():
 
     with pytest.raises(PipelineError, match="content hash overlap"):
         dataset_ops._validate_split_isolation([train_row], [], [test_row])
+
+
+@pytest.mark.parametrize("fetch", [False, True])
+@pytest.mark.parametrize("global_contract", [False, True])
+@pytest.mark.parametrize("scope", ["thread", "trace"])
+def test_prepare_rejects_repeated_sources_before_capture(tmp_path, monkeypatch, fetch, global_contract, scope):
+    first = example(0, thread="conversation-a")
+    second = copy.deepcopy(first)
+    second["id"] = "example-1"
+    second["inputs"]["messages"] += [message("human", "follow-up", "u2"), message("ai", "reply", "a2")]
+    for item in (first, second):
+        item["metadata"]["source_scope"] = scope
+    # Explicit metadata and the workspace flag must resolve to the same source.
+    second["metadata"]["source_workspace_id"] = "source-workspace"
+    second["source_session_id"] = second["metadata"].pop("source_project_id")
+    write_raw(tmp_path, [first, second])
+    original = (tmp_path / "raw/examples.json").read_bytes()
+    monkeypatch.setattr(dataset_ops, "download_dataset", lambda *_args: None)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("duplicate sources must fail before capturing tools or rendering")
+
+    monkeypatch.setattr(dataset_ops, "_example_contract_snapshot", unexpected)
+    monkeypatch.setattr(dataset_ops, "validate_model_context", unexpected)
+    with pytest.raises(PipelineError, match=f"examples example-0 and example-1 reference the same {scope} conversation-a.*project-1.*source-workspace"):
+        dataset_ops.prepare_dataset("workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path,
+            fetch=fetch, source_workspace_id="source-workspace",
+            inference_contract=loaded_contract(tmp_path) if global_contract else None)
+    assert (tmp_path / "raw/examples.json").read_bytes() == original
+    assert not (tmp_path / "prepared").exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_project_id", "other-project"), ("source_workspace_id", "other-workspace"), ("source_scope", "trace"),
+])
+def test_prepare_accepts_same_scope_id_in_distinct_sources(tmp_path, field, value):
+    examples = [example(0, thread="same-id"), example(1, thread="same-id")]
+    examples[1]["metadata"][field] = value
+    write_raw(tmp_path, examples)
+    manifest = dataset_ops.prepare_dataset("workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path,
+        fetch=False, check_render=False, inference_contract=loaded_contract(tmp_path),
+        validation_fraction=0, test_fraction=1)
+    assert manifest["prepared"]["accepted"] == 2
 
 
 def test_prepare_keeps_all_rows_and_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

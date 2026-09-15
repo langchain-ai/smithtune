@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from smithtune import hf_rendering, rendering
+from smithtune import dataset, hf_rendering, rendering
 from smithtune.native_rendering import NativePrefixRenderer
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import PipelineError
@@ -77,6 +77,27 @@ def test_each_native_datum_is_checked_against_context_limit(monkeypatch):
     assert accepted == [row] and rejected == [] and audit["rendered_datums"] == 2
     accepted, rejected, _ = rendering.validate_model_context([row], replace(model, max_seq_len=maximum - 1))
     assert accepted == [] and len(rejected) == 1
+
+
+def test_multiple_datums_keep_their_parent_conversations_partition(monkeypatch):
+    renderer = _renderer()
+    monkeypatch.setattr(rendering, "load_training_renderer", lambda model: renderer)
+    rows = [{"messages": copy.deepcopy(MESSAGES), "tools": TOOLS,
+             "_source": {"example_id": f"example-{i}", "source_scope": "thread", "source_scope_id": f"thread-{i}"}}
+            for i in range(3)]
+    accepted, rejected, audit = rendering.validate_model_context(rows, MODEL)
+    assert not rejected and audit["rendered_datums"] == 6
+    assert accepted == rows  # Context checks retain whole conversations for splitting.
+    sources = {}
+    for partition, conversations in enumerate(dataset.split_rows(accepted)):
+        assert len(conversations) == 1
+        for row in conversations:
+            datums = renderer.render(row["messages"], row["tools"])
+            assert len(datums) == 2
+            source = row["_source"]["source_scope_id"]
+            assert source not in sources
+            sources[source] = partition
+    assert len(sources) == 3
 
 
 @pytest.mark.parametrize("change", [
