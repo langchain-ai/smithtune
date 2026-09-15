@@ -64,7 +64,9 @@ report; only validated subagent votes determine `labels.jsonl`.
 
 1. Run `smithtune doctor` and `smithtune dataset triage --help`. Agent mode
    needs the optional `[deepagents]` install, which includes code mode.
-2. Default to three independent Fireworks Kimi K3 judges. Use repeatable
+2. Default to DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks, plus
+   GPT-5.6 Terra on OpenAI. Both `FIREWORKS_API_KEY` and `OPENAI_API_KEY`
+   are required for new default runs. Use repeatable
    `--judge provider:model` or `--rule` only when the task needs other models
    or project rules. Ask only for source details that are missing.
 3. Preview with `smithtune dataset triage <triage-dir>` and source flags:

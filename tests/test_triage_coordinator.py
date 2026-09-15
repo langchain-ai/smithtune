@@ -153,5 +153,6 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
     previous = (work / "judgments.jsonl").read_bytes()
     monkeypatch.setattr(triage_coordinator, "_model", lambda *_: pytest.fail("completed coordinator repeated"))
     monkeypatch.setattr(triage_agent, "_model", lambda *_: pytest.fail("completed judge repeated"))
+    monkeypatch.setattr(triage_agent, "check_installation", lambda: pytest.fail("completed run needs no agent runtime"))
     assert triage.run_triage(source(), work, **args)["kept"] == 2
     assert previous == (work / "judgments.jsonl").read_bytes()

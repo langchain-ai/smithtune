@@ -91,9 +91,11 @@ def check_credentials(judges: list[dict]) -> None:
 
 
 def judge_messages(trace: dict, rubric: str, rules: list[str]) -> list[dict]:
+    evidence = {**trace, "messages": [{**message, "message_index": index}
+                                     for index, message in enumerate(trace["messages"])]}
     return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps({"oneOf": [RESULT_SCHEMA, INCOMPLETE_SCHEMA]})
              + "\nAdditional reviewed selection rules:\n" + json.dumps(rules)},
-            {"role": "user", "content": json.dumps({"untrusted_trace_evidence": trace}, ensure_ascii=False)}]
+            {"role": "user", "content": json.dumps({"untrusted_trace_evidence": evidence}, ensure_ascii=False)}]
 
 
 def indexed_messages(messages: list[dict]) -> list[dict]:

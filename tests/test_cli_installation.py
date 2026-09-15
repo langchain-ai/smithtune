@@ -24,6 +24,7 @@ def test_module_entrypoint_and_version_outside_checkout(tmp_path):
 
 @pytest.mark.parametrize("argv", [
     ["--help"], ["models", "list", "--help"],
+    ["dataset", "triage", "--help"], ["skill", "export", "--help"],
     ["models", "list"], ["models", "list", "--provider", "baseten"],
     ["models", "list", "--provider", "fireworks"],
 ])
@@ -33,7 +34,7 @@ import builtins
 import socket
 original_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
-    if name.split('.')[0] in {'training', 'torch', 'transformers', 'fireworks', 'baseten'}:
+    if name.split('.')[0] in {'training', 'torch', 'transformers', 'fireworks', 'baseten', 'deepagents', 'langchain_openai', 'pydantic_monty', 'openai', 'anthropic'}:
         raise AssertionError(name)
     return original_import(name, *args, **kwargs)
 def no_network(*args, **kwargs):

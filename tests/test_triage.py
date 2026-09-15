@@ -112,10 +112,11 @@ def test_standalone_traces_are_labeled(tmp_path):
 def test_dry_run_does_not_judge_and_single_judge_is_supported(tmp_path):
     def no_judge(*args):
         pytest.fail("dry-run must not judge")
-    plan = triage.run_triage(source(), tmp_path, runner=API(), dry_run=True, judge_call=no_judge)
+    path = config(tmp_path, count=1)
+    plan = triage.run_triage(source(), tmp_path, runner=API(), dry_run=True, judge_call=no_judge, config_path=path)
     assert plan["judges"] == 1 and plan["judge_tasks"] == 2
     assert not (tmp_path / "judgments.jsonl").exists()
-    result = run(tmp_path)
+    result = run(tmp_path, config_path=path)
     assert result["kept"] == 2 and result["status"] == "complete"
 
 
@@ -131,6 +132,21 @@ def test_failed_judge_is_incomplete_then_retried(tmp_path):
     result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=lambda *_: {"keep": 1}, confirm=True, attempts=1)
     assert result["incomplete"] == 2 and result["kept"] == 0
     assert run(tmp_path)["kept"] == 2
+    seen = {}
+
+    def fix_citation(judge, messages_, max_tokens):
+        value = judge_call(judge, messages_, max_tokens)
+        key = (judge["name"], value["trace_id"])
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] == 1:
+            value["evidence"][0]["message_index"] = 999
+        else:
+            assert "previous attempt failed validation" in messages_[0]["content"]
+        return value
+
+    result = triage.run_triage(source(), tmp_path / "retry", runner=API(), judge_call=fix_citation,
+                               confirm=True, attempts=2, sleeper=lambda _: None)
+    assert result["kept"] == 2 and all(count == 2 for count in seen.values())
 
 
 def config(tmp_path, count=2):
@@ -264,6 +280,13 @@ def test_skill_export_works_outside_checkout(tmp_path):
     result = triage.export_skill(tmp_path)
     assert Path(result["skill"]).read_text().startswith("---\nname: sft-trace-triage")
     assert (tmp_path / "sft-trace-triage/judge.md").exists()
+    exported = json.loads((tmp_path / "sft-trace-triage/config.example.json").read_text())
+    assert exported == triage.load_config(None) == triage.council_settings(tmp_path / "new")["config"]
+    assert [(j["provider"], j["model"]) for j in exported["judges"]] == [
+        ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
+        ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
+        ("openai", "gpt-5.6-terra"),
+    ]
     with pytest.raises(PipelineError, match="already exists"):
         triage.export_skill(tmp_path)
 
@@ -284,6 +307,9 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
     assert json.loads(capsys.readouterr().out)["kept"] == 2
     assert (tmp_path / "judgments.jsonl").read_bytes() == saved
+    # A changed package default must not replace a saved council.
+    monkeypatch.setattr(triage, "load_config", lambda *_: pytest.fail("saved council ignored"))
+    assert triage.council_settings(tmp_path)["config"] == plan["config"]
     create = triage.create_triaged_dataset
     monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: create(*args, **kwargs, runner=api))
     cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--name", "selected", "--confirm"])
@@ -377,11 +403,19 @@ def test_missing_thread_pages_and_changed_turns_fail_closed(tmp_path):
     assert not (tmp_path / "snapshot.json").exists()
 
 
-def test_paid_and_remote_writes_require_confirmation(tmp_path):
+def test_paid_and_remote_writes_require_confirmation(tmp_path, monkeypatch):
     with pytest.raises(PipelineError, match="incurs cost"):
         triage.run_triage(source(), tmp_path, runner=API())
     with pytest.raises(PipelineError, match="requires --confirm"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=False)
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(PipelineError, match="OPENAI_API_KEY"):
+        triage.run_triage(source(), tmp_path, runner=API(), confirm=True)
+    assert not (tmp_path / "triage-config.json").exists()
+    assert not (tmp_path / "judgments.jsonl").exists()
+    # No paid work happened, so choosing another council remains possible.
+    assert run(tmp_path, config_path=config(tmp_path, count=1))["status"] == "complete"
 
 
 def test_judge_missing_evidence_is_incomplete_not_a_drop(tmp_path):
@@ -394,7 +428,7 @@ def test_judge_missing_evidence_is_incomplete_not_a_drop(tmp_path):
 
     result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=incomplete, confirm=True)
     assert result["incomplete"] == 2 and result["dropped"] == 0
-    assert len(calls) == 2
+    assert len(calls) == 6
     records = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
     assert all(r["error_kind"] == "insufficient_evidence" for r in records)
 
@@ -413,3 +447,12 @@ def test_cli_requires_source_when_no_snapshot_exists(tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--dry-run"])
     assert "no local snapshot" in capsys.readouterr().err
+
+
+def test_empty_source_does_not_create_a_misleading_completed_run(tmp_path):
+    api = API()
+    api.root_pages = [[]]
+    with pytest.raises(PipelineError, match="no traces match"):
+        triage.run_triage(source(), tmp_path, runner=api, dry_run=True)
+    assert not (tmp_path / "snapshot.json").exists()
+    assert not (tmp_path / "summary.json").exists()

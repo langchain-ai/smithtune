@@ -116,6 +116,7 @@ def test_judge_reads_indexed_evidence_with_code_without_changing_source(monkeypa
     original = json.dumps(trace)
     prompt = indexed_messages(judge_messages(trace, "Judge the trace.", []))
     assert len(prompt[-1]["content"]) < 1000
+    assert json.loads(prompt[-1]["content"])["untrusted_trace_evidence"]["messages"][0]["message_index"] == 0
     diagnostics = {}
     model = JudgeModel(answers=[
         AIMessage(content="", tool_calls=[{"id": "read", "name": "code_mode", "args": {
@@ -133,3 +134,31 @@ def test_judge_reads_indexed_evidence_with_code_without_changing_source(monkeypa
     assert tool.invoke({"code": "r = read_run('run'); r['outputs']['result'] = 'changed'; r['outputs']"})["result"] == {"result": "changed"}
     assert json.dumps(trace) == original
     assert all(set(names) == {"read_file", "code_mode"} for names in model.exposed)
+
+
+def test_fireworks_reasoning_survives_a_tool_round_trip(monkeypatch):
+    from smithtune.triage_agent import _model
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
+    model = _model({"provider": "fireworks", "model": "accounts/fireworks/models/deepseek-v4p1-flash"}, 4096)
+    result = model._create_chat_result({"choices": [{"message": {"role": "assistant", "content": "",
+        "reasoning_content": "Need the saved evidence.",
+        "tool_calls": [{"id": "call", "type": "function", "function": {"name": "code_mode", "arguments": json.dumps({"code": "read_run('run')"})}}]},
+        "finish_reason": "tool_calls"}]})
+    message = result.generations[0].message
+    assert len(message.tool_calls) == 1 and not message.invalid_tool_calls
+    payload = model._get_request_payload([message, ToolMessage(content='{"result":47}', tool_call_id="call")])
+    assert payload["messages"][0]["reasoning_content"] == "Need the saved evidence."
+    assert "reasoning_content" not in payload["messages"][1]
+    assert model.disable_streaming and not model.use_responses_api
+
+
+def test_terra_uses_responses_for_reasoning_with_tools(monkeypatch):
+    from langchain_core.messages import HumanMessage
+    from smithtune.triage_agent import _model
+    monkeypatch.setenv("OPENAI_API_KEY", "test-credential")
+    model = _model({"provider": "openai", "model": "gpt-5.6-terra"}, 4096)
+    payload = model._get_request_payload([HumanMessage(content="Judge the trace.")])
+    assert model.use_responses_api and payload["store"] is False
+    assert payload["reasoning"]["effort"] == "medium"
+    assert payload["max_output_tokens"] == 4096 and "messages" not in payload
+    assert "reasoning.encrypted_content" in payload["include"]

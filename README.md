@@ -88,12 +88,19 @@ the returned dataset ID in `prepare`.
 
 `dataset triage` downloads traces locally and labels each one for SFT.
 It starts a Deep Agent coordinator, which uses Python code to launch judge
-subagents. The default council has **three independent Fireworks Kimi K3
-judges** (`accounts/fireworks/models/kimi-k3`). Each judge gets fresh context.
+subagents. The default council uses three different models:
+
+| Judge | API provider | Model ID |
+| --- | --- | --- |
+| DeepSeek V4.1 Flash | Fireworks | `accounts/fireworks/models/deepseek-v4p1-flash` |
+| GLM-5.3-Flash | Fireworks | `accounts/fireworks/models/glm-5p3-flash` |
+| GPT-5.6 Terra | OpenAI | `gpt-5.6-terra` |
+
+Each judge gets fresh context. DeepSeek also runs the coordinator.
 This selects training examples; `evaluate` tests a trained model.
 
-Install the optional agent support and set `FIREWORKS_API_KEY` and
-`LANGSMITH_API_KEY` in your environment:
+Install the optional agent support and set `FIREWORKS_API_KEY`, `OPENAI_API_KEY`,
+and `LANGSMITH_API_KEY` in your environment:
 
 ```bash
 uv tool install --upgrade --python 3.12 \
@@ -120,7 +127,8 @@ Thus the number of traces to judge can exceed `--limit`.
 smithtune dataset triage data/triage --confirm
 ```
 
-The CLI reuses the saved source and settings. It saves each vote as it finishes.
+The CLI reuses the saved source and settings. New defaults apply only to new
+plans; existing plans retain their selected models. It saves each vote as it finishes.
 Repeating the command retries incomplete votes; a completed run makes no new
 agent calls. The directory defaults to `data/triage` if omitted.
 
@@ -177,14 +185,15 @@ rules on the preview command. These replace the default council and rules:
 smithtune dataset triage data/custom-council \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --judge fireworks:accounts/fireworks/models/kimi-k3 \
-  --judge 'openai:<model-id>' \
-  --judge 'anthropic:<model-id>' \
+  --judge fireworks:accounts/fireworks/models/deepseek-v4p1-flash \
+  --judge fireworks:accounts/fireworks/models/glm-5p3-flash \
+  --judge openai:gpt-5.6-terra \
   --rule 'Drop answers that claim an action succeeded without evidence.'
 ```
 
 Use model IDs available to your accounts. The first judge model also runs the
-coordinator. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
+coordinator. Terra uses OpenAI Responses for reasoning with tools. The Fireworks
+adapter preserves reasoning fields between tool calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
 uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
 `anthropic-gateway` uses the LangSmith Anthropic gateway credential.
 
@@ -210,6 +219,9 @@ smithtune skill export --output ./skills
 
 This exports `sft-trace-triage/SKILL.md`, the judge rubric, and an optional
 config example. The skill uses the CLI for download, labels, resume, and import.
+
+See the [trace-labeling audit](docs/trace-labeling-audit.md) for live checks,
+packaging coverage, and current quality and scaling limits.
 
 ## Prepare data
 

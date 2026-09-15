@@ -35,9 +35,39 @@ def _model(judge: dict, max_tokens: int):
     if provider == "fireworks":
         _set_skill_session()
         headers = {"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]}
-    return ChatOpenAI(model=judge["model"], api_key=os.environ[credential_name(provider)],
-                      base_url="https://api.fireworks.ai/inference/v1" if provider == "fireworks" else "https://api.openai.com/v1",
-                      default_headers=headers, max_tokens=max_tokens, timeout=60, max_retries=0, use_responses_api=False)
+    model_class = ChatOpenAI
+    options = {"use_responses_api": False}
+    if provider == "fireworks":
+        class FireworksChat(ChatOpenAI):
+            # ChatOpenAI intentionally drops provider-specific fields. Retain
+            # Fireworks reasoning across tool calls without exposing it as text.
+            def _create_chat_result(self, response, generation_info=None):
+                result = super()._create_chat_result(response, generation_info)
+                body = response if isinstance(response, dict) else response.model_dump()
+                for generation, choice in zip(result.generations, body["choices"], strict=True):
+                    reasoning = choice["message"].get("reasoning_content")
+                    if isinstance(reasoning, str):
+                        generation.message.additional_kwargs["reasoning_content"] = reasoning
+                return result
+
+            def _get_request_payload(self, input_, *, stop=None, **kwargs):
+                payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+                for message, encoded in zip(self._convert_input(input_).to_messages(), payload["messages"], strict=True):
+                    reasoning = message.additional_kwargs.get("reasoning_content")
+                    if encoded["role"] == "assistant" and isinstance(reasoning, str):
+                        encoded["reasoning_content"] = reasoning
+                return payload
+
+        model_class = FireworksChat
+    elif judge["model"] == "gpt-5.6-terra":
+        # Terra supports reasoning with function tools on Responses, not Chat
+        # Completions. Keep reasoning continuity without server-side storage.
+        options = {"use_responses_api": True, "store": False,
+                   "reasoning": {"effort": "medium"}, "include": ["reasoning.encrypted_content"]}
+    return model_class(model=judge["model"], api_key=os.environ[credential_name(provider)],
+                       base_url="https://api.fireworks.ai/inference/v1" if provider == "fireworks" else "https://api.openai.com/v1",
+                       default_headers=headers, max_tokens=max_tokens, timeout=60, max_retries=0,
+                       disable_streaming=True, **options)
 
 
 def skill_files() -> dict:

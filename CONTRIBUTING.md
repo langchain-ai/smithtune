@@ -30,6 +30,13 @@ read saved runs; the coordinator can dispatch bounded judge batches.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
+The default council is read from the packaged `config.example.json`; CLI,
+Python, and exported skill defaults must agree. Terra uses OpenAI Responses
+for reasoning with tools. Fireworks chat responses preserve `reasoning_content`
+through the pinned OpenAI adapter, with streaming disabled. Keep the tool
+round-trip checks when changing either transport. Bump the triage agent version
+when model transport or evidence presentation changes.
+
 `sfw` is used for contributor dependency installation. It is not a smithtune runtime
 prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.

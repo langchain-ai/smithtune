@@ -74,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
 
     triage_cmd = curate_sub.add_parser(
         "triage", help="label traces with an agent council",
-        description="Preview a council, then add --confirm to label or resume. Defaults to three independent Fireworks Kimi K3 judges managed by a Deep Agent. Source and council settings are saved in the directory.",
+        description="Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, GLM-5.3-Flash, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
     )
     triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default: data/triage)")
     source = triage_cmd.add_argument_group("Source (first run only)")
@@ -84,7 +84,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--end-time")
     source.add_argument("--filter", help="optional root trace filter")
     source.add_argument("--limit", type=int, help="roots to select before expanding whole threads (default: 100)")
-    triage_cmd.add_argument("--judge", action="append", help="provider:model; repeat once per judge (default: three Fireworks Kimi K3 judges)")
+    triage_cmd.add_argument("--judge", action="append", help="provider:model; repeat once per judge (default: DeepSeek V4.1 Flash, GLM-5.3-Flash, GPT-5.6 Terra)")
     triage_cmd.add_argument("--rule", action="append", help="additional selection rule; repeat for multiple rules")
     triage_cmd.add_argument("--concurrency", type=int, help="maximum concurrent judge tasks (default: 4)")
     approval = triage_cmd.add_mutually_exclusive_group()

@@ -197,6 +197,8 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
             raise PipelineError("triage snapshot uses a different source query; use a new output directory")
         return value
     roots = _root_selection(source, runner=runner)
+    if not roots:
+        raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
     units, traces, visited = [], [], set()
     for root in roots:
