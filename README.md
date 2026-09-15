@@ -148,17 +148,24 @@ agent calls. The directory defaults to `data/triage` if omitted.
 
 ```text
 LangSmith traces
-      | download once
+      | V2 download; save messages, runs, and tool schemas
       v
-Local snapshot -> Deep Agent coordinator -> Python code -> judge subagents
-      |                                                        |
-      +---- conversation + run index + read_run(id) ------------+
-                                                               |
-                                                   checked votes and labels
-                                                               |
-                                          dataset create --triage-dir
-                                                               |
-                                                   prepare -> plan -> train
+Local snapshot
+      |
+Media filter ---- media found ----> 0 + reason; no judge calls
+      | text only
+      v
+Deep Agent coordinator -> Python code -> independent judge subagents
+                                               | read saved evidence
+                                               v
+                                  Validated votes -> majority label
+                                               |
+                                   labels.jsonl: 1/0 + reason
+                                               |
+                                  dataset create --triage-dir
+                                               | upload all-pass conversations
+                                               v
+                                     prepare -> plan -> train
 ```
 
 Judges read the conversation and a run index. Long messages carry a `read_full`
