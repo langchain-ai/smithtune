@@ -1,13 +1,14 @@
-"""Select threads through root trace filters and import whole conversations into LangSmith datasets."""
+"""Select conversations through root trace filters and import their trajectories into LangSmith datasets."""
 
 from __future__ import annotations
 
 import json
-import random
 import re
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,15 @@ from smithtune.providers.base import PipelineError
 
 
 DEFAULT_SELECTION_DIR = Path("data") / "selections"
+SCHEMA_VERSION = 2
+# The trajectory endpoint scopes one conversation by either key.
+TRAJECTORY_KEYS = ("thread_id", "trace_id")
+PREVIEW_ROOTS = 20
+# Each conversation is fetched and written one at a time; keep runs bounded.
+MAX_LIMIT = 2000
+# Conversations fetched and written at once; bounded to stay gentle on the API.
+MAX_CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 4
 
 
 def _api(workspace_id, method, path, body=None, *, runner=_run):
@@ -92,6 +102,7 @@ def _save_receipt(path: Path, value: dict) -> None:
 
 
 def _matches(values: Any) -> dict[str, dict]:
+    """Validate root traces and key them by trace ID, preserving order."""
     if not isinstance(values, list):
         raise PipelineError("matches must be a list of root traces")
     matches = {}
@@ -102,31 +113,32 @@ def _matches(values: Any) -> dict[str, dict]:
         thread_id = item.get("thread_id")
         if thread_id is not None:
             thread_id = _text(thread_id, "thread_id")
-        match = {"trace_id": trace_id, "thread_id": thread_id,
-                 "start_time": _time(item.get("start_time")),
-                 "feedback_stats": item.get("feedback_stats")}
-        if match["feedback_stats"] is not None and not isinstance(match["feedback_stats"], dict):
-            raise PipelineError("feedback_stats must be an object or null")
+        match = {"trace_id": trace_id, "thread_id": thread_id, "start_time": _time(item.get("start_time"))}
         if trace_id in matches and matches[trace_id] != match:
             raise PipelineError(f"conflicting query results for trace {trace_id}; select again")
         matches[trace_id] = match
     return matches
 
 
+def _conversation(match: dict) -> dict[str, str]:
+    """A root selects its whole thread when it has one, otherwise its single trace."""
+    if match["thread_id"] is not None:
+        return {"key": "thread_id", "id": match["thread_id"]}
+    return {"key": "trace_id", "id": match["trace_id"]}
+
+
 def _select_dataset(
     *, workspace_id: str, project_id: str, start_time: str, end_time: str,
-    output: Path, filter: str | None = None, limit: int | None = None,
-    seed: int = 42, runner: Callable[..., Any] = _run,
+    output: Path, limit: int, filter: str | None = None,
+    runner: Callable[..., Any] = _run,
 ) -> dict:
     workspace_id = _uuid(workspace_id, "workspace_id")
     project_id = _uuid(project_id, "project_id")
     start_time, end_time = _time(start_time), _time(end_time)
     if datetime.fromisoformat(start_time) >= datetime.fromisoformat(end_time):
         raise PipelineError("start_time must precede end_time")
-    if limit is not None and (type(limit) is not int or limit < 1):
-        raise PipelineError("limit must be a positive integer")
-    if type(seed) is not int:
-        raise PipelineError("seed must be an integer")
+    if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
+        raise PipelineError(f"limit must be an integer between 1 and {MAX_LIMIT}")
     if filter is not None:
         _text(filter, "filter")
     if output.exists():
@@ -136,11 +148,14 @@ def _select_dataset(
         "project_ids": [project_id], "is_root": True,
         "min_start_time": start_time, "max_start_time": end_time,
         "page_size": 100, "filter": f"and({filter}, {bound})" if filter else bound,
-        "selects": ["ID", "TRACE_ID", "THREAD_ID", "START_TIME", "FEEDBACK_STATS"],
+        "selects": ["ID", "TRACE_ID", "THREAD_ID", "START_TIME"],
     }
-    matches, cursors = {}, set()
+    # Accumulate distinct conversations in the order LangSmith returns roots and
+    # stop paging once the limit is reached; later pages are never requested.
+    matches, conversations, cursors, pages = {}, {}, set(), 0
     while True:
         page = _api(workspace_id, "POST", "/api/v2/runs/query", body, runner=runner)
+        pages += 1
         if not isinstance(page, dict) or not isinstance(page.get("items"), list):
             raise PipelineError("LangSmith returned an invalid root query page")
         # Validate duplicate roots across pages as well as within each page.
@@ -148,6 +163,10 @@ def _select_dataset(
             if trace_id in matches and matches[trace_id] != match:
                 raise PipelineError(f"conflicting query results for trace {trace_id}; select again")
             matches[trace_id] = match
+            conversation = _conversation(match)
+            conversations.setdefault((conversation["key"], conversation["id"]), conversation)
+        if len(conversations) >= limit:
+            break
         cursor = page.get("next_cursor")
         if cursor is None:
             break
@@ -155,119 +174,182 @@ def _select_dataset(
             raise PipelineError("LangSmith returned an invalid or repeated query cursor")
         cursors.add(cursor)
         body["cursor"] = cursor
-    roots = sorted(matches.values(), key=lambda item: item["trace_id"])
-    threads = {item["thread_id"] for item in roots if item["thread_id"] is not None}
-    candidates = sorted(threads)
-    selected = candidates if limit is None else sorted(random.Random(seed).sample(candidates, min(limit, len(candidates))))
+    roots = list(matches.values())
+    selected = list(conversations.values())[:limit]
     value = {
-        "schema_version": 1, "created_at_utc": _utc_now(),
-        "workspace_id": workspace_id, "project_id": project_id, "scope": "thread",
-        "query": {"start_time": start_time, "end_time": end_time,
-                  "filter": filter, "limit": limit, "seed": seed},
-        "matches": roots, "selected_ids": selected,
+        "schema_version": SCHEMA_VERSION, "created_at_utc": _utc_now(),
+        "workspace_id": workspace_id, "project_id": project_id,
+        "query": {"start_time": start_time, "end_time": end_time, "filter": filter, "limit": limit},
+        "pages_fetched": pages, "matches": roots, "selected": selected,
     }
     _write_new(output, value)
-    selected_set = set(selected)
+    selected_set = {(item["key"], item["id"]) for item in selected}
     return {
-        "selection": str(output), "scope": "thread", "matching_roots": len(roots),
-        "distinct_threads": len(threads),
-        "excluded_unthreaded_roots": sum(item["thread_id"] is None for item in roots),
-        "eligible_examples": len(candidates), "selected_examples": len(selected),
-        "preview": [{**item, "selected": item["thread_id"] in selected_set} for item in roots[:20]],
+        "selection": str(output), "matching_roots": len(roots), "pages_fetched": pages,
+        "distinct_conversations": len(conversations), "selected_examples": len(selected),
+        "trace_keyed_examples": sum(item["key"] == "trace_id" for item in selected),
+        "preview": [
+            {**item, "selected": tuple(_conversation(item).values()) in selected_set}
+            for item in roots[:PREVIEW_ROOTS]
+        ],
     }
 
 
 def create_dataset(
     *, workspace_id: str, project_id: str, start_time: str, end_time: str,
-    name: str, filter: str | None = None, limit: int | None = None,
-    seed: int = 42, output: Path | None = None, runner: Callable[..., Any] = _run,
+    name: str, limit: int, filter: str | None = None, output: Path | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY, runner: Callable[..., Any] = _run,
 ) -> dict:
     """Filter root runs and import the selected conversations in one operation."""
     name = _text(name, "name")
+    _check_concurrency(concurrency)
     if output is None:
         output = DEFAULT_SELECTION_DIR / f"{uuid4()}.json"
     selected = _select_dataset(
         workspace_id=workspace_id, project_id=project_id,
         start_time=start_time, end_time=end_time, output=output,
-        filter=filter, limit=limit, seed=seed, runner=runner,
+        filter=filter, limit=limit, runner=runner,
     )
     if selected["selected_examples"] == 0:
-        raise PipelineError(
-            "no conversation threads matched the filters; no dataset was created; "
-            f"excluded_unthreaded_roots={selected['excluded_unthreaded_roots']}; selection={output}"
-        )
-    imported = _import_selection(selection=output, name=name, runner=runner)
+        raise PipelineError(f"no conversations matched the filters; no dataset was created; selection={output}")
+    imported = _import_selection(selection=output, name=name, concurrency=concurrency, runner=runner)
     return {
         **imported, "selection": str(output),
         "matching_roots": selected["matching_roots"],
-        "distinct_threads": selected["distinct_threads"],
-        "excluded_unthreaded_roots": selected["excluded_unthreaded_roots"],
+        "distinct_conversations": selected["distinct_conversations"],
+        "trace_keyed_examples": selected["trace_keyed_examples"],
     }
 
 
-def _import_selection(*, selection: Path, name: str, runner: Callable[..., Any] = _run) -> dict:
+def _selected(value: Any, matches: dict[str, dict]) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise PipelineError("selection must contain selected conversations; empty selections cannot be imported")
+    candidates = {tuple(_conversation(match).values()) for match in matches.values()}
+    selected, seen = [], set()
+    for item in value:
+        if not isinstance(item, dict) or item.get("key") not in TRAJECTORY_KEYS:
+            raise PipelineError("each selected conversation must name a thread_id or trace_id key")
+        key = item["key"]
+        identity = _uuid(item.get("id"), "selected trace ID") if key == "trace_id" else _text(item.get("id"), "selected thread ID")
+        if (key, identity) in seen or (key, identity) not in candidates:
+            raise PipelineError("selected conversations must be unique and belong to the saved matches")
+        seen.add((key, identity))
+        selected.append({"key": key, "id": identity})
+    return selected
+
+
+def _fetch_trajectory(workspace_id: str, project_id: str, item: dict[str, str], *, runner: Callable[..., Any]) -> list:
+    trajectory = _api(workspace_id, "POST", "/v1/trajectory", {
+        "project_id": project_id, item["key"]: item["id"],
+        "format": "messages", "include": {"system_messages": True},
+    }, runner=runner)
+    if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list) or not trajectory["messages"]:
+        raise PipelineError(f"{item['key']} {item['id']} returned no messages")
+    if trajectory.get("next_cursor") or trajectory.get("prev_cursor"):
+        raise PipelineError(f"{item['key']} {item['id']} returned an unexpected continuation cursor")
+    return trajectory["messages"]
+
+
+def _check_concurrency(concurrency: Any) -> None:
+    if type(concurrency) is not int or not 1 <= concurrency <= MAX_CONCURRENCY:
+        raise PipelineError(f"concurrency must be an integer between 1 and {MAX_CONCURRENCY}")
+
+
+def _import_selection(
+    *, selection: Path, name: str, concurrency: int = DEFAULT_CONCURRENCY,
+    runner: Callable[..., Any] = _run,
+) -> dict:
+    _check_concurrency(concurrency)
     value = _load_json(selection)
-    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] != 1:
-        raise PipelineError("selection must use schema_version 1")
+    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+        raise PipelineError(
+            f"selection must use schema_version {SCHEMA_VERSION}; regenerate it with dataset create"
+        )
     workspace_id = _uuid(value.get("workspace_id"), "workspace_id")
     project_id = _uuid(value.get("project_id"), "project_id")
-    if value.get("scope") != "thread":
-        raise PipelineError(
-            "only thread selections are supported; regenerate with dataset create and project filters"
-        )
     matches = _matches(value.get("matches"))
-    ids = value.get("selected_ids")
-    if not isinstance(ids, list) or not ids:
-        raise PipelineError("selection must contain selected_ids; empty selections cannot be imported")
-    ids = [_text(item, "selected thread ID") for item in ids]
-    candidates = {item["thread_id"] for item in matches.values() if item["thread_id"] is not None}
-    if len(ids) != len(set(ids)) or not set(ids) <= candidates:
-        raise PipelineError("selected_ids must be unique and belong to the saved matches")
+    selected = _selected(value.get("selected"), matches)
     name = _text(name, "name")
     receipt_path = selection.with_suffix(".import.json")
     if receipt_path == selection:
         raise PipelineError("selection path must differ from its import receipt path")
+    # in_flight lists conversations whose fetch or write has started but not been
+    # confirmed; after a failure it names exactly the sources with unknown outcomes.
     receipt = {
         "selection": str(selection.resolve()), "workspace_id": workspace_id,
-        "project_id": project_id, "scope": "thread", "dataset_name": name,
+        "project_id": project_id, "dataset_name": name, "concurrency": concurrency,
         "dataset_id": None, "status": "in_progress", "example_ids": [],
-        "current_source_id": None, "pending_write": "dataset", "created_at_utc": _utc_now(),
+        "in_flight": [], "pending_write": "dataset", "created_at_utc": _utc_now(),
     }
     _write_new(receipt_path, receipt)
-    try:
-        dataset = _api(workspace_id, "POST", "/api/v1/datasets", {"name": name, "data_type": "kv"}, runner=runner)
-        dataset_id = _uuid(dataset.get("id") if isinstance(dataset, dict) else None, "returned dataset ID")
-        receipt.update(dataset_id=dataset_id, pending_write=None)
-        _save_receipt(receipt_path, receipt)
-        common = {"trajectory_format": "messages", "conversation_scope": "root",
-                  "source_project_id": project_id, "source_workspace_id": workspace_id,
-                  "selection_scope": "thread"}
-        for source_id in ids:
-            receipt.update(current_source_id=source_id, pending_write="example")
+    lock = threading.Lock()
+
+    def update(**changes) -> None:
+        with lock:
+            receipt.update(changes)
             _save_receipt(receipt_path, receipt)
-            result = _api(workspace_id, "POST", f"/v1/platform/datasets/{dataset_id}/examples/thread-imports", {
-                "project_id": project_id, "thread_ids": [source_id], "metadata": common,
-            }, runner=runner)
-            if not isinstance(result, dict) or result.get("count") != 1 or not isinstance(result.get("example_ids"), list) or len(result["example_ids"]) != 1:
-                raise PipelineError("thread import did not confirm exactly one example")
-            example_id = _uuid(result["example_ids"][0], "returned example ID")
+
+    def import_one(item: dict[str, str]) -> None:
+        entry = {**item, "pending_write": None}
+        with lock:
+            receipt["in_flight"].append(entry)
+            _save_receipt(receipt_path, receipt)
+        messages = _fetch_trajectory(workspace_id, project_id, item, runner=runner)
+        metadata = {**common, "selection_scope": item["key"].removesuffix("_id"), f"source_{item['key']}": item["id"]}
+        with lock:
+            entry["pending_write"] = "example"
+            _save_receipt(receipt_path, receipt)
+        result = _api(workspace_id, "POST", "/api/v1/examples", {
+            "dataset_id": dataset_id, "inputs": {"messages": messages}, "outputs": None, "metadata": metadata,
+        }, runner=runner)
+        example_id = _uuid(result.get("id") if isinstance(result, dict) else None, "returned example ID")
+        with lock:
             if example_id in receipt["example_ids"]:
                 raise PipelineError("LangSmith returned a duplicate example ID")
             receipt["example_ids"].append(example_id)
-            receipt.update(pending_write=None, current_source_id=None)
+            receipt["in_flight"].remove(entry)
             _save_receipt(receipt_path, receipt)
-        receipt["status"] = "complete"
-        _save_receipt(receipt_path, receipt)
+
+    try:
+        dataset = _api(workspace_id, "POST", "/api/v1/datasets", {"name": name, "data_type": "kv"}, runner=runner)
+        dataset_id = _uuid(dataset.get("id") if isinstance(dataset, dict) else None, "returned dataset ID")
+        update(dataset_id=dataset_id, pending_write=None)
+        common = {"trajectory_format": "messages", "conversation_scope": "root",
+                  "source_project_id": project_id, "source_workspace_id": workspace_id}
+        remaining, pending, failure = iter(selected), set(), None
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            while True:
+                # Keep at most `concurrency` conversations in flight; after a
+                # failure, submit nothing new and let started work resolve.
+                while failure is None and len(pending) < concurrency:
+                    item = next(remaining, None)
+                    if item is None:
+                        break
+                    pending.add(pool.submit(import_one, item))
+                if not pending:
+                    break
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    try:
+                        future.result()
+                    except PipelineError as exc:
+                        failure = failure or exc
+        if failure is not None:
+            raise failure
+        update(status="complete")
     except PipelineError as exc:
         receipt["status"] = "failed"
         try:
             _save_receipt(receipt_path, receipt)
         except PipelineError:
             pass  # The last atomic receipt still identifies the incomplete import.
-        pending = "; current write outcome may be unknown" if receipt["pending_write"] else ""
+        unresolved = receipt["in_flight"]
+        pending_note = "; current write outcome may be unknown" if receipt["pending_write"] or any(
+            entry["pending_write"] for entry in unresolved) else ""
+        source = ", ".join(f"{entry['key']}={entry['id']}" for entry in unresolved) or None
         raise PipelineError(
             f"{exc}; dataset={receipt['dataset_id'] or name}; "
-            f"confirmed={len(receipt['example_ids'])}; source={receipt['current_source_id']}; "
-            f"receipt={receipt_path}{pending}. Inspect the import before starting a new attempt."
+            f"confirmed={len(receipt['example_ids'])}; source={source}; "
+            f"receipt={receipt_path}{pending_note}. Inspect the import before starting a new attempt."
         ) from exc
     return {"dataset_id": dataset_id, "example_count": len(receipt["example_ids"]), "receipt": str(receipt_path)}

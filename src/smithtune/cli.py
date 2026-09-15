@@ -56,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
     create = curate_sub.add_parser(
         "create", help="filter root traces and import their whole conversations into a new dataset",
-        description="Create a dataset from whole conversations selected through matching root traces. Imports include turns outside the time window.",
+        description="Create a dataset from conversations selected through matching root traces. A root selects its whole thread when it has one, otherwise its trace; thread imports include turns outside the time window.",
     )
     create.add_argument("--workspace-id", required=True)
     create.add_argument("--project-id", required=True)
@@ -64,8 +64,8 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--start-time", required=True, help="inclusive root start time, with timezone")
     create.add_argument("--end-time", required=True, help="exclusive root start time, with timezone")
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
-    create.add_argument("--limit", type=int, help="sample at most this many distinct threads; default: all matches")
-    create.add_argument("--seed", type=int, default=42, help="sampling seed (default: 42)")
+    create.add_argument("--limit", type=int, required=True, help=f"number of distinct conversations to import, at most {curation.MAX_LIMIT}; querying stops once this many are found")
+    create.add_argument("--concurrency", type=int, default=curation.DEFAULT_CONCURRENCY, help=f"conversations fetched and written at once, 1 to {curation.MAX_CONCURRENCY} (default: %(default)s)")
     create.add_argument("--output", type=Path, help="selection file path; default: an automatic path under data/selections; import receipt saved alongside it")
 
     capture_contract = sub.add_parser(
@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> None:
             value = curation.create_dataset(
                 workspace_id=args.workspace_id, project_id=args.project_id,
                 start_time=args.start_time, end_time=args.end_time, name=args.name,
-                filter=args.filter, limit=args.limit, seed=args.seed, output=args.output,
+                filter=args.filter, limit=args.limit, output=args.output, concurrency=args.concurrency,
             )
         elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(

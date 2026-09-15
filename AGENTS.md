@@ -32,7 +32,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 
 ## Preserve the data behavior
 
-- Dataset creation imports whole conversations, including earlier turns and turns outside the selection window.
+- Dataset creation imports whole conversations: a root's thread when it has one, otherwise its single trace. Thread examples include earlier turns and turns outside the selection window.
 - Preparation preserves recorded messages and gathers each example's tool union from all its source LLM runs. Automatic capture is the normal path; a global inference contract is an explicit override.
 - Preparation combines optional top-level tool arguments when shared arguments and other schema fields match. The expanded definition applies to the whole example. Provider built-ins and incompatible definitions still fail, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.
