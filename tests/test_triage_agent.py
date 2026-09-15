@@ -73,10 +73,11 @@ def test_judge_gets_full_messages_in_one_request_without_tools(monkeypatch):
     assert json.loads(model.seen[0][-1].content)["untrusted_trajectory"] == messages
 
 
-def test_fireworks_reasoning_survives_a_tool_round_trip(monkeypatch):
+@pytest.mark.parametrize("model_id,effort", [("deepseek-v4p1-flash", "none"), ("glm-5p3-flash", "low")])
+def test_fireworks_reasoning_survives_a_tool_round_trip(monkeypatch, model_id, effort):
     from smithtune.triage_agent import _model
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
-    model = _model({"provider": "fireworks", "model": "accounts/fireworks/models/deepseek-v4p1-flash"}, 4096)
+    model = _model({"provider": "fireworks", "model": "accounts/fireworks/models/" + model_id}, 4096)
     result = model._create_chat_result({"choices": [{"message": {"role": "assistant", "content": "",
         "reasoning_content": "Need the saved evidence.",
         "tool_calls": [{"id": "call", "type": "function", "function": {"name": "code_mode", "arguments": json.dumps({"code": "read_run('run')"})}}]},
@@ -87,7 +88,7 @@ def test_fireworks_reasoning_survives_a_tool_round_trip(monkeypatch):
     assert payload["messages"][0]["reasoning_content"] == "Need the saved evidence."
     assert "reasoning_content" not in payload["messages"][1]
     assert model.disable_streaming and not model.use_responses_api
-    assert payload["reasoning_effort"] == "none"
+    assert payload["reasoning_effort"] == effort
 
 
 def test_terra_uses_responses_with_reasoning_off(monkeypatch):

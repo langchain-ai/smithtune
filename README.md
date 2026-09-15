@@ -283,8 +283,9 @@ For other models, use `provider:model` in the same list, for example
 The list replaces the council and is saved for confirm and resume; you do not
 need to repeat it. The first judge model also runs the
 coordinator. Terra uses OpenAI Responses with reasoning off. Fireworks council
-calls also request reasoning off; Muse still generates reasoning. Fireworks uses
-its official API and `FIREWORKS_API_KEY`; OpenAI
+calls also request reasoning off; Muse still generates reasoning. Selecting
+GLM-5.3-Flash uses low reasoning because that model cannot turn it off.
+Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
 uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
 `anthropic-gateway` uses the LangSmith Anthropic gateway credential.
 

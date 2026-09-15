@@ -16,6 +16,8 @@ from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL, _set_ski
 
 
 PROVIDERS = ("fireworks", "openai", "anthropic", "anthropic-gateway")
+# GLM-5.3 rejects requests that disable reasoning.
+FIREWORKS_REASONING = {"accounts/fireworks/models/glm-5p3-flash": "low"}
 RESULT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["keep", "reason"],
@@ -96,7 +98,7 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
             body = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
                     "max_tokens" if provider == "fireworks" else "max_completion_tokens": max_tokens}
             if provider == "fireworks" or model == "gpt-5.6-terra":
-                body["reasoning_effort"] = "none"
+                body["reasoning_effort"] = FIREWORKS_REASONING.get(model, "none") if provider == "fireworks" else "none"
             if provider == "fireworks":
                 _set_skill_session()
                 headers.update({"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})

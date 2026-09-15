@@ -33,6 +33,8 @@ test uses paid inference or creates a live deployment.
 The default council is read from the packaged `config.example.json`; CLI,
 Python, and exported skill defaults must agree. Terra uses OpenAI Responses
 with `reasoning.effort=none`; Fireworks calls set `reasoning_effort=none`.
+GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the saved plan
+records that exception.
 Keep the request checks when changing either transport. Bump the triage agent version
 when model transport or evidence presentation changes.
 

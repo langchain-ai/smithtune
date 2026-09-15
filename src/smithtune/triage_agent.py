@@ -6,7 +6,7 @@ import os
 from importlib.resources import files
 
 from smithtune.providers.base import PipelineError
-from smithtune.triage_judges import credential_name
+from smithtune.triage_judges import FIREWORKS_REASONING, credential_name
 
 
 def check_installation() -> None:
@@ -37,7 +37,7 @@ def _model(judge: dict, max_tokens: int):
     model_class = ChatOpenAI
     options = {"use_responses_api": False}
     if provider == "fireworks":
-        options["reasoning_effort"] = "none"
+        options["reasoning_effort"] = FIREWORKS_REASONING.get(judge["model"], "none")
         class FireworksChat(ChatOpenAI):
             # ChatOpenAI intentionally drops provider-specific fields. Retain
             # Fireworks reasoning across tool calls without exposing it as text.
