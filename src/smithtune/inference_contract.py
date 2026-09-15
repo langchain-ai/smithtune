@@ -7,15 +7,19 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from jsonschema.exceptions import SchemaError
-from jsonschema.validators import validator_for
+from jsonschema.validators import Draft3Validator, validator_for
 
 
 class ContractError(ValueError):
     """The inference contract or a request built from it is invalid."""
+
+
+TOOL_MERGE_POLICY = "latest-description-v1"
 
 
 ALLOWED_INFERENCE_SETTINGS = {
@@ -356,6 +360,80 @@ def contract_from_run(run: Mapping[str, Any], *, workspace_id: str) -> dict[str,
     }
 
 
+def _has_schema_reference(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(key in value for key in ("$ref", "$dynamicRef", "$recursiveRef")) or any(
+            _has_schema_reference(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_has_schema_reference(item) for item in value)
+    return False
+
+
+def _merge_optional_arguments(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    """Union optional top-level properties without reconciling other schema changes."""
+    left_function, right_function = left["function"], right["function"]
+    if json_sha256({key: value for key, value in left.items() if key != "function"}) != json_sha256({
+        key: value for key, value in right.items() if key != "function"
+    }) or json_sha256({key: value for key, value in left_function.items() if key != "parameters"}) != json_sha256({
+        key: value for key, value in right_function.items() if key != "parameters"
+    }):
+        return None
+    first, second = left_function["parameters"], right_function["parameters"]
+    # Composition, dependencies, property-count limits, and schema references can
+    # make a property addition change constraints on other arguments.
+    allowed = {"type", "properties", "required", "additionalProperties", "title", "description", "$schema"}
+    for schema in (first, second):
+        if (
+            schema.get("type") != "object" or set(schema) - allowed
+            or validator_for(schema) is Draft3Validator
+            or not isinstance(schema.get("properties", {}), Mapping)
+            or not isinstance(schema.get("additionalProperties", True), bool)
+            or _has_schema_reference(schema)
+        ):
+            return None
+    if {key: value for key, value in first.items() if key != "properties"} != {
+        key: value for key, value in second.items() if key != "properties"
+    }:
+        return None
+    first_properties, second_properties = first.get("properties", {}), second.get("properties", {})
+    changed_names = first_properties.keys() ^ second_properties.keys()
+    if not changed_names or changed_names.intersection(first.get("required", [])):
+        return None
+    if any(json_sha256(first_properties[name]) != json_sha256(second_properties[name])
+           for name in first_properties.keys() & second_properties.keys()):
+        return None
+    merged = copy.deepcopy(left)
+    properties = {**first_properties, **second_properties}
+    merged["function"]["parameters"]["properties"] = {
+        name: copy.deepcopy(properties[name]) for name in sorted(properties)
+    }
+    return merged
+
+
+def _merge_tool_definitions(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    """Use the later description while preserving argument compatibility checks."""
+    merged = copy.deepcopy(left)
+    if "description" in right["function"]:
+        merged["function"]["description"] = right["function"]["description"]
+    else:
+        merged["function"].pop("description", None)
+    if json_sha256(merged) == json_sha256(right):
+        return merged
+    return _merge_optional_arguments(merged, right)
+
+
+def _run_timestamp(run: Mapping[str, Any]) -> datetime:
+    value = run.get("start_time")
+    if value is None:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except (ValueError, TypeError) as exc:
+        raise ContractError(f"run {run['id']}: invalid start_time") from exc
+    return timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp.astimezone(UTC)
+
+
 def contract_from_runs(
     runs: Sequence[Mapping[str, Any]], *, workspace_id: str,
     source_run_id: str | None = None, thread_id: str | None = None,
@@ -365,8 +443,11 @@ def contract_from_runs(
         raise ContractError("no LLM runs were returned for the source trajectory")
     tools: dict[str, dict[str, Any]] = {}
     tool_sources: dict[str, str] = {}
+    source_times = {run["id"]: run.get("start_time") for run in runs}
+    description_replacements: list[dict[str, Any]] = []
+    undated_tools: set[str] = set()
     source_run = None
-    for run in sorted(runs, key=lambda item: (item.get("start_time") or "", item["id"])):
+    for run in sorted(runs, key=lambda item: (_run_timestamp(item), item["id"])):
         run_id = run["id"]
         if run.get("run_type") != "llm":
             raise ContractError(f"run {run_id} is not an LLM run")
@@ -389,10 +470,30 @@ def contract_from_runs(
             raise ContractError(f"run {run_id}: {exc}") from exc
         for tool in captured:
             name = tool["function"]["name"]
-            if name in tools and tools[name] != tool:
-                raise ContractError(
-                    f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
-                )
+            if run.get("start_time") is None:
+                undated_tools.add(name)
+            if name in tools and json_sha256(tools[name]) != json_sha256(tool):
+                merged = _merge_tool_definitions(tools[name], tool)
+                if merged is None:
+                    raise ContractError(
+                        f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
+                    )
+                old_description = tools[name]["function"].get("description")
+                new_description = tool["function"].get("description")
+                if old_description != new_description:
+                    previous_run_id = tool_sources[name]
+                    if name in undated_tools:
+                        raise ContractError(f"tool {name!r}: changed descriptions require source run start_time")
+                    description_replacements.append({
+                        "tool_name": name,
+                        "previous_run_id": previous_run_id,
+                        "selected_run_id": run_id,
+                        "previous_run_start_time": source_times[previous_run_id],
+                        "selected_run_start_time": run["start_time"],
+                        "previous_description_sha256": json_sha256(old_description),
+                        "selected_description_sha256": json_sha256(new_description),
+                    })
+                tool = merged
             tools[name] = tool
             tool_sources[name] = run_id
     if source_run_id is None:
@@ -414,6 +515,7 @@ def contract_from_runs(
                 "source_thread_id": thread_id,
                 "source_run_ids": sorted(run["id"] for run in runs),
                 "source_trace_ids": sorted({run["trace_id"] for run in runs}),
+                **({"tool_description_replacements": description_replacements} if description_replacements else {}),
             },
         }
     if source_run is None:
@@ -429,6 +531,7 @@ def contract_from_runs(
     combined["extra"]["invocation_params"] = {**invocation, "tools": [tools[name] for name in sorted(tools)]}
     payload = contract_from_run(combined, workspace_id=workspace_id)
     payload["provenance"].update({
+        **({"tool_description_replacements": description_replacements} if description_replacements else {}),
         "source_thread_id": thread_id,
         "source_run_ids": sorted(run["id"] for run in runs),
         "source_trace_ids": sorted({run["trace_id"] for run in runs}),

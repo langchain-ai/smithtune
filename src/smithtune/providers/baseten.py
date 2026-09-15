@@ -41,8 +41,8 @@ MODEL_SPECS = {
         tokenizer_model="Qwen/Qwen3.8-27B",
         tokenizer_revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
         renderer="hf_assistant",
-        max_seq_len=131_072,
-        trainer_max_seq_len=131_072,
+        max_seq_len=262_144,
+        trainer_max_seq_len=262_144,
         thinking_trace_history_mode="preserved",
         supports_reasoning_content=True,
         requires_tool_declarations=True,
@@ -629,6 +629,7 @@ class BasetenProvider:
         *,
         model_options: ModelOptions,
         inference_contract: InferenceContract | None = None,
+        source_workspace_id: str | None = None,
         reasoning_policy: ReasoningPolicy = "omit",
         validation_fraction: float | None = None,
         test_fraction: float | None = None,
@@ -648,6 +649,7 @@ class BasetenProvider:
             model,
             data_dir,
             inference_contract=inference_contract,
+            source_workspace_id=source_workspace_id,
             reasoning_policy=reasoning_policy,
             validation_fraction=(
                 DEFAULT_VALIDATION_FRACTION if validation_fraction is None else validation_fraction

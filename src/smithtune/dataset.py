@@ -6,6 +6,11 @@ import copy
 import hashlib
 import json
 import math
+import random
+import re
+import subprocess
+import sys
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -16,6 +21,7 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
+    TOOL_MERGE_POLICY,
     contract_from_runs,
     load_inference_contract,
     parse_inference_contract,
@@ -61,6 +67,14 @@ class Audit:
     readable_reasoning_blocks: int = 0
 
 
+def _run_langsmith(command: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    try:
+        return _run(command, capture=capture)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
+        raise PipelineError(detail) from None
+
+
 def _langsmith_dataset_command(workspace_id: str, dataset_id: str) -> list[str]:
     return [
         "langsmith", "dataset", "get", dataset_id,
@@ -104,10 +118,21 @@ def _query_contract_runs(
     runs: dict[str, dict[str, Any]] = {}
     cursors: set[str] = set()
     while True:
-        result = runner([
-            "langsmith", "api", "runs/query", "--workspace", workspace_id,
-            "--body", _canonical(body),
-        ], capture=True)
+        for attempt in range(6):
+            try:
+                result = runner([
+                    "langsmith", "api", "runs/query", "--workspace", workspace_id,
+                    "--body", _canonical(body),
+                ], capture=True)
+                break
+            except PipelineError as exc:
+                retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out)\b", str(exc), re.I)
+                if attempt == 5 or not retryable:
+                    raise
+                delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
+                reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
+                print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+                time.sleep(delay)
         try:
             response = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
@@ -156,7 +181,7 @@ def capture_inference_contract(
     run_id: str,
     output: Path,
     *,
-    runner: Callable[..., Any] = _run,
+    runner: Callable[..., Any] = _run_langsmith,
 ) -> dict[str, Any]:
     """Collect all function tools in the selected LLM run's conversation thread."""
     sources = _query_contract_runs(workspace_id, {"id": [run_id], "limit": 1}, runner=runner)
@@ -201,7 +226,7 @@ def download_dataset(
     workspace_id: str,
     dataset_id: str,
     raw_dir: Path,
-    runner: Callable[..., Any] = _run,
+    runner: Callable[..., Any] = _run_langsmith,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Download every example and preserve the raw LangSmith data."""
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -351,15 +376,20 @@ def convert_message(
         calls = [part for part in content if isinstance(part, dict) and part.get("type") == "tool_call"]
         if len(text) + len(calls) != len(content):
             raise PipelineError("only text and tool_call content blocks are supported")
-        if text and calls:
-            raise PipelineError("interleaved text and tool_call blocks cannot be converted without reordering")
+        seen_tool_call = False
+        for part in content:
+            if part["type"] == "tool_call":
+                seen_tool_call = True
+            elif seen_tool_call:
+                raise PipelineError("text after tool_call blocks cannot be converted without reordering")
         if calls:
             if role != "ai":
                 raise PipelineError("tool_call blocks are valid only in ai messages")
-            converted["content"] = ""
+            converted["content"] = _text_parts(text) if text else ""
             converted["tool_calls"] = []
             for call in calls:
-                if not isinstance(call.get("args"), dict):
+                args = call.get("args", {})
+                if not isinstance(args, dict):
                     raise PipelineError("tool_call args must be an object")
                 if not all(isinstance(call.get(key), str) and call[key] for key in ("id", "name")):
                     raise PipelineError("tool_call id and name must be non-empty strings")
@@ -369,7 +399,7 @@ def convert_message(
                         "type": "function",
                         "function": {
                             "name": call["name"],
-                            "arguments": json.dumps(call["args"], ensure_ascii=False, separators=(",", ":")),
+                            "arguments": json.dumps(args, ensure_ascii=False, separators=(",", ":")),
                         },
                     }
                 )
@@ -417,32 +447,20 @@ def _has_message_content(message: dict[str, Any]) -> bool:
     return bool(has_text or message.get("tool_calls") or message.get("reasoning_content"))
 
 
-def _source_identity(example: dict[str, Any]) -> dict[str, str | None]:
-    """Resolve native and legacy LangSmith source identities."""
+SOURCE_SCOPES = ("thread", "trace")
+
+
+def _source_identity(example: dict[str, Any]) -> dict[str, str]:
+    """Read the conversation scope and its ID from example metadata."""
     metadata = example.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
-    native_thread_id = example.get("source_thread_id")
-    legacy_thread_id = metadata.get("source_thread_id")
-    native_trace_id = example.get("source_trace_id")
-    legacy_trace_id = metadata.get("source_trace_id")
-    for label, value in (
-        ("source_thread_id", native_thread_id),
-        ("metadata.source_thread_id", legacy_thread_id),
-        ("source_trace_id", native_trace_id),
-        ("metadata.source_trace_id", legacy_trace_id),
-    ):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise PipelineError(f"example source identity {label} must be a non-empty string")
-    if native_thread_id and legacy_thread_id and native_thread_id != legacy_thread_id:
-        raise PipelineError("example has conflicting source_thread_id values")
-    if native_trace_id and legacy_trace_id and native_trace_id != legacy_trace_id:
-        raise PipelineError("example has conflicting source_trace_id values")
-    thread_id = native_thread_id or legacy_thread_id
-    trace_id = legacy_trace_id or native_trace_id
-    if not thread_id and not trace_id:
-        raise PipelineError("example has no source thread or trace identity")
-    return {"source_thread_id": thread_id, "source_trace_id": trace_id}
+    scope, scope_id = metadata.get("source_scope"), metadata.get("source_scope_id")
+    if scope not in SOURCE_SCOPES:
+        raise PipelineError("example metadata source_scope must be thread or trace")
+    if not isinstance(scope_id, str) or not scope_id:
+        raise PipelineError("example metadata source_scope_id must be a non-empty string")
+    return {"source_scope": scope, "source_scope_id": scope_id}
 
 
 def validate_trajectories(
@@ -537,14 +555,43 @@ def validate_trajectories(
     )
 
 
+def _source_workspace(
+    example: dict[str, Any], workspace_id: str, source_workspace_id: str | None,
+) -> str:
+    metadata = example.get("metadata") or {}
+    value = metadata.get("source_workspace_id", source_workspace_id if source_workspace_id is not None else workspace_id)
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise PipelineError(f"example {example['id']}: source workspace ID must be a non-empty string without surrounding whitespace")
+    return value
+
+
 def capture_example_contracts(
-    workspace_id: str, examples: list[dict[str, Any]], *, runner: Callable[..., Any] = _run,
+    workspace_id: str, examples: list[dict[str, Any]], *,
+    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
+    checkpoint_path: Path | None = None,
 ) -> dict[str, InferenceContract]:
     """Collect a separate union of function tools for each source trajectory."""
     contracts: dict[str, InferenceContract] = {}
-    sources: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
+    checkpoint_identity = json_sha256({
+        "schema_version": 1, "workspace_id": workspace_id,
+        "source_workspace_id": source_workspace_id, "examples": examples,
+        "tool_merge_policy": TOOL_MERGE_POLICY,
+    })
+    if checkpoint_path is not None and checkpoint_path.exists():
+        checkpoint = _load_json(checkpoint_path)
+        if isinstance(checkpoint, dict) and checkpoint.get("identity") == checkpoint_identity:
+            payload = checkpoint.get("contracts")
+            if checkpoint.get("contracts_sha256") != json_sha256(payload):
+                raise PipelineError(f"capture checkpoint hash mismatch; remove {checkpoint_path} and retry")
+            contracts = _parse_example_contracts(payload)
+            if not set(contracts).issubset(example["id"] for example in examples):
+                raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
+            print(f"Resuming tool capture: {len(contracts)}/{len(examples)} examples already saved", file=sys.stderr)
+    sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for example in examples:
         example_id = example["id"]
+        if example_id in contracts:
+            continue
         try:
             saved_triage = (example.get("metadata") or {}).get("smithtune_triage")
             if saved_triage is not None:
@@ -555,34 +602,41 @@ def capture_example_contracts(
                                              source_project_id=example["metadata"].get("source_project_id"))
                 contracts[example_id] = parse_inference_contract(payload)
                 continue
+            source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
             identity = _source_identity(example)
-            thread_id, trace_id = identity["source_thread_id"], identity["source_trace_id"]
+            scope, scope_id = identity["source_scope"], identity["source_scope_id"]
             metadata = example.get("metadata") or {}
             project_id = example.get("source_session_id") or metadata.get("source_project_id")
             if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
                 raise PipelineError("conflicting source project IDs")
-            if project_id is None and trace_id:
-                roots = _query_contract_runs(workspace_id, {"id": [trace_id], "limit": 1}, runner=runner)
-                if len(roots) != 1 or roots[0]["id"] != trace_id:
-                    raise PipelineError(f"source trace root {trace_id} was not found")
+            if project_id is None and scope == "trace":
+                roots = _query_contract_runs(source_workspace, {"id": [scope_id], "limit": 1}, runner=runner)
+                if len(roots) != 1 or roots[0]["id"] != scope_id:
+                    raise PipelineError(f"source trace root {scope_id} was not found")
                 project_id = roots[0].get("session_id")
             if not isinstance(project_id, str) or not project_id:
                 raise PipelineError("missing source project ID; use source_session_id or metadata.source_project_id, or supply --inference-contract")
-            key = (project_id, thread_id, None if thread_id else trace_id)
+            key = (source_workspace, project_id, scope, scope_id)
             if key not in sources:
-                if thread_id:
-                    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, runner=runner)
+                if scope == "thread":
+                    runs = _query_thread_llm_runs(source_workspace, project_id, scope_id, runner=runner)
                 else:
-                    runs = _query_contract_runs(workspace_id, {
+                    runs = _query_contract_runs(source_workspace, {
                         "session": [project_id], "run_type": "llm",
-                        "filter": f"eq(trace_id,{json.dumps(trace_id)})",
+                        "filter": f"eq(trace_id,{json.dumps(scope_id)})",
                     }, runner=runner)
-                    if any(run.get("trace_id") != trace_id for run in runs):
+                    if any(run.get("trace_id") != scope_id for run in runs):
                         raise PipelineError("LangSmith returned a run from a different trace")
-                sources[key] = contract_from_runs(runs, workspace_id=workspace_id, thread_id=thread_id)
+                sources[key] = contract_from_runs(
+                    runs, workspace_id=source_workspace, thread_id=scope_id if scope == "thread" else None,
+                )
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
+            if checkpoint_path is not None:
+                saved = {key: contract.to_dict() for key, contract in contracts.items()}
+                _json_dump(checkpoint_path, {"identity": checkpoint_identity, "contracts": saved,
+                                            "contracts_sha256": json_sha256(saved)})
         except (ContractError, PipelineError) as exc:
             raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
     return contracts
@@ -603,15 +657,19 @@ def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
 
 def _example_contract_snapshot(
     workspace_id: str, dataset_id: str, examples: list[dict[str, Any]],
-    source_sha: str, raw_dir: Path, *, fetch: bool,
+    source_sha: str, raw_dir: Path, *, fetch: bool, source_workspace_id: str | None = None,
 ) -> dict[str, InferenceContract]:
     path = raw_dir / "example_contracts.json"
     identity = {"schema_version": 1, "workspace_id": workspace_id,
-                "dataset_id": dataset_id, "source_examples_sha256": source_sha}
+                "dataset_id": dataset_id, "source_examples_sha256": source_sha,
+                "tool_merge_policy": TOOL_MERGE_POLICY}
     if fetch:
-        contracts = capture_example_contracts(workspace_id, examples)
+        checkpoint_path = raw_dir / "example_contracts.partial.json"
+        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id,
+                                             checkpoint_path=checkpoint_path)
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
         _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
+        checkpoint_path.unlink(missing_ok=True)
     if not path.exists():
         raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
     snapshot = _load_json(path)
@@ -623,6 +681,13 @@ def _example_contract_snapshot(
     contracts = _parse_example_contracts(payload)
     if set(contracts) != {example["id"] for example in examples}:
         raise PipelineError("cached inference contracts do not cover every example")
+    for example in examples:
+        expected_workspace = _source_workspace(example, workspace_id, source_workspace_id)
+        if contracts[example["id"]].provenance.get("source_workspace_id") != expected_workspace:
+            raise PipelineError(
+                f"cached inference contract for example {example['id']} has a different source workspace; "
+                "prepare again without --no-fetch"
+            )
     return contracts
 
 
@@ -678,11 +743,8 @@ def prepare_sft_rows(
     return rows
 
 
-def _source_group(row: dict[str, Any]) -> tuple[str, str]:
-    source = row["_source"]
-    if source.get("source_thread_id"):
-        return ("thread", source["source_thread_id"])
-    return ("trace", source["source_trace_id"])
+def _split_rank(row: dict[str, Any]) -> str:
+    return hashlib.sha256(f"{SPLIT_SEED}:{row['_source']['source_scope_id']}".encode()).hexdigest()
 
 
 def split_rows(
@@ -690,53 +752,44 @@ def split_rows(
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Assign each conversation to a partition by hashing its source scope ID.
+
+    Every example is one whole conversation, so rows are split independently;
+    the hash keeps assignments stable across runs and row order.
+    """
     if not 0 <= validation_fraction <= 1 or not 0 <= test_fraction <= 1:
         raise PipelineError("validation and test fractions must be between zero and one")
     if validation_fraction + test_fraction > 1:
         raise PipelineError("validation and test fractions cannot total more than one")
 
-    ranked_groups = sorted(
-        {_source_group(row) for row in rows},
-        key=lambda group: hashlib.sha256(
-            (
-                f"{SPLIT_SEED}:{group[1]}"
-                if group[0] == "thread"
-                else f"{SPLIT_SEED}:trace:{group[1]}"
-            ).encode()
-        ).hexdigest(),
-    )
+    ranked = sorted(rows, key=_split_rank)
     train_fraction = 1 - validation_fraction - test_fraction
     if math.isclose(train_fraction, 0, abs_tol=1e-9):
         # Fractions that sum to one can leave a floating-point remainder that
-        # would otherwise force a one-group training partition.
+        # would otherwise force a one-row training partition.
         train_fraction = 0.0
     required_partitions = sum(
         fraction > 0
         for fraction in (train_fraction, validation_fraction, test_fraction)
     )
-    if len(ranked_groups) < required_partitions:
-        raise PipelineError("not enough source thread or trace groups for the requested non-zero fractions")
+    if len(ranked) < required_partitions:
+        raise PipelineError("not enough conversations for the requested non-zero fractions")
 
     validation_count = 0
     if validation_fraction > 0:
-        validation_count = max(1, round(len(ranked_groups) * validation_fraction))
+        validation_count = max(1, round(len(ranked) * validation_fraction))
         validation_count = min(
             validation_count,
-            len(ranked_groups) - int(train_fraction > 0) - int(test_fraction > 0),
+            len(ranked) - int(train_fraction > 0) - int(test_fraction > 0),
         )
     test_count = 0
     if test_fraction > 0:
-        test_count = max(1, round(len(ranked_groups) * test_fraction))
-        test_count = min(
-            test_count,
-            len(ranked_groups) - validation_count - int(train_fraction > 0),
-        )
-    validation_groups = set(ranked_groups[:validation_count])
-    test_groups = set(ranked_groups[validation_count : validation_count + test_count])
-    held_out_groups = validation_groups | test_groups
-    train = [row for row in rows if _source_group(row) not in held_out_groups]
-    validation = [row for row in rows if _source_group(row) in validation_groups]
-    test = [row for row in rows if _source_group(row) in test_groups]
+        test_count = max(1, round(len(ranked) * test_fraction))
+        test_count = min(test_count, len(ranked) - validation_count - int(train_fraction > 0))
+    validation = ranked[:validation_count]
+    test = ranked[validation_count : validation_count + test_count]
+    held_out = {id(row) for row in validation + test}
+    train = [row for row in rows if id(row) not in held_out]
     return train, validation, test
 
 
@@ -777,16 +830,11 @@ def _validate_split_isolation(
     validation: list[dict[str, Any]],
     test: list[dict[str, Any]],
 ) -> None:
+    """Reject identical conversations recorded under different IDs across partitions."""
     partitions = {"train": train, "validation": validation, "test": test}
     for left_index, (left_name, left_rows) in enumerate(partitions.items()):
-        left_groups = {_source_group(row) for row in left_rows}
         left_content = {_trajectory_content_hash(row) for row in left_rows}
         for right_name, right_rows in list(partitions.items())[left_index + 1 :]:
-            right_groups = {_source_group(row) for row in right_rows}
-            if overlap := left_groups & right_groups:
-                raise PipelineError(
-                    f"source group overlap between {left_name} and {right_name}: {sorted(overlap)[0]}"
-                )
             right_content = {_trajectory_content_hash(row) for row in right_rows}
             if left_content & right_content:
                 raise PipelineError(f"content hash overlap between {left_name} and {right_name}")
@@ -824,6 +872,7 @@ def prepare_dataset(
     data_dir: Path,
     *,
     inference_contract: InferenceContract | None = None,
+    source_workspace_id: str | None = None,
     reasoning_policy: ReasoningPolicy = "omit",
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
@@ -845,7 +894,18 @@ def prepare_dataset(
     if inference_contract is None:
         example_contracts = _example_contract_snapshot(
             workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
+            source_workspace_id=source_workspace_id,
         )
+    description_replacements = []
+    captured_contracts = example_contracts or ({"global": inference_contract} if inference_contract else {})
+    for example_id, contract in captured_contracts.items():
+        for replacement in contract.provenance.get("tool_description_replacements", []):
+            description_replacements.append({
+                **replacement,
+                **({"example_id": example_id} if example_contracts is not None else {}),
+                "source_workspace_id": contract.provenance.get("source_workspace_id"),
+                "source_thread_id": contract.provenance.get("source_thread_id"),
+            })
     rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
                             reasoning_policy=reasoning_policy, model=model)
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
@@ -857,7 +917,10 @@ def prepare_dataset(
         rendered = {}
     train, validation, test = split_rows(rows, validation_fraction, test_fraction)
     _validate_split_isolation(train, validation, test)
-    audit_value = {**asdict(audit), **rendered}
+    audit_value = {
+        **asdict(audit), **rendered,
+        "tool_description_replacements": len(description_replacements),
+    }
     manifest = {
         "schema_version": 1,
         "created_at_utc": _utc_now(),
@@ -868,11 +931,7 @@ def prepare_dataset(
             "examples": expected_count,
         },
         "split": {
-            "method": (
-                "sha256(seed:source_thread_id)"
-                if all(row["_source"].get("source_thread_id") for row in rows)
-                else "sha256(seed:source_thread_id; seed:trace:source_trace_id fallback)"
-            ),
+            "method": "sha256(seed:source_scope_id)",
             "seed": SPLIT_SEED,
             "validation_fraction": validation_fraction,
             "test_fraction": test_fraction,
@@ -915,6 +974,7 @@ def prepare_dataset(
     _jsonl_dump(data_dir / "prepared" / "test.jsonl", test)
     _json_dump(data_dir / "prepared" / "manifest.json", manifest)
     _json_dump(data_dir / "prepared" / "warnings.json", audit.duplicate_message_warnings)
+    _json_dump(data_dir / "prepared" / "tool_description_replacements.json", description_replacements)
     _json_dump(data_dir / "prepared" / "rejected.json", rejected)
     if inference_contract is not None:
         _json_dump(

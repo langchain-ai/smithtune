@@ -25,6 +25,14 @@ Install these companion tools for the operations you use:
 | [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Trace selection, dataset creation, contract capture, and fetching data during preparation |
 | [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) | Fireworks deployment and undeployment |
 
+Install the LangSmith CLI with the official installer, then start a new shell
+or refresh your PATH so `langsmith` is available:
+
+```bash
+curl -fsSL https://cli.langsmith.com/install.sh | sh
+langsmith --help
+```
+
 Follow each tool's installation and authentication instructions, then run
 `smithtune doctor` to check local setup. It does not validate credentials.
 
@@ -39,6 +47,10 @@ Configure credentials in your environment:
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
 | Baseten preparation and training | `BASETEN_API_KEY` |
 | Replay judge | `ANTHROPIC_API_KEY` containing a **LangSmith gateway key**, or `ANTHROPIC_CUSTOM_HEADERS` |
+
+Fireworks calls use `https://api.fireworks.ai` for training and deployment control,
+and `https://api.fireworks.ai/inference/v1` for inference. Temporary evaluation
+uses the REST API directly and does not require `firectl`; manual cleanup does.
 
 ## Using with a coding agent
 
@@ -59,171 +71,156 @@ smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
 
-Each example contains a whole conversation, including turns outside the filter
-window. Use the returned dataset ID in `prepare`.
+Each matching root selects its whole thread when it has a thread ID, otherwise
+its single trace. Thread examples include turns outside the filter window. Use
+the returned dataset ID in `prepare`.
 
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
-- All matching threads are included; use `--limit 100` to sample up to 100
+- `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
+- Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
 - Choose a new dataset name. If an import fails, inspect its receipt in `data/selections/` before retrying
 
-## Select SFT traces with model judges
+## Label traces with an agent council
 
-Use `dataset triage` to label traces before creating the training dataset.
-A judge is a model that checks recorded behavior against the selection rules.
-Each trace gets `keep: 1` or `keep: 0`, a completion status, reasons, and evidence.
-This checks the training examples; `evaluate` checks the trained model.
+`dataset triage` downloads traces locally and labels each one for SFT.
+It starts a Deep Agent coordinator, which uses Python code to launch judge
+subagents. The default council has **three independent Fireworks Kimi K3
+judges** (`accounts/fireworks/models/kimi-k3`). Each judge gets fresh context.
+This selects training examples; `evaluate` tests a trained model.
 
-This adds a judging step between local trace capture and dataset creation:
-
-```text
-LangSmith traces -> local snapshot -> Deep Agent coordinator
-                                           |
-                                      Python code mode
-                                           |
-                                    judge subagents
-                                           |
-                                    checked 0/1 labels
-                                           |
-                    dataset create --triage-dir -> prepare -> plan -> train
-```
-
-First download and save the source evidence without calling a judge:
-
-```bash
-smithtune dataset triage \
-  --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --limit 100 --output-dir data/triage --dry-run
-```
-
-Review `data/triage/plan.json`. Then repeat the same command with `--confirm`
-in place of `--dry-run` to run paid judging. The default is one
-`claude-sonnet-5` judge through the Anthropic gateway. Use `--config judges.json`
-on both commands to set 1–16 named judge slots and optional rules:
-
-```json
-{
-  "judges": [
-    {"name": "judge-1", "provider": "anthropic-gateway", "model": "claude-sonnet-5"},
-    {"name": "judge-2", "provider": "anthropic-gateway", "model": "claude-sonnet-5"},
-    {"name": "judge-3", "provider": "anthropic-gateway", "model": "claude-sonnet-5"}
-  ],
-  "rules": ["Drop answers that claim an action succeeded without evidence."]
-}
-```
-
-Each slot makes a fresh call for each trace. Slots can use the same model or
-different models. All slots must return a valid vote. A strict majority keeps
-the trace; ties drop it. An invalid or failed vote makes the label incomplete
-with `keep: 0`. It is not counted as a quality failure.
-
-| Judge provider | Credential | Endpoint |
-| --- | --- | --- |
-| `fireworks` | `FIREWORKS_API_KEY` | Official Fireworks inference API |
-| `openai` | `OPENAI_API_KEY` | Official OpenAI API |
-| `anthropic` | `SMITHTUNE_ANTHROPIC_API_KEY` | Official Anthropic API |
-| `anthropic-gateway` | `ANTHROPIC_API_KEY` or `ANTHROPIC_CUSTOM_HEADERS` | LangSmith Anthropic gateway |
-
-Use a model ID available to the selected provider. Direct Anthropic uses a
-separate variable to avoid sending the existing gateway key to another service.
-
-Selection and recovery:
-
-- The time window and `--filter` select root traces. `--limit` defaults to 100 roots, sampled with `--seed 42` before thread expansion.
-- Selected threads expand to all turns, including earlier turns outside the window. Every expanded trace is judged in its recorded context. Standalone traces are supported.
-- Messages and the full run tree are saved in `snapshot.json`. Missing pages, active traces, and unsupported message formats stop the snapshot before paid judging. Queries have a 1,000-page limit; thread expansion has a 10,000-trace limit.
-- Evidence is treated as data. Judges cannot execute recorded tools. Quotes must match an actual message or run.
-- Default limits are 4 concurrent tasks, 3 attempts per task, 200,000 input characters, and 4,096 output tokens. Use `--concurrency`, `--attempts`, `--max-input-chars`, and `--max-output-tokens` to change them. Input includes the rubric and full evidence; it is never shortened to fit.
-- Read `summary.json`, `report.md`, `labels.jsonl`, and `judgments.jsonl`. The summary includes the number of eligible training conversations. An incomplete run prints its summary and exits with status 1.
-- Repeat the same command and output directory to retry failed votes. Successful votes are reused. Source, rubric, model, runner, and input/output limits must match. Changed settings require a new output directory. One process can use the directory at a time.
-
-Create a dataset from the accepted saved conversations:
-
-```bash
-smithtune dataset create \
-  --triage-dir data/triage --name selected-sft --confirm
-```
-
-Only complete conversations whose **every trace passes** are eligible. This
-matters because preparation trains on all assistant messages in each example.
-One passing turn cannot admit a rejected turn from the same thread. Conversations
-with unsupported tool schemas are excluded and counted in the summary.
-
-The import uses the saved messages and tool schemas. It does not fetch the
-live source again. The returned dataset ID goes to `prepare` below. Preparation
-checks the saved message hash, even with `--no-fetch` or a global contract.
-Review `dataset-import.json` after a partial write; imports do not resume or
-repeat automatically. Other complete conversations can be imported while some
-labels remain incomplete. Keep an independent test set for model comparisons.
-
-### Deep Agents and the portable skill
-
-Install the optional [Deep Agents](https://github.com/langchain-ai/deepagents)
-extra to run a coordinator with code mode and judge subagents:
+Install the optional agent support and set `FIREWORKS_API_KEY` and
+`LANGSMITH_API_KEY` in your environment:
 
 ```bash
 uv tool install --upgrade --python 3.12 \
   'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
-Label an existing local snapshot with:
+**1. Download and preview.** Supply the source only on the first run:
 
 ```bash
-smithtune dataset triage --output-dir data/triage \
-  --runner deepagent --config judges.json --confirm
+smithtune dataset triage data/triage \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --limit 100
 ```
 
-Once `snapshot.json` exists, source flags can be omitted. The CLI reads the
-saved local evidence without querying LangSmith again. Labels stay local;
-triage does not write feedback to the tracing project.
+This saves the messages and full run trees in `snapshot.json`, and the council
+settings and vote count in `plan.json`. It makes no judge calls. Selected
+threads expand to their full history, including turns outside the time window.
+Thus the number of traces to judge can exceed `--limit`.
 
-One Deep Agent loads the packaged skill and uses Python code to list pending
-trace/judge pairs and dispatch batches of judge subagents. It can also dispatch
-an individual judge with the `task` tool. The first configured judge model
-serves as the coordinator. Each slot uses its configured model for judging.
-The default `--runner api` remains available without the optional agent runtime.
+**2. Label, or resume an interrupted run:**
 
-Code runs in a Monty sandbox with `pending_tasks`, `read_trace`, and
-`judge_batch` functions. It has no shell, network, environment, or host file
-access. Each code call has 32 MiB of memory, a 5-second execution limit, and at
-most 256 host calls; judge batches have at most 128 pairs. `--concurrency`
-limits active judge tasks across batches. Duplicate dispatches cannot repeat
-paid votes within the same run.
+```bash
+smithtune dataset triage data/triage --confirm
+```
 
-Each judge gets a fresh Deep Agent with the full saved trace, preceding context,
-and run tree. Judges read the rubric but cannot execute recorded tools or
-delegate further. Automatic summarization is disabled. Inputs above the limit
-remain incomplete. A judge can also report missing evidence as incomplete.
-Each judge attempt has at most 12 graph steps. The coordinator has at most
-`min(1000, 24 + 4 * pending_tasks)` graph steps, so its calls add to judge cost.
+The CLI reuses the saved source and settings. It saves each vote as it finishes.
+Repeating the command retries incomplete votes; a completed run makes no new
+agent calls. The directory defaults to `data/triage` if omitted.
 
-Only validated subagent votes enter the label files. The coordinator cannot
-replace them with its own final answer. Votes are saved as subagents finish;
-`agent-state.json` records coordinator status and code-call counts. Resume
-reuses successful votes; a fully completed run starts no agent. Coordinator
-skill changes require a new output directory, like rubric or model changes.
+```text
+LangSmith traces
+      | download once
+      v
+Local snapshot -> Deep Agent coordinator -> Python code -> judge subagents
+      |                                                        |
+      +---- conversation + run index + read_run(id) ------------+
+                                                               |
+                                                   checked votes and labels
+                                                               |
+                                          dataset create --triage-dir
+                                                               |
+                                                   prepare -> plan -> train
+```
 
-Any agent that can run the CLI can use the same portable skill:
+Judges read the conversation and a run index. They use read-only Python code
+to inspect original run inputs and outputs as needed. Repeated run payloads
+stay out of the initial prompt. Evidence is never silently shortened. Judges
+cannot run recorded tools, access host files or secrets, or delegate further.
+The coordinator cannot write a verdict in place of a judge.
+
+Every judge must return a valid vote with a reason and exact evidence quotes.
+A strict majority keeps the trace; ties drop it. A failed vote leaves the trace
+incomplete, which is separate from a quality rejection. Read `report.md` for
+sample decisions, `summary.json` for counts, `labels.jsonl` for per-trace 0/1
+labels, and `judgments.jsonl` for all votes and evidence. Labels stay local;
+triage does not write feedback to LangSmith. Check a sample of model decisions.
+
+**3. Create a dataset from accepted conversations:**
+
+```bash
+smithtune dataset create --triage-dir data/triage --name selected-sft --confirm
+```
+
+Every trace in a conversation must pass. This prevents a passing turn from
+bringing rejected earlier behavior into training. Unsupported tool contracts
+are excluded and counted in the summary. Import uses the saved messages and
+tool schemas without fetching the source again. Pass the returned dataset ID
+to `prepare` below. Keep a separate test set for model comparisons.
+
+After a partial import, inspect `dataset-import.json` before retrying. Dataset
+imports do not resume automatically. Other complete conversations can still
+be imported when some trace labels are incomplete.
+
+### Change the council or selection rules
+
+Use `--judge provider:model` once per desired judge and `--rule` for project
+rules on the preview command. These replace the default council and rules:
+
+```bash
+smithtune dataset triage data/custom-council \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --judge fireworks:accounts/fireworks/models/kimi-k3 \
+  --judge 'openai:<model-id>' \
+  --judge 'anthropic:<model-id>' \
+  --rule 'Drop answers that claim an action succeeded without evidence.'
+```
+
+Use model IDs available to your accounts. The first judge model also runs the
+coordinator. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
+uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
+`anthropic-gateway` uses the LangSmith Anthropic gateway credential.
+
+`--concurrency` sets the maximum active judge tasks (default 4). Advanced
+options remain supported: `--config` for a judge JSON file, `--runner api` for
+direct calls without agents, `--attempts` (default 3), `--max-input-chars`
+(default 200,000), and `--max-output-tokens` (default 4,096). Agent input limits
+apply to the conversation, run index, and rubric; direct calls include full
+run payloads. Oversize inputs remain incomplete. Each judge attempt has at most
+24 graph steps. Coordinator calls add to judge cost. `agent-state.json` records
+its status; votes include judge code-call counts and run IDs read.
+
+The source defaults to a seeded sample of 100 matching roots before thread
+expansion. `--filter` accepts LangSmith root-run filters. Once judging starts,
+changed evidence, rules, models, skill, or input/output limits require a new
+run directory. One process can use a directory at a time.
+
+Any CLI-capable agent can load the same portable skill:
 
 ```bash
 smithtune skill export --output ./skills
 ```
 
-This writes `skills/sft-trace-triage/SKILL.md`, the judge rubric, and an example
-config. Point your agent at that directory or use its normal skill loader.
-The skill uses the CLI for fetching, labels, resume, and dataset creation.
+This exports `sft-trace-triage/SKILL.md`, the judge rubric, and an optional
+config example. The skill uses the CLI for download, labels, resume, and import.
 
 ## Prepare data
 
 Preparation collects each conversation's tools, including tools that were never
 called. Tools added mid-run appear from the start of the training example.
-Provider built-ins (such as tool search) and conflicting definitions of the same
-tool are unsupported.
+Optional top-level arguments are combined when the rest of the tool definition
+matches; the expanded schema applies to the whole conversation. Provider built-ins
+(such as tool search) and incompatible tool definitions remain unsupported.
 
-Existing datasets need source thread/trace and project IDs; CLI-created datasets
+Existing datasets need `source_scope` (thread or trace), `source_scope_id`, and
+`source_project_id` in each example's metadata; CLI-created datasets
 include these automatically. Recorded system messages are preserved; the default
 Qwen renderer requires them at the start.
 
@@ -254,7 +251,7 @@ automatically and select the appropriate tokenizer and formatting.
 
 | Provider | Model alias | Provider model ID | Training context limit |
 | --- | --- | --- | --- |
-| Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 131,072 |
+| Baseten Loops | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | 262,144 |
 | Baseten Loops | `kimi-k3` | `moonshotai/Kimi-K3` | 131,072 |
 | Baseten Loops | `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | 131,072 |
 | Baseten Loops | `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | 131,072 |
@@ -266,12 +263,28 @@ automatically and select the appropriate tokenizer and formatting.
 Preparation uses these defaults:
 
 - LoRA training on text and tool conversations; images are unsupported
+- Tool definitions are combined by name across each conversation, using the latest recorded description and compatible optional arguments; earlier turns see the combined definitions
 - 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; use `--max-seq-len 32768` to lower the limit
 
-Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
+If source traces live in another workspace, add
+`--source-workspace-id '<traces-workspace-id>'` to `prepare`; `--workspace-id`
+still identifies the dataset workspace. Per-example `metadata.source_workspace_id`
+takes precedence over this flag, which defaults to the dataset workspace. Your
+LangSmith API key must have access to both. `dataset create` saves the source
+workspace automatically; existing examples still need valid source scope
+and project IDs.
+
+Description changes are reported in `prepared/tool_description_replacements.json`
+without rejecting examples. Incompatible argument schemas still fail preparation.
+
+Interrupted tool capture resumes automatically when you rerun the same command with
+the same data directory. Completed examples are checkpointed in
+`raw/example_contracts.partial.json`; remove that file to restart capture from scratch.
+
+Use `--no-fetch` to reuse downloaded data and completed tool schemas. Provider checks and
 tokenizer loading still run. To supply the same tools for every example, use
 `--inference-contract path/to/contract.json` instead of automatic tool capture.
 
@@ -302,9 +315,28 @@ Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json`
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
-## Deploy and evaluate (Fireworks)
+## Evaluate a trained model (Fireworks)
 
-Promote the selected checkpoint, then deploy it. The endpoint incurs charges until removed.
+`deploy` starts a serving endpoint so a model can answer requests. `evaluate`
+sends test prompts to a model and scores its answers. A trained checkpoint
+needs running compute before it can answer a prompt.
+
+For a temporary evaluation, let `evaluate` manage that compute:
+
+```text
+promote -> eval-plan -> evaluate --serving-mode preemptible
+                              |
+                              +-- create temporary serving capacity
+                              +-- wait until ready
+                              +-- generate and score responses
+                              +-- save results and delete the deployment
+```
+
+**You do not run `deploy` or `undeploy` yourself for this path.** Preemptible
+capacity uses idle GPUs that Fireworks can reclaim. If that interrupts the run,
+repeat the evaluation command to finish missing cases.
+
+First, promote the selected checkpoint to a Fireworks model ID:
 
 ```bash
 account_id='<fireworks-account-id>'
@@ -316,30 +348,95 @@ smithtune promote \
   --output-model-id "$run_id" \
   --confirm
 
-smithtune deploy \
-  --run-dir "$run_dir" \
-  --account-id "$account_id" \
-  --output-model-id "$run_id" \
-  --deployment-id "$run_id" \
-  --deployment-shape '<compatible-fireworks-shape>' \
-  --confirm
+eval_shape='<full-compatible-fireworks-deployment-shape-resource>'
 ```
 
-Review the replay cases, then evaluate with the gateway credentials above:
+The deployment shape specifies compatible serving hardware. Use a shape for
+the promoted model, in the form
+`accounts/<account>/deploymentShapes/<shape>` (optionally with `/versions/<version>`).
+See [Fireworks evaluation paths](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models).
+Use the data directory from `prepare` (`data` in these examples).
+`eval-plan` previews the held-out cases and deployment settings. It does not
+start a deployment or run model inference:
 
 ```bash
-smithtune eval-plan --output-dir "$run_dir/replay"
+smithtune eval-plan \
+  --data-dir data \
+  --output-dir "$run_dir/replay" \
+  --tuned-model "accounts/$account_id/models/$run_id" \
+  --serving-mode preemptible --account-id "$account_id" \
+  --deployment-id "$run_id-eval" --deployment-shape "$eval_shape"
 ```
+
+Run `evaluate` with the same settings. It checks the judge, creates one
+temporary replica, waits for readiness, and runs the evaluation:
 
 ```bash
 smithtune evaluate \
+  --data-dir data \
   --output-dir "$run_dir/replay" \
-  --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
+  --tuned-model "accounts/$account_id/models/$run_id" \
+  --serving-mode preemptible --account-id "$account_id" \
+  --deployment-id "$run_id-eval" --deployment-shape "$eval_shape" \
   --confirm
 ```
 
-Results are saved to `<run-dir>/replay/summary.json`. Replay scores agreement with recorded actions without executing tools.
-Add `--base-model '<deployed-base-model-route>'` for a before/after comparison. Reuse the output directory to resume an interrupted evaluation.
+For each case, the evaluator:
+
+1. Takes recorded conversation context from the held-out data.
+2. Asks the tuned model for its next response or tool call.
+3. Checks the response and asks a judge model to score it against the recorded behavior.
+4. Saves the result. It does not execute generated tool calls.
+
+The CLI then deletes the temporary deployment and confirms deletion. Results
+are saved to `<run-dir>/replay/summary.json`.
+Add `--base-model '<deployed-base-model-route>'` for a before/after comparison.
+The base route must already be available; the temporary deployment serves only
+the tuned model. Model and judge inference use current provider rates.
+
+The default readiness timeout is 600 seconds; use `--deployment-timeout` to
+change it. Capacity loss leaves the evaluation interrupted, rather than scoring
+a model failure. Repeat the command with the same settings and output directory
+to finish missing cases. Completed cases are retained. Completed runs do not
+repeat inference, but still check deployment cleanup.
+
+Ownership and cleanup are recorded in `deployments/<deployment-id>.json` under
+the evaluation directory. The CLI refuses to use or delete an unrelated
+deployment. It attempts cleanup after success, failure, or a keyboard interrupt.
+A killed process or failed API request can leave capacity behind. The receipt
+contains the exact `smithtune undeploy ... --confirm` recovery command; a cleanup
+failure is reported as an error. Inspect that receipt before deleting capacity.
+
+This mode requires a promoted model ID. It does not open an in-session sampling
+client from an active training checkpoint.
+
+### Keep an endpoint running with `deploy`
+
+Use `deploy` when you want an endpoint for repeated use. It starts the endpoint;
+it does not run the evaluation. The endpoint stays available and can incur
+charges until you run `undeploy`:
+
+```text
+promote -> deploy -> evaluate -> undeploy
+```
+
+```bash
+smithtune deploy \
+  --run-dir "$run_dir" --account-id "$account_id" \
+  --output-model-id "$run_id" --deployment-id "$run_id" \
+  --deployment-shape "$eval_shape" --confirm
+```
+
+To evaluate a route that is already serving, omit `--serving-mode` (its default
+is `existing`) and all temporary deployment flags:
+
+```bash
+smithtune eval-plan --output-dir "$run_dir/existing-replay"
+smithtune evaluate \
+  --output-dir "$run_dir/existing-replay" \
+  --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
+  --confirm
+```
 
 Remove the endpoint when finished to stop deployment billing:
 

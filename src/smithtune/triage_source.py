@@ -243,6 +243,8 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         example = {"id": example_id, "inputs": {"messages": all_messages}, "outputs": None,
                    "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
                                 "source_project_id": project, "source_thread_id": thread,
+                                "source_workspace_id": workspace, "source_scope": "thread" if thread else "trace",
+                                "source_scope_id": thread or unit_traces[0],
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
         validate_trajectories([example], 1)
         contract = None

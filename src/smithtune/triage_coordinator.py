@@ -31,7 +31,7 @@ class JudgeTasks:
             return [{"trace_id": tid, "judge": name} for tid, name in self.tasks if (tid, name) not in self.claimed][:limit]
 
     def read_trace(self, trace_id: str) -> dict:
-        """Read frozen evidence. Each subagent also receives this evidence in full."""
+        """Read frozen evidence. Each subagent can inspect all saved evidence."""
         for (tid, _), (trace, _) in self.tasks.items():
             if tid == trace_id:
                 return copy.deepcopy(trace)
@@ -90,24 +90,10 @@ class JudgeTasks:
 
 def run_code(code: str, tasks: JudgeTasks) -> dict:
     """Run Python with only trace reads and bounded judge dispatch as host calls."""
-    from pydantic_monty import CollectString, Monty, MontyError
+    from smithtune.triage_code import execute_code
 
-    if not isinstance(code, str) or len(code) > 16_000:
-        return {"error": "code must be a string of at most 16000 characters"}
-    output = CollectString(max_bytes=16_000)
-    try:
-        with Monty(max_processes=1, request_timeout=30) as pool, pool.checkout(
-            limits={"max_duration_secs": 5, "max_memory": 32 * 1024 * 1024, "max_suspensions": 256},
-        ) as session:
-            result = session.feed_run(code, external_lookup={
-                "pending_tasks": tasks.pending_tasks, "read_trace": tasks.read_trace, "judge_batch": tasks.judge_batch,
-            }, print_callback=output)
-        encoded = json.dumps(result, ensure_ascii=False)
-        if len(encoded) > 32_000:
-            return {"error": "code result too large; return IDs or counts and delegate full evidence to judges"}
-        return {"result": result, "stdout": output.output}
-    except (MontyError, ValueError, TypeError):
-        return {"error": "code failed; use supported Python with pending_tasks, read_trace, and judge_batch only"}
+    return execute_code(code, {"pending_tasks": tasks.pending_tasks,
+                               "read_trace": tasks.read_trace, "judge_batch": tasks.judge_batch})
 
 
 def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_tokens, coordinator_judge, model=None):

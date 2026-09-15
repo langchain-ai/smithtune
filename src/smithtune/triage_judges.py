@@ -96,6 +96,16 @@ def judge_messages(trace: dict, rubric: str, rules: list[str]) -> list[dict]:
             {"role": "user", "content": json.dumps({"untrusted_trace_evidence": trace}, ensure_ascii=False)}]
 
 
+def indexed_messages(messages: list[dict]) -> list[dict]:
+    """Keep conversation text intact; expose repeated run payloads on demand."""
+    trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
+    index = {**trace, "runs": [
+        {key: run[key] for key in ("id", "parent_run_id", "run_type", "name", "start_time", "end_time", "error") if key in run}
+        for run in trace["runs"]
+    ]}
+    return [*messages[:-1], {"role": "user", "content": json.dumps({"untrusted_trace_evidence": index}, ensure_ascii=False)}]
+
+
 def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
     provider, model = judge["provider"], judge["model"]
     if provider == "anthropic-gateway":
@@ -130,10 +140,12 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
         raise PipelineError("judge returned invalid JSON") from None
 
 
-def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
+def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagnostics=None) -> dict:
     from smithtune.triage_agent import make_agent
-    agent, skill_files = make_agent(judge, messages[0]["content"], max_tokens)
-    result = agent.invoke({"messages": messages[1:], "files": skill_files}, config={"recursion_limit": 12})
+    trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
+    messages = indexed_messages(messages)
+    agent, skill_files = make_agent(judge, messages[0]["content"], max_tokens, trace=trace, diagnostics=diagnostics)
+    result = agent.invoke({"messages": messages[1:], "files": skill_files}, config={"recursion_limit": 24})
     try:
         content = result["messages"][-1].content
         if isinstance(content, list):

@@ -28,7 +28,7 @@ def _write_raw_dataset(root, count=100):
             },
             "outputs": None,
             "metadata": {
-                "source_thread_id": f"thread-{index}",
+                "source_scope": "thread", "source_scope_id": f"thread-{index}",
                 "trajectory_format": "messages",
                 "conversation_scope": "root",
             },
@@ -95,7 +95,7 @@ def test_baseten_resolves_qwen_profile(monkeypatch):
     assert model.tokenizer_model == "Qwen/Qwen3.8-27B"
     assert model.tokenizer_revision == "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
     assert model.renderer == "hf_assistant"
-    assert model.max_seq_len == 131_072
+    assert model.max_seq_len == 262_144
 
 
 def test_provider_specific_training_options_are_rejected(monkeypatch):
@@ -129,7 +129,7 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
 
     def baseten_capability(model, length):
         capability_calls.append((model, length))
-        return baseten.BasetenModelCapability(model, 131_072)
+        return baseten.BasetenModelCapability(model, 262_144)
 
     monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", fireworks_capability)
     monkeypatch.setattr(baseten, "fetch_model_capability", baseten_capability)
@@ -167,7 +167,7 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
         "renderer": adapter_module.DEFAULT_MODEL.renderer,
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
     }
-    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, 131_072)]
+    assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, adapter_module.DEFAULT_MODEL.training_context_limit)]
     assert manifest["split"]["train"] == train_rows
     assert manifest["split"]["validation"] == 10
     assert manifest["split"]["test"] == test_rows
@@ -407,3 +407,53 @@ def test_fireworks_provider_train_rejects_a_baseten_prepared_manifest(tmp_path):
             confirm=True,
             init_from_checkpoint=None,
         )
+
+
+@pytest.mark.parametrize("provider", ["baseten", "fireworks"])
+def test_cli_cross_workspace_preparation(tmp_path, monkeypatch, capsys, provider):
+    from test_example_tools import example
+    from test_tool_capture import llm
+    from smithtune.inference_contract import contract_from_runs, parse_inference_contract
+
+    monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
+    module = baseten if provider == "baseten" else fireworks
+    monkeypatch.setattr(module, "preflight_model", lambda model, **kwargs: model)
+    monkeypatch.setattr(module, "resolve_rendering_model", lambda model: model)
+    calls = []
+
+    def download(workspace, dataset_id, raw):
+        calls.append(("download", workspace))
+        examples = [example(1)]
+        raw.mkdir(parents=True)
+        (raw / "examples.json").write_text(json.dumps(examples))
+        (raw / "dataset-export.json").write_text(json.dumps([{"inputs": examples[0]["inputs"]}]))
+        (raw / "dataset.json").write_text(json.dumps({"id": dataset_id, "example_count": 1}))
+
+    def capture(workspace, examples, *, source_workspace_id, checkpoint_path):
+        calls.append(("capture", workspace, source_workspace_id))
+        payload = contract_from_runs([llm("run-1", [])], workspace_id=source_workspace_id)
+        payload["provenance"]["source_example_id"] = examples[0]["id"]
+        return {examples[0]["id"]: parse_inference_contract(payload)}
+
+    monkeypatch.setattr(dataset, "download_dataset", download)
+    monkeypatch.setattr(dataset, "capture_example_contracts", capture)
+    monkeypatch.setattr(sys, "argv", [
+        "smithtune", "prepare", "--provider", provider, "--model", "qwen3p8-27b",
+        "--workspace-id", "dataset-workspace", "--source-workspace-id", "trace-workspace",
+        "--dataset-id", "dataset-id", "--data-dir", str(tmp_path), "--skip-render-check",
+        "--validation-fraction", "0", "--test-fraction", "0",
+    ])
+    assert pipeline.main() is None
+    assert calls == [("download", "dataset-workspace"), ("capture", "dataset-workspace", "trace-workspace")]
+    manifest = json.loads((tmp_path / "prepared" / "manifest.json").read_text())
+    assert manifest["langsmith"]["workspace_id"] == "dataset-workspace"
+
+    calls.clear()
+    sys.argv.append("--no-fetch")
+    assert pipeline.main() is None
+    assert calls == []
+    sys.argv[sys.argv.index("--source-workspace-id") + 1] = "other-workspace"
+    with pytest.raises(SystemExit) as exc:
+        pipeline.main()
+    assert exc.value.code == 2
+    assert "different source workspace" in capsys.readouterr().err

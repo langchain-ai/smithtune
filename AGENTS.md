@@ -12,9 +12,8 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 ## Choose the starting point
 
 - Tracing project: use `dataset create` with the intended workspace, project, time window, and root-run filters, then pass the returned dataset ID to `prepare`.
-- To judge which traces to use for SFT, use `dataset triage --dry-run`, then the same command with `--confirm` when paid judging is authorized. Use `dataset create --triage-dir` to import accepted saved conversations. The packaged skill is available through `skill export`.
-- Use `dataset triage --output-dir <saved-triage-dir> --runner deepagent --config <judges.json> --confirm` to label a local snapshot with one coordinator, Python code mode, and judge subagents. Source flags are only needed for a new download. The CLI validates and saves votes; the coordinator's final text cannot assign labels.
-- Existing dataset: start at `prepare`; source thread/trace and project information is needed for automatic tool capture.
+- To label traces for SFT, preview with `dataset triage <directory>` and source flags. Then use `dataset triage <directory> --confirm` to label or resume with saved settings. The default is a Deep Agent coordinator and three Fireworks Kimi K3 judge subagents, with Python code mode. Use repeatable `--judge provider:model` and `--rule` only to customize. The CLI saves validated votes; the coordinator cannot assign labels. Import accepted whole conversations with `dataset create --triage-dir`. Export the portable skill with `skill export`.
+- Existing dataset: start at `prepare`; each example's metadata needs `source_scope`, `source_scope_id`, and `source_project_id` for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
 - Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.
 - Use LangSmith API filter expressions from the README and linked syntax reference.
@@ -30,13 +29,14 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Paid training, evaluation, and deployment must be within the user's authorized scope. Honor authorization already given; obtain it before adding `--confirm` for an operation that has not been authorized.
 - Use credentials through environment variables; keep their values out of messages, logs, and committed files.
 - Report any provisioned deployment and its cleanup command; deployment charges continue until it is removed.
+- For a promoted Fireworks model, prefer `eval-plan` and `evaluate --serving-mode preemptible` for temporary evaluation. Use the same model, account, shape, deployment ID, and limits on resume. Check the deployment receipt after an interruption or cleanup failure. This path uses the official Fireworks REST API.
 
 ## Preserve the data behavior
 
-- Dataset creation imports whole conversations, including earlier turns and turns outside the selection window.
 - Triage labels individual traces, but training import requires every trace in a saved conversation to pass. Judge errors stay incomplete; they are not quality votes. Do not refetch or edit messages after judging. Use saved tool schemas from triage.
+- Dataset creation imports whole conversations: a root's thread when it has one, otherwise its single trace. Thread examples include earlier turns and turns outside the selection window.
 - Preparation preserves recorded messages and gathers each example's tool union from all its source LLM runs. Automatic capture is the normal path; a global inference contract is an explicit override.
-- Provider built-ins and conflicting definitions of the same tool within an example fail preparation, even when the tools were not called.
+- Preparation combines tools by name, keeps the latest description by source run timestamp (run ID breaks ties), and combines optional top-level arguments when shared arguments and other schema fields match. Description replacements are reported in `prepared/tool_description_replacements.json`. The combined definition applies to the whole example. Provider built-ins and incompatible definitions still fail, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.
 - Fireworks supports deployment and replay evaluation; Baseten currently produces training checkpoints. Replay compares responses against recorded context without executing tools.
 

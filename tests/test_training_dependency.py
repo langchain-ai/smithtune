@@ -65,7 +65,7 @@ def test_real_renderer_context_boundaries(monkeypatch):
     monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: CharacterTokenizer())
     snapshot = renderer_snapshot()
     count = max(len(row["tokens"]) for row in snapshot["rows"])
-    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "test", "source_thread_id": "thread"}}
+    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "test", "source_scope": "thread", "source_scope_id": "thread"}}
     model = replace(DEFAULT_MODEL, max_seq_len=count)
     assert validate_model_context([row], model)[0] == [row]
     assert validate_model_context([row], replace(model, max_seq_len=count - 1))[0] == []

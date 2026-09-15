@@ -104,3 +104,32 @@ def test_deepagent_models_use_explicit_provider_urls(monkeypatch, provider, url,
         assert model.openai_api_base == url
         assert model.openai_api_key.get_secret_value() == "test-credential"
     assert model.max_retries == 0
+
+
+def test_judge_reads_indexed_evidence_with_code_without_changing_source(monkeypatch):
+    from smithtune.triage_agent import evidence_tool
+    from smithtune.triage_judges import indexed_messages, judge_messages
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    trace = {"trace_id": "trace", "messages": [{"role": "assistant", "content": "Done"}],
+             "runs": [{"id": "run", "run_type": "tool", "inputs": {"repeated": "x" * 200_000},
+                       "outputs": {"result": "saved"}}]}
+    original = json.dumps(trace)
+    prompt = indexed_messages(judge_messages(trace, "Judge the trace.", []))
+    assert len(prompt[-1]["content"]) < 1000
+    diagnostics = {}
+    model = JudgeModel(answers=[
+        AIMessage(content="", tool_calls=[{"id": "read", "name": "code_mode", "args": {
+            "code": "r = read_run('run'); r['outputs']"}}]),
+        AIMessage(content="{}"),
+    ])
+    agent, files = make_agent({"provider": "fireworks", "model": "test"}, "Judge.", 1024,
+                             model=model, trace=trace, diagnostics=diagnostics)
+    result = agent.invoke({"messages": prompt[1:], "files": files})
+    outputs = [m.content for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert any('saved' in output for output in outputs)
+    assert diagnostics == {"code_calls": 1, "runs_read": ["run"]}
+    tool = evidence_tool(trace, {})
+    assert "error" in tool.invoke({"code": "read_run('run')"})  # no silent truncation
+    assert tool.invoke({"code": "r = read_run('run'); r['outputs']['result'] = 'changed'; r['outputs']"})["result"] == {"result": "changed"}
+    assert json.dumps(trace) == original
+    assert all(set(names) == {"read_file", "code_mode"} for names in model.exposed)

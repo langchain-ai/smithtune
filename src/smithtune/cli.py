@@ -32,6 +32,8 @@ from smithtune.providers import PROVIDERS, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
+from smithtune.eval_deployment import EvalDeployment
+from smithtune.artifacts import _json_dump, output_lock
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -55,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
     create = curate_sub.add_parser(
         "create", help="filter root traces and import their whole conversations into a new dataset",
-        description="Create a dataset from whole conversations selected through matching root traces. Imports include turns outside the time window.",
+        description="Create a dataset from conversations selected through matching root traces. A root selects its whole thread when it has one, otherwise its trace; thread imports include turns outside the time window.",
     )
     create.add_argument("--workspace-id")
     create.add_argument("--project-id")
@@ -63,31 +65,39 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--start-time", help="inclusive root start time, with timezone")
     create.add_argument("--end-time", help="exclusive root start time, with timezone")
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
-    create.add_argument("--limit", type=int, help="sample at most this many distinct threads; default: all matches")
-    create.add_argument("--seed", type=int, default=42, help="sampling seed (default: 42)")
+    create.add_argument("--limit", type=int, help=f"number of distinct conversations to import, at most {curation.MAX_LIMIT}; querying stops once this many are found")
+    create.add_argument("--concurrency", type=int, default=curation.DEFAULT_CONCURRENCY, help=f"conversations fetched and written at once, 1 to {curation.MAX_CONCURRENCY} (default: %(default)s)")
     create.add_argument("--output", type=Path, help="selection file path; default: an automatic path under data/selections; import receipt saved alongside it")
 
     create.add_argument("--triage-dir", type=Path, help="import frozen all-pass conversations from a completed triage run")
     create.add_argument("--confirm", action="store_true", help="confirm dataset creation from triage labels")
 
-    triage_cmd = curate_sub.add_parser("triage", help="label project traces keep/drop for SFT with one or more judges")
-    triage_cmd.add_argument("--workspace-id", help="omit source flags to use the local snapshot in --output-dir")
-    triage_cmd.add_argument("--project-id")
-    triage_cmd.add_argument("--start-time")
-    triage_cmd.add_argument("--end-time")
-    triage_cmd.add_argument("--filter", help="root-run filter; selected threads expand to all their turns")
-    triage_cmd.add_argument("--limit", type=int, default=100, help="maximum selected root traces before thread expansion (default: 100)")
-    triage_cmd.add_argument("--seed", type=int, default=42)
-    triage_cmd.add_argument("--output-dir", type=Path, required=True)
-    triage_cmd.add_argument("--config", type=Path, help="JSON judge slots and selection rules; default: one Anthropic gateway judge")
-    triage_cmd.add_argument("--runner", choices=("api", "deepagent"), default="api")
-    triage_cmd.add_argument("--concurrency", type=int, default=4)
-    triage_cmd.add_argument("--max-input-chars", type=int, default=200_000)
-    triage_cmd.add_argument("--max-output-tokens", type=int, default=4096)
-    triage_cmd.add_argument("--attempts", type=int, default=3)
-    approval = triage_cmd.add_mutually_exclusive_group(required=True)
-    approval.add_argument("--dry-run", action="store_true", help="freeze source evidence and show call limits without paid judging")
-    approval.add_argument("--confirm", action="store_true", help="run paid judging; reuse the same directory to resume")
+    triage_cmd = curate_sub.add_parser(
+        "triage", help="label traces with an agent council",
+        description="Preview a council, then add --confirm to label or resume. Defaults to three independent Fireworks Kimi K3 judges managed by a Deep Agent. Source and council settings are saved in the directory.",
+    )
+    triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default: data/triage)")
+    source = triage_cmd.add_argument_group("Source (first run only)")
+    source.add_argument("--workspace-id")
+    source.add_argument("--project-id")
+    source.add_argument("--start-time")
+    source.add_argument("--end-time")
+    source.add_argument("--filter", help="optional root trace filter")
+    source.add_argument("--limit", type=int, help="roots to select before expanding whole threads (default: 100)")
+    triage_cmd.add_argument("--judge", action="append", help="provider:model; repeat once per judge (default: three Fireworks Kimi K3 judges)")
+    triage_cmd.add_argument("--rule", action="append", help="additional selection rule; repeat for multiple rules")
+    triage_cmd.add_argument("--concurrency", type=int, help="maximum concurrent judge tasks (default: 4)")
+    approval = triage_cmd.add_mutually_exclusive_group()
+    approval.add_argument("--confirm", action="store_true", help="run paid judging or resume; without this flag, preview only")
+    # Keep old invocations usable without crowding the normal command surface.
+    approval.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--output-dir", type=Path, help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--config", type=Path, help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--runner", choices=("api", "deepagent"), help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--seed", type=int, help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--max-input-chars", type=int, help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
+    triage_cmd.add_argument("--attempts", type=int, help=argparse.SUPPRESS)
 
     skill = sub.add_parser("skill", help="export the packaged SFT selection skill for any agent")
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)
@@ -107,6 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
+    prep.add_argument("--source-workspace-id", help="default workspace for automatic source tool capture; example metadata.source_workspace_id takes precedence (default: dataset workspace)")
     prep.add_argument("--inference-contract", type=Path, help="optional global tool-schema override; by default collect tools from each example's source LLM runs")
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
@@ -243,6 +254,12 @@ def _parser() -> argparse.ArgumentParser:
             help="optional cap; default evaluates every assistant turn",
         )
         command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
+        command.add_argument("--serving-mode", choices=("existing", "preemptible"), default="existing")
+        command.add_argument("--account-id", help="account owning the promoted model for temporary evaluation")
+        command.add_argument("--deployment-id", help="stable ID for the owned temporary deployment")
+        command.add_argument("--deployment-shape", help="compatible Fireworks deployment shape resource")
+        command.add_argument("--deployment-timeout", type=float, default=600, help="temporary deployment readiness timeout in seconds")
+    eval_plan.add_argument("--tuned-model", help="promoted model resource; required for preemptible mode")
     evaluation.add_argument("--tuned-model", required=True)
     evaluation.add_argument(
         "--base-model",
@@ -268,6 +285,19 @@ def _settings_from_args(args: argparse.Namespace) -> CommonSFTSettings:
         field.name: getattr(args, field.name) for field in fields(TrainingOptions)
     })
     return get_provider(args.provider).settings_from_options(options)
+
+
+def _eval_deployment(args) -> EvalDeployment | None:
+    fields = (args.account_id, args.deployment_id, args.deployment_shape)
+    if args.serving_mode == "existing":
+        if any(fields) or args.deployment_timeout != 600:
+            raise PipelineError("deployment options require --serving-mode preemptible")
+        return None
+    if not all(fields) or not args.tuned_model:
+        raise PipelineError("preemptible mode requires --tuned-model, --account-id, --deployment-id, and --deployment-shape")
+    config = EvalDeployment(args.tuned_model, *fields, timeout=args.deployment_timeout)
+    config.validate()
+    return config
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -297,30 +327,38 @@ def main(argv: list[str] | None = None) -> None:
             }
         elif args.command == "dataset":
             if args.dataset_command == "triage":
+                directory = args.directory or args.output_dir or Path("data/triage")
+                if args.directory is not None and args.output_dir is not None:
+                    raise PipelineError("use a directory argument or --output-dir, not both")
                 source_fields = (args.workspace_id, args.project_id, args.start_time, args.end_time)
                 if all(source_fields):
-                    source = source_options(*source_fields, filter=args.filter, limit=args.limit, seed=args.seed)
-                elif any(source_fields) or args.filter or args.limit != 100 or args.seed != 42:
+                    source = source_options(*source_fields, filter=args.filter,
+                                            limit=100 if args.limit is None else args.limit,
+                                            seed=42 if args.seed is None else args.seed)
+                elif any(source_fields) or any(v is not None for v in (args.filter, args.limit, args.seed)):
                     raise PipelineError("supply all source IDs and times, or omit source flags to use the saved local snapshot")
-                elif (args.output_dir / "snapshot.json").exists():
-                    source = load_snapshot(args.output_dir)["source"]
+                elif (directory / "snapshot.json").exists():
+                    source = load_snapshot(directory)["source"]
                 else:
                     raise PipelineError("no local snapshot; supply workspace, project, start time, and end time to download traces")
-                value = triage.run_triage(source, args.output_dir, config_path=args.config, runner_mode=args.runner,
-                                         dry_run=args.dry_run, confirm=args.confirm, concurrency=args.concurrency,
-                                         max_input_chars=args.max_input_chars, max_output_tokens=args.max_output_tokens, attempts=args.attempts)
+                settings = triage.council_settings(
+                    directory, judges=args.judge, rules=args.rule, config_path=args.config,
+                    runner_mode=args.runner, concurrency=args.concurrency, attempts=args.attempts,
+                    max_input_chars=args.max_input_chars, max_output_tokens=args.max_output_tokens,
+                )
+                value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
             elif args.triage_dir is not None:
-                if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output)) or args.seed != 42:
+                if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output)):
                     raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")
                 value = triage.create_triaged_dataset(args.triage_dir, args.name, confirm=args.confirm)
             else:
-                if not all((args.workspace_id, args.project_id, args.start_time, args.end_time)):
-                    raise PipelineError("dataset create requires workspace, project, start time, and end time, or --triage-dir")
+                if not all((args.workspace_id, args.project_id, args.start_time, args.end_time, args.limit)):
+                    raise PipelineError("dataset create requires workspace, project, start time, end time, and --limit, or --triage-dir")
                 print("Selecting conversations and creating dataset...", file=sys.stderr)
                 value = curation.create_dataset(
                     workspace_id=args.workspace_id, project_id=args.project_id,
                     start_time=args.start_time, end_time=args.end_time, name=args.name,
-                    filter=args.filter, limit=args.limit, seed=args.seed, output=args.output,
+                    filter=args.filter, limit=args.limit, output=args.output, concurrency=args.concurrency,
                 )
         elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(
@@ -343,6 +381,7 @@ def main(argv: list[str] | None = None) -> None:
                 model_options=_model_options(args),
                 reasoning_policy=args.reasoning_policy,
                 inference_contract=contract,
+                source_workspace_id=args.source_workspace_id,
                 validation_fraction=args.validation_fraction,
                 test_fraction=args.test_fraction,
                 fetch=not args.no_fetch,
@@ -384,12 +423,17 @@ def main(argv: list[str] | None = None) -> None:
                 confirm=args.confirm,
             )
         elif args.command == "eval-plan":
-            value = replay_evaluation.prepare_replay_evaluation(
-                args.data_dir,
-                args.output_dir,
-                args.max_points_per_trajectory,
-                args.max_output_tokens,
-            )
+            serving = _eval_deployment(args)
+            with output_lock(args.output_dir):
+                value = replay_evaluation.prepare_replay_evaluation(
+                    args.data_dir,
+                    args.output_dir,
+                    args.max_points_per_trajectory,
+                    args.max_output_tokens,
+                )
+                if serving:
+                    value["deployment"] = serving.plan()
+                    _json_dump(args.output_dir / "plan.json", value)
         elif args.command == "evaluate":
             value = replay_evaluation.run_replay_evaluation(
                 args.data_dir,
@@ -401,6 +445,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_points_per_trajectory=args.max_points_per_trajectory,
                 max_output_tokens=args.max_output_tokens,
                 confirm=args.confirm,
+                deployment=_eval_deployment(args),
             )
         else:
             FireworksProvider().undeploy(args.account_id, args.deployment_id, confirm=args.confirm)

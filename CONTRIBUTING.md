@@ -25,7 +25,8 @@ concurrency, fresh judge context, full evidence retention, and resume.
 Monty is the Pydantic project's MIT-licensed Python sandbox. Version 0.0.23
 was checked against its source, PyPI metadata, and OSV on 2026-09-14; no published
 advisories were returned. Code gets no host mounts or OS handlers. Only the
-three reviewed trace/task functions cross the sandbox boundary.
+reviewed trace/task functions cross the sandbox boundary. Judges can only
+read saved runs; the coordinator can dispatch bounded judge batches.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 

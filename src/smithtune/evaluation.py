@@ -9,6 +9,8 @@ import os
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,8 @@ from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
     _prepared_example_contracts, _prepared_split,
 )
+from smithtune.eval_deployment import EvalDeployment, TemporaryDeployment
+from smithtune.artifacts import exclusive_output
 from smithtune.inference import ANTHROPIC_MODEL_PREFIX, _chat_completion, _inference_messages
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.providers.base import PipelineError
@@ -109,8 +113,8 @@ def build_replay_cases(
                 {
                     "id": case_id,
                     "example_id": example_id,
-                    "source_thread_id": source["source_thread_id"],
-                    "source_trace_id": source.get("source_trace_id"),
+                    "source_scope": source["source_scope"],
+                    "source_scope_id": source["source_scope_id"],
                     "message_index": position,
                     "case_type": case_type,
                     "messages": copy.deepcopy(messages[:position]),
@@ -483,6 +487,7 @@ def calibrate_judge(
     return results
 
 
+@exclusive_output("output_dir")
 def run_replay_evaluation(
     data_dir: Path,
     output_dir: Path,
@@ -494,6 +499,7 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
+    deployment: EvalDeployment | None = None,
     chat: Callable[
         [str, list[dict[str, Any]], int, bool, InferenceContract | None],
         dict[str, Any],
@@ -502,6 +508,10 @@ def run_replay_evaluation(
 ) -> dict[str, Any]:
     """Score tuned next messages and optionally compare a base model."""
     _require_confirm(confirm, "model and judge inference")
+    if deployment is not None:
+        deployment.validate()
+        if deployment.model != tuned_model:
+            raise PipelineError("temporary deployment model differs from tuned model")
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
     if chat is None and not os.environ.get("FIREWORKS_API_KEY"):
@@ -525,15 +535,24 @@ def run_replay_evaluation(
     global_contract = _prepared_inference_contract(data_dir, manifest)
     example_contracts = _prepared_example_contracts(data_dir, manifest)
     chat_fn = chat or _chat_completion
-    calibration = calibrate_judge(cases, judge_model, chat_fn)
-    _jsonl_dump(output_dir / "calibration.jsonl", calibration)
-    if any(result["actual"] != result["expected"] for result in calibration):
-        raise PipelineError("judge failed positive or negative calibration controls")
     results_path = output_dir / "results.jsonl"
     results = _load_jsonl(results_path) if results_path.exists() else []
     models = [("tuned", tuned_model)]
     if base_model:
         models.insert(0, ("base", base_model))
+    config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
+              "serving_mode": "preemptible" if deployment else "existing"}
+    if deployment:
+        config["deployment"] = asdict(deployment)
+        plan["deployment"] = deployment.plan()
+        _json_dump(output_dir / "plan.json", plan)
+    config_path = output_dir / "evaluation-config.json"
+    if config_path.exists():
+        saved_config = _load_json(config_path)
+        if isinstance(saved_config, dict) and (saved_config.get("models") != config["models"] or saved_config.get("judge_model") != judge_model):
+            raise PipelineError("existing replay results use different models")
+        if saved_config != config:
+            raise PipelineError("existing replay results use different evaluation settings")
     cases_by_id = {case["id"]: case for case in cases}
     for result in results:
         saved_case = result.get("case", {})
@@ -556,6 +575,21 @@ def run_replay_evaluation(
         if result.get("judge_model") != judge_model or saved_models != dict(models):
             raise PipelineError("existing replay results use different models")
     completed = {result["case"]["id"] for result in results}
+    if len(completed) != len(results):
+        raise PipelineError("existing replay results contain duplicate cases")
+    if results and not config_path.exists() and max_output_tokens != DEFAULT_REPLAY_MAX_TOKENS:
+        raise PipelineError("legacy replay results do not record generation settings; use a new output directory")
+    _json_dump(config_path, config)
+    pending = [case for case in cases if case["id"] not in completed]
+    if deployment and not pending:
+        TemporaryDeployment(deployment, output_dir).cleanup_existing()
+    if pending:
+        calibration = calibrate_judge(cases, judge_model, chat_fn)
+        _jsonl_dump(output_dir / "calibration.jsonl", calibration)
+    else:
+        calibration = _load_jsonl(output_dir / "calibration.jsonl")
+    if not calibration or any(result["actual"] != result["expected"] for result in calibration):
+        raise PipelineError("judge failed positive or negative calibration controls")
     case_order = {case["id"]: index for index, case in enumerate(cases)}
 
     def score_case(case: dict[str, Any]) -> dict[str, Any]:
@@ -568,8 +602,9 @@ def run_replay_evaluation(
             "contract_sha256": contract_sha256,
         }
         for label, model in models:
+            route = tuned_route if label == "tuned" else model
             candidate = chat_fn(
-                model,
+                route,
                 case["messages"],
                 max_output_tokens,
                 False,
@@ -577,6 +612,7 @@ def run_replay_evaluation(
             )
             scored[label] = {
                 "model": model,
+                "serving_route": route,
                 "candidate": candidate,
                 "deterministic_metrics": score_replay_candidate(
                     case,
@@ -587,13 +623,34 @@ def run_replay_evaluation(
             }
         return scored
 
-    pending = [case for case in cases if case["id"] not in completed]
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = [executor.submit(score_case, case) for case in pending]
-        for future in as_completed(futures):
-            results.append(future.result())
-            results.sort(key=lambda result: case_order[result["case"]["id"]])
-            _jsonl_dump(results_path, results)
+    lifecycle = TemporaryDeployment(deployment, output_dir) if deployment and pending else nullcontext(tuned_model)
+    state_path = output_dir / "evaluation-state.json"
+    _json_dump(state_path, {"status": "running", "completed": len(results), "total": len(cases)})
+    try:
+        with lifecycle as tuned_route, ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = []
+            errors = []
+            try:
+                for case in pending:
+                    futures.append(executor.submit(score_case, case))
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        errors.append(exc)
+                        continue
+                    results.append(result)
+                    results.sort(key=lambda result: case_order[result["case"]["id"]])
+                    _jsonl_dump(results_path, results)
+            finally:
+                # Ctrl-C must not drain the entire queue of paid requests.
+                for future in futures:
+                    future.cancel()
+            if errors:
+                raise PipelineError(f"evaluation interrupted: {len(errors)} cases failed; {len(results)}/{len(cases)} saved; rerun to resume") from errors[0]
+    except BaseException:
+        _json_dump(state_path, {"status": "interrupted", "completed": len(results), "total": len(cases)})
+        raise
     for result in results:
         request_contract = _case_contract(result["case"], global_contract, example_contracts)
         for label, _ in models:
@@ -674,5 +731,7 @@ def run_replay_evaluation(
                     "paired_ties": len(group) - group_wins - group_regressions,
                 }
             )
+    summary["serving_mode"] = "preemptible" if deployment else "existing"
     _json_dump(output_dir / "summary.json", summary)
+    _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
     return summary

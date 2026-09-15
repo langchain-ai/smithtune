@@ -183,7 +183,7 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     for n in range(3):
         item = copy.deepcopy(example)
         item["id"] = uid(500 + n)
-        item["metadata"]["source_thread_id"] = f"independent-{n}"
+        item["metadata"]["source_scope_id"] = f"independent-{n}"
         item["inputs"]["messages"][-1]["content"] += f" variant-{n}"
         item["metadata"]["smithtune_triage"]["messages_sha256"] = json_sha256(item["inputs"]["messages"])
         examples.append(item)
@@ -273,9 +273,17 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     original = triage.run_triage
     monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
     args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"], "--output-dir", str(tmp_path), "--confirm"]
+            "--start-time", source()["start_time"], "--end-time", source()["end_time"], str(tmp_path), "--rule", "Keep supported answers."]
     cli.main(args)
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["judges"] == 3 and plan["runner"] == "deepagent"
+    assert plan["config"]["rules"] == ["Keep supported answers."]
+    cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
     assert json.loads(capsys.readouterr().out)["kept"] == 2
+    saved = (tmp_path / "judgments.jsonl").read_bytes()
+    cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["kept"] == 2
+    assert (tmp_path / "judgments.jsonl").read_bytes() == saved
     create = triage.create_triaged_dataset
     monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: create(*args, **kwargs, runner=api))
     cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--name", "selected", "--confirm"])

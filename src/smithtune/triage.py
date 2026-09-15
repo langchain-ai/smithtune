@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import re
+import shlex
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.resources import files
@@ -16,12 +18,16 @@ from smithtune.curation import _api, _uuid, _write_new
 from smithtune.dataset import validate_trajectories
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
-from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, judge_messages, rubric_text, validate_judgment
+from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, indexed_messages, judge_messages, rubric_text, validate_judgment
 from smithtune.triage_source import load_snapshot, snapshot
 
 
 def load_config(path: Path | None) -> dict:
     value = _load_json(path) if path else {"judges": [{"name": "judge-1", "provider": "anthropic-gateway", "model": "claude-sonnet-5"}]}
+    return validate_config(value)
+
+
+def validate_config(value: dict) -> dict:
     if not isinstance(value, dict) or set(value) - {"judges", "rules"}:
         raise PipelineError("triage config must contain judges and optional rules")
     judges = value.get("judges")
@@ -42,6 +48,40 @@ def load_config(path: Path | None) -> dict:
     return {"judges": judges, "rules": rules}
 
 
+def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=None, **overrides) -> dict:
+    """Reuse the preview on confirm/resume; explicit options replace defaults."""
+    path = output_dir / "plan.json"
+    saved = _load_json(path) if path.exists() else {}
+    if not isinstance(saved, dict):
+        raise PipelineError("invalid saved council plan")
+    config = copy.deepcopy(saved.get("config", {"judges": [
+        {"name": f"judge-{i}", "provider": "fireworks", "model": "accounts/fireworks/models/kimi-k3"}
+        for i in range(1, 4)
+    ]}))
+    if config_path is not None:
+        if judges is not None or rules is not None:
+            raise PipelineError("use --config or --judge/--rule, not both")
+        config = load_config(config_path)
+    if judges is not None:
+        slots = []
+        for index, value in enumerate(judges, 1):
+            provider, separator, model = value.partition(":")
+            if not separator or provider not in PROVIDERS or not model.strip():
+                raise PipelineError("--judge must be provider:model, for example fireworks:accounts/fireworks/models/kimi-k3")
+            slots.append({"name": f"judge-{index}", "provider": provider, "model": model})
+        config["judges"] = slots
+    if rules is not None:
+        config["rules"] = rules
+    settings = {"config": validate_config(config),
+                "runner_mode": saved.get("runner", "deepagent"),
+                "concurrency": saved.get("concurrency", 4),
+                "attempts": saved.get("max_attempts_per_task", 3),
+                "max_input_chars": saved.get("max_input_chars", 200_000),
+                "max_output_tokens": saved.get("max_output_tokens", 4096)}
+    settings.update({key: value for key, value in overrides.items() if value is not None})
+    return settings
+
+
 def _label(trace: dict, records: dict, judges: list[dict]) -> dict:
     votes = [records.get((trace["trace_id"], judge["name"])) for judge in judges]
     valid = [record for record in votes if record and record["status"] == "complete"]
@@ -58,19 +98,17 @@ def _label(trace: dict, records: dict, judges: list[dict]) -> dict:
 @exclusive_output("output_dir")
 def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = None, runner_mode="api", dry_run=False,
                confirm=False, concurrency=4, max_input_chars=200_000, max_output_tokens=4096, attempts=3,
-               runner=_run, judge_call=None, sleeper=time.sleep) -> dict:
-    config = load_config(config_path)
+               runner=_run, judge_call=None, sleeper=time.sleep, config: dict | None = None) -> dict:
+    config = validate_config(config) if config is not None else load_config(config_path)
     if runner_mode not in {"api", "deepagent"}:
         raise PipelineError("triage runner must be api or deepagent")
     if not 1 <= concurrency <= 16 or not 1 <= attempts <= 5 or not 1000 <= max_input_chars <= 2_000_000 or not 128 <= max_output_tokens <= 16384:
         raise PipelineError("invalid triage concurrency, retry, or input/output limits")
     if not dry_run and not confirm:
         raise PipelineError("trace judging incurs cost; review --dry-run, then use --confirm")
-    if not dry_run and judge_call is None:
-        check_credentials(config["judges"])
-        if runner_mode == "deepagent":
-            from smithtune.triage_agent import check_installation
-            check_installation()
+    if not dry_run and judge_call is None and runner_mode == "deepagent":
+        from smithtune.triage_agent import check_installation
+        check_installation()
     frozen = snapshot(source, output_dir, runner=runner)
     rubric = rubric_text()
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
@@ -79,22 +117,24 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        identity.update(agent_version=2, skill_sha256=json_sha256(skill))
+        identity.update(agent_version=3, skill_sha256=json_sha256(skill))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "traces": len(frozen["traces"]),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "judge_tasks": len(frozen["traces"]) * len(config["judges"]), "max_attempts_per_task": attempts,
             "concurrency": concurrency, "aggregation": "all slots required; strict majority; ties drop",
             "training_selection": "whole frozen conversation only if every trace passes",
-            "cost": "provider input/output rates; deepagent adds coordinator calls and up to 12 judge graph steps per attempt"}
+            "cost": "provider input/output rates; deepagent adds coordinator calls and up to 24 judge graph steps per attempt"}
     if runner_mode == "deepagent":
         plan["coordinator"] = config["judges"][0]
         plan["code_mode"] = "sandboxed Python; bounded judge batches; no host filesystem or network"
-    _json_dump(output_dir / "plan.json", plan)
-    if dry_run:
-        return plan
     manifest_path = output_dir / "triage-config.json"
     if manifest_path.exists() and _load_json(manifest_path) != identity:
         raise PipelineError("existing triage run uses different input, rubric, model, or limits; use a new output directory")
+    _json_dump(output_dir / "plan.json", plan)
+    if dry_run:
+        print(f"Preview: {plan['traces']} traces, {plan['judges']} judges, {plan['judge_tasks']} votes. No judge calls made.", file=sys.stderr)
+        print(f"Run: smithtune dataset triage {shlex.quote(str(output_dir))} --confirm", file=sys.stderr)
+        return plan
     _json_dump(manifest_path, identity)
     identity_hash = json_sha256(identity)
     traces = {trace["trace_id"]: trace for trace in frozen["traces"]}
@@ -119,12 +159,18 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     def judge_one(trace, judge):
         record = {"trace_id": trace["trace_id"], "judge": judge["name"], "identity_sha256": identity_hash}
         messages = judge_messages(trace, rubric, config["rules"])
-        if sum(len(message["content"]) for message in messages) > max_input_chars:
+        prompt = indexed_messages(messages) if runner_mode == "deepagent" else messages
+        if sum(len(message["content"]) for message in prompt) > max_input_chars:
             return {**record, "status": "input_too_large", "error": "input exceeds configured limit; no evidence was truncated"}
         for attempt in range(attempts):
             error_kind = "request_failed"
             try:
-                response = call(judge, messages, max_output_tokens)
+                if runner_mode == "deepagent" and judge_call is None:
+                    diagnostics = {}
+                    response = call(judge, messages, max_output_tokens, diagnostics=diagnostics)
+                    record["agent"] = diagnostics
+                else:
+                    response = call(judge, messages, max_output_tokens)
                 error_kind = "invalid_result"
                 result = validate_judgment(response, trace)
                 return {**record, "status": "complete", "judgment": result}
@@ -137,12 +183,18 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
 
     pending = [(trace, judge) for trace in frozen["traces"] for judge in config["judges"]
                if records.get((trace["trace_id"], judge["name"]), {}).get("status") != "complete"]
+    if pending and judge_call is None:
+        check_credentials(config["judges"])
+    total = len(frozen["traces"]) * len(config["judges"])
+    print(f"Council: {len(config['judges'])} judges; {len(pending)}/{total} votes pending.", file=sys.stderr)
     record_lock = Lock()
 
     def save_record(record):
         with record_lock:
             records[(record["trace_id"], record["judge"])] = record
             _jsonl_dump(results_path, [records[key] for key in sorted(records)])
+            completed = sum(r["status"] == "complete" for r in records.values())
+            print(f"Saved vote: {record['status']}; {completed}/{total} complete.", file=sys.stderr)
 
     try:
         if runner_mode == "deepagent" and pending and judge_call is None:

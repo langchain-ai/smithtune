@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 
 INSTALL_HELP = {
-    "langsmith": "Install the LangSmith CLI: https://github.com/langchain-ai/langsmith-cli and ensure langsmith is on PATH",
+    "langsmith": "Install the LangSmith CLI with `curl -fsSL https://cli.langsmith.com/install.sh | sh`, then ensure langsmith is on PATH",
     "firectl": "Install firectl: https://docs.fireworks.ai/tools-sdks/firectl/firectl and ensure firectl is on PATH",
 }
 
