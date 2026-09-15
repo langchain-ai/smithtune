@@ -627,6 +627,38 @@ def _source_workspace(
     return value
 
 
+def _source_key(
+    example: dict[str, Any], workspace_id: str, source_workspace_id: str | None,
+) -> tuple[str, str, str, str]:
+    workspace = _source_workspace(example, workspace_id, source_workspace_id)
+    identity = _source_identity(example)
+    metadata = example.get("metadata") or {}
+    project = example.get("source_session_id") or metadata.get("source_project_id")
+    if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
+        raise PipelineError("conflicting source project IDs")
+    if not isinstance(project, str) or not project:
+        raise PipelineError("missing source project ID; add metadata.source_project_id to the example (or supply source_session_id)")
+    return workspace, project, identity["source_scope"], identity["source_scope_id"]
+
+
+def _validate_unique_sources(
+    examples: list[dict[str, Any]], workspace_id: str, source_workspace_id: str | None,
+) -> None:
+    seen = {}
+    for example in examples:
+        try:
+            key = _source_key(example, workspace_id, source_workspace_id)
+        except PipelineError as exc:
+            raise PipelineError(f"example {example['id']}: {exc}") from exc
+        if key in seen:
+            workspace, project, scope, scope_id = key
+            raise PipelineError(
+                f"examples {seen[key]} and {example['id']} reference the same {scope} {scope_id} "
+                f"in project {project}, workspace {workspace}; keep one complete trajectory per source conversation"
+            )
+        seen[key] = example["id"]
+
+
 def capture_example_contracts(
     workspace_id: str, examples: list[dict[str, Any]], *,
     source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
@@ -665,20 +697,12 @@ def capture_example_contracts(
                                              source_project_id=example["metadata"].get("source_project_id"))
                 contracts[example_id] = parse_inference_contract(payload)
                 continue
-            source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
-            identity = _source_identity(example)
-            scope, scope_id = identity["source_scope"], identity["source_scope_id"]
-            metadata = example.get("metadata") or {}
-            project_id = example.get("source_session_id") or metadata.get("source_project_id")
-            if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
-                raise PipelineError("conflicting source project IDs")
-            if not isinstance(project_id, str) or not project_id:
-                raise PipelineError("missing source project ID; add metadata.source_project_id to the example (or supply source_session_id)")
+            key = _source_key(example, workspace_id, source_workspace_id)
+            source_workspace, project_id, scope, scope_id = key
             project_key = (source_workspace, project_id)
             if project_key not in project_starts:
                 project_starts[project_key] = _project_start_time(source_workspace, project_id, runner=runner)
             start_time = project_starts[project_key]
-            key = (source_workspace, project_id, scope, scope_id)
             if key not in sources:
                 if scope == "thread":
                     runs = _query_thread_llm_runs(source_workspace, project_id, scope_id, start_time=start_time, runner=runner)
@@ -952,6 +976,7 @@ def prepare_dataset(
     )
     expected_count = len(examples)
     audit = validate_trajectories(examples, expected_count)
+    _validate_unique_sources(examples, workspace_id, source_workspace_id)
     example_contracts = None
     if inference_contract is None:
         example_contracts = _example_contract_snapshot(

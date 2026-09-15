@@ -317,6 +317,7 @@ automatically and select the appropriate tokenizer and formatting.
 
 Preparation uses these defaults:
 
+- One complete trajectory per source conversation; repeated source identities fail validation before tool capture, including with `--no-fetch`
 - LoRA training on text and tool conversations; images are unsupported
 - Tool definitions are combined by name across each conversation, using the latest recorded description and compatible optional arguments; earlier turns see the combined definitions
 - 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
