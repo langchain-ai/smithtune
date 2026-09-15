@@ -240,7 +240,8 @@ def _import_selection(*, selection: Path, name: str, runner: Callable[..., Any] 
         receipt.update(dataset_id=dataset_id, pending_write=None)
         _save_receipt(receipt_path, receipt)
         common = {"trajectory_format": "messages", "conversation_scope": "root",
-                  "source_project_id": project_id, "selection_scope": "thread"}
+                  "source_project_id": project_id, "source_workspace_id": workspace_id,
+                  "selection_scope": "thread"}
         for source_id in ids:
             receipt.update(current_source_id=source_id, pending_write="example")
             _save_receipt(receipt_path, receipt)

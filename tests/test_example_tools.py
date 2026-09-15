@@ -130,7 +130,7 @@ def setup_preparation(tmp_path, monkeypatch, *, builtin=False):
     runner, _ = source_runner({("project-1", "thread-1"): [llm("run-1", [tool("weather")])],
                                ("project-1", "thread-2"): [llm("run-2", second_tools)]})
     collect = dataset.capture_example_contracts
-    monkeypatch.setattr(dataset, "capture_example_contracts", lambda workspace, examples: collect(workspace, examples, runner=runner))
+    monkeypatch.setattr(dataset, "capture_example_contracts", lambda workspace, examples, **kwargs: collect(workspace, examples, runner=runner, **kwargs))
     monkeypatch.setattr(dataset, "download_dataset", lambda *args: None)
     return examples
 
@@ -377,3 +377,83 @@ def test_optional_expansion_distinguishes_boolean_and_numeric_constraints():
     expanded["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
     with pytest.raises(ContractError, match="conflicting definitions"):
         contract_from_runs([llm("a", [base]), llm("b", [expanded])], workspace_id="workspace")
+
+
+def test_mixed_workspaces_route_and_cache_sources_separately():
+    examples = [example(i, thread="same") for i in range(1, 5)]
+    examples[1]["metadata"]["source_workspace_id"] = "other"
+    examples[2]["metadata"]["source_workspace_id"] = "other"
+    examples[3]["metadata"]["source_workspace_id"] = "workspace-id"
+    calls = []
+
+    def runner(command, capture=False):
+        workspace = command[command.index("--workspace") + 1]
+        body = json.loads(command[command.index("--body") + 1])
+        calls.append(workspace)
+        runs = [llm(f"run-{workspace}", [tool(workspace)])] if '"thread_id"' in body["trace_filter"] else []
+        return SimpleNamespace(stdout=json.dumps(page(runs)))
+
+    contracts = dataset.capture_example_contracts(
+        "workspace-id", examples, source_workspace_id="default-source", runner=runner,
+    )
+    assert calls == ["default-source"] * 3 + ["other"] * 3 + ["workspace-id"] * 3
+    for ex, workspace in zip(examples, ["default-source", "other", "other", "workspace-id"], strict=True):
+        contract = contracts[ex["id"]]
+        assert contract.provenance["source_workspace_id"] == workspace
+        assert contract.tools[0]["function"]["name"] == workspace
+
+
+def test_trace_project_discovery_uses_source_workspace():
+    ex = example(1)
+    del ex["source_thread_id"]
+    del ex["metadata"]["source_project_id"]
+    ex["metadata"]["source_trace_id"] = "trace-1"
+    queries = []
+
+    def runner(command, capture=False):
+        assert command[command.index("--workspace") + 1] == "source-workspace"
+        body = json.loads(command[command.index("--body") + 1])
+        queries.append(body)
+        runs = [{"id": "trace-1", "session_id": "project-1"}] if body.get("id") else [llm("run-1", [])]
+        return SimpleNamespace(stdout=json.dumps(page(runs)))
+
+    contracts = dataset.capture_example_contracts(
+        "dataset-workspace", [ex], source_workspace_id="source-workspace", runner=runner,
+    )
+    assert len(queries) == 2
+    assert contracts[ex["id"]].provenance["source_workspace_id"] == "source-workspace"
+
+
+@pytest.mark.parametrize("value", [None, "", " ", " padded ", 123, [], {}])
+def test_invalid_source_workspace_metadata_does_not_fall_back(value):
+    ex = example(1)
+    ex["metadata"]["source_workspace_id"] = value
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid source workspace must not trigger a query")
+
+    with pytest.raises(PipelineError, match="source workspace ID"):
+        dataset.capture_example_contracts("workspace-id", [ex], runner=unexpected)
+
+
+def test_source_workspace_access_failure_does_not_fall_back():
+    calls = []
+
+    def runner(command, capture=False):
+        calls.append(command[command.index("--workspace") + 1])
+        raise PipelineError("access denied")
+
+    with pytest.raises(PipelineError, match="example example-1.*access denied"):
+        dataset.capture_example_contracts(
+            "dataset-workspace", [example(1)], source_workspace_id="source-workspace", runner=runner,
+        )
+    assert calls == ["source-workspace"]
+
+
+def test_offline_capture_rejects_changed_source_workspace(tmp_path, monkeypatch):
+    setup_preparation(tmp_path, monkeypatch)
+    prepare(tmp_path)
+    with pytest.raises(PipelineError, match="different source workspace"):
+        prepare(tmp_path, fetch=False, source_workspace_id="different")
+    # Explicitly choosing the original workspace keeps existing caches usable.
+    prepare(tmp_path, fetch=False, source_workspace_id="workspace-id")

@@ -129,6 +129,14 @@ Preparation uses these defaults:
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; use `--max-seq-len 32768` to lower the limit
 
+If source traces live in another workspace, add
+`--source-workspace-id '<traces-workspace-id>'` to `prepare`; `--workspace-id`
+still identifies the dataset workspace. Per-example `metadata.source_workspace_id`
+takes precedence over this flag, which defaults to the dataset workspace. Your
+LangSmith API key must have access to both. `dataset create` saves the source
+workspace automatically; existing examples still need valid source thread/trace
+and project IDs.
+
 Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
 tokenizer loading still run. To supply the same tools for every example, use
 `--inference-contract path/to/contract.json` instead of automatic tool capture.
