@@ -14,6 +14,7 @@ import pytest
 from smithtune import artifacts
 from smithtune import curation
 from smithtune import dataset
+from smithtune.dataset_artifacts import load_conversation
 from smithtune import cli as pipeline
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
@@ -232,7 +233,12 @@ def test_partial_failure_has_receipt_and_never_retries(tmp_path):
     assert api.trajectory_calls() == [{"thread_id": "a"}, {"thread_id": "b"}]
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
     assert receipt["status"] == "failed" and receipt["pending_write"] is None
-    assert receipt["in_flight"] == [{"key": "thread_id", "id": "b", "pending_write": "example"}]
+    pending, = receipt["in_flight"]
+    saved = load_conversation(Path(pending.pop("conversation")))
+    assert pending == {"key": "thread_id", "id": "b", "pending_write": "example"}
+    assert saved["inputs"]["messages"] == api.messages
+    assert saved["metadata"]["source_scope_id"] == "b"
+    assert len(list((tmp_path / "conversations").glob("*.json"))) == 2
     assert receipt["dataset_id"] == uid(200)
     assert receipt["example_ids"] == [uid(300)]
 
@@ -251,6 +257,7 @@ def test_incomplete_trajectory_fails_before_the_example_write(tmp_path, response
         curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
     assert "outcome may be unknown" not in str(error.value)
     assert not any(path == "/api/v1/examples" for path, _ in api.calls)
+    assert not (tmp_path / "conversations").exists()
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
     assert receipt["status"] == "failed" and receipt["pending_write"] is None
     assert receipt["example_ids"] == [] and receipt["in_flight"] == [{"key": "thread_id", "id": "a", "pending_write": None}]
@@ -267,7 +274,9 @@ def test_unconfirmed_example_write_records_pending_write(tmp_path, response):
         curation._import_selection(selection=tmp_path / "selection.json", name="new", runner=runner)
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
     assert receipt["status"] == "failed"
-    assert receipt["example_ids"] == [] and receipt["in_flight"] == [{"key": "thread_id", "id": "a", "pending_write": "example"}]
+    pending, = receipt["in_flight"]
+    assert load_conversation(Path(pending.pop("conversation")))["inputs"]["messages"] == api.messages
+    assert receipt["example_ids"] == [] and pending == {"key": "thread_id", "id": "a", "pending_write": "example"}
 
 
 def test_saved_v1_thread_selection_must_be_regenerated(tmp_path):
@@ -342,7 +351,7 @@ def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
     assert parsed.concurrency == 4 and pipeline._parser().parse_args([*args, "--concurrency", "2"]).concurrency == 2
     api = API([[root(1, "a"), root(2, "a"), root(3, "b")]])
     create_dataset = curation.create_dataset
-    monkeypatch.setattr(curation, "DEFAULT_SELECTION_DIR", tmp_path / "selections")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: create_dataset(**kwargs, runner=api))
     monkeypatch.setattr(sys, "argv", ["pipeline.py", *args, "--filter", 'has(tags, "reviewed")', "--limit", "1"])
     pipeline.main()
@@ -434,14 +443,50 @@ def test_create_with_no_matches_does_not_create_empty_dataset(tmp_path):
 
 
 def test_create_default_paths_are_unique(tmp_path, monkeypatch):
-    monkeypatch.setattr(curation, "DEFAULT_SELECTION_DIR", tmp_path)
+    monkeypatch.chdir(tmp_path)
     first = create(tmp_path, API([[root(1, "a")]]), output=None)
     second = create(tmp_path, API([[root(1, "a")]]), name="another", output=None)
     assert first["selection"] != second["selection"]
     assert first["receipt"] != second["receipt"]
     for result in (first, second):
-        assert Path(result["selection"]).parent == tmp_path
+        run_dir = Path(result["run_dir"])
+        assert run_dir.parent == Path("data/datasets")
+        assert Path(result["selection"]) == run_dir / "selection.json"
+        conversation, = (run_dir / "conversations").glob("*.json")
+        assert load_conversation(conversation)["metadata"]["source_scope_id"] == "a"
         assert json.loads(Path(result["receipt"]).read_text())["status"] == "complete"
+
+
+def test_create_explicit_run_directory_and_conflicting_output(tmp_path):
+    api = API([[root(1, "a")]])
+
+    def check_saved_before_upload(path, body):
+        if path == "/api/v1/examples":
+            saved, = (tmp_path / "conversations").glob("*.json")
+            assert load_conversation(saved) == {key: value for key, value in body.items() if key != "dataset_id"}
+
+    api.failure = check_saved_before_upload
+    result = create(tmp_path, api, output=None, run_dir=tmp_path)
+    assert result["run_dir"] == str(tmp_path)
+    before = len(api.calls)
+    with pytest.raises(PipelineError, match="use --run-dir or --output"):
+        create(tmp_path, api, run_dir=tmp_path)
+    assert len(api.calls) == before
+
+
+def test_conversation_save_failure_prevents_upload(tmp_path, monkeypatch):
+    from smithtune import dataset_artifacts
+
+    api = API([[root(1, "a")]])
+
+    def disk_full(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(dataset_artifacts, "_json_dump", disk_full)
+    with pytest.raises(PipelineError, match="cannot save conversation"):
+        create(tmp_path, api)
+    assert not any(path == "/api/v1/examples" for path, _ in api.calls)
+    assert not list((tmp_path / "conversations").glob("*.json"))
 
 
 def test_create_validates_name_before_querying(tmp_path):

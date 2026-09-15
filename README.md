@@ -82,7 +82,13 @@ the returned dataset ID in `prepare`.
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
 - `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
 - Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
-- Choose a new dataset name. If an import fails, inspect its receipt in `data/selections/` before retrying
+- Choose a new dataset name. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
+
+Both dataset paths save complete examples under `conversations/` in a local run
+directory, defaulting to `data/datasets/<generated-id>/`. Creation saves each
+conversation before uploading it, alongside the selection and import receipt.
+Use `dataset create --run-dir <directory>` to choose a location. The returned
+`run_dir` identifies the saved files; they remain on disk after upload or failure.
 
 ## Label traces with an agent council
 
@@ -110,7 +116,7 @@ uv tool install --upgrade --python 3.12 \
 **1. Download and preview.** Supply the source only on the first run:
 
 ```bash
-smithtune dataset triage data/triage \
+smithtune dataset triage data/datasets/my-sft \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
   --limit 100
@@ -138,13 +144,14 @@ remove media blocks and then judge an altered trace.
 **2. Label, or resume an interrupted run:**
 
 ```bash
-smithtune dataset triage data/triage --confirm
+smithtune dataset triage data/datasets/my-sft --confirm
 ```
 
 The CLI reuses the saved source and settings. New defaults apply only to new
 plans; existing plans retain their selected models. It saves each vote as it finishes.
 Repeating the command retries incomplete votes; a completed run makes no new
-agent calls. The directory defaults to `data/triage` if omitted.
+agent calls. Omitting the directory on a new run generates one under
+`data/datasets/`; use the printed directory to resume or import that run.
 
 ```text
 LangSmith traces
@@ -196,7 +203,7 @@ triage does not write feedback to LangSmith.
 **3. Create a dataset from accepted conversations:**
 
 ```bash
-smithtune dataset create --triage-dir data/triage --name selected-sft --confirm
+smithtune dataset create --triage-dir data/datasets/my-sft --name selected-sft --confirm
 ```
 
 Every trace in a conversation must pass. This prevents a passing turn from

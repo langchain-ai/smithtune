@@ -19,6 +19,7 @@ from uuid import NAMESPACE_URL, uuid5
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run
 from smithtune.curation import _api, _matches, _time, _uuid
 from smithtune.dataset import convert_message, validate_trajectories
+from smithtune.dataset_artifacts import save_conversation
 from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 
@@ -351,6 +352,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
                                 "source_workspace_id": workspace, "source_scope": "thread" if thread else "trace",
                                 "source_scope_id": thread or unit_traces[0],
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
+        save_conversation(output_dir, example)
         contract = None
         error = None
         try:

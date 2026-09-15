@@ -89,7 +89,7 @@ report; only validated subagent votes determine `labels.jsonl`.
    ```
 
    The CLI reuses saved source and council settings. No config file or runner
-   flag is needed. The directory defaults to `data/triage` when omitted.
+   flag is needed. Use the run directory printed by the preview command.
 5. Read `labels.jsonl` and `report.md`. Each trace has only `trace_id`, `keep`
    (1 = use for SFT, 0 = do not use), and `reason`. Explain the counts and
    main reasons to the user, and give the result path. The CLI combines reasons

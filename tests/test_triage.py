@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 from smithtune import cli, dataset, triage, triage_judges, triage_source
+from smithtune.dataset_artifacts import load_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
@@ -97,6 +98,8 @@ def test_snapshot_expands_to_earlier_turns_and_preserves_tree(tmp_path):
     assert frozen["traces"][1]["messages"] == messages(1) + messages(2)
     assert frozen["traces"][1]["runs"][1]["parent_run_id"] == uid(2)
     assert frozen["units"][0]["example"]["inputs"]["messages"] == messages(1) + messages(2)
+    conversation, = (tmp_path / "conversations").glob("*.json")
+    assert load_conversation(conversation) == frozen["units"][0]["example"]
     api.calls.clear()
     assert triage_source.snapshot(source(), tmp_path, runner=api) == frozen
     assert api.calls == []
@@ -364,6 +367,75 @@ def test_changed_triaged_messages_are_rejected(tmp_path):
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     with pytest.raises(PipelineError, match="changed after judging"):
         dataset.capture_example_contracts(uid(100), examples)
+
+
+def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
+    run(tmp_path)
+    path, = (tmp_path / "conversations").glob("*.json")
+    example = load_conversation(path)
+    example["inputs"]["messages"][-1]["content"] = "changed since judging"
+    path.write_text(json.dumps(example))
+    with pytest.raises(PipelineError, match="saved conversation has changed"):
+        triage.create_triaged_dataset(tmp_path, "selected", confirm=True,
+            runner=lambda *_a, **_kw: pytest.fail("changed conversation reached upload"))
+
+
+def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
+    run(tmp_path)
+    snapshot_bytes = (tmp_path / "snapshot.json").read_bytes()
+    for path in (tmp_path / "conversations").glob("*.json"):
+        path.unlink()
+    example, = triage.selected_examples(tmp_path)
+    saved, = (tmp_path / "conversations").glob("*.json")
+    assert load_conversation(saved)["inputs"] == example["inputs"]
+    assert (tmp_path / "snapshot.json").read_bytes() == snapshot_bytes
+
+
+def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    original = triage.run_triage
+    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
+        *args, **kwargs, runner=API(), judge_call=judge_call))
+    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
+            "--start-time", source()["start_time"], "--end-time", source()["end_time"]]
+    directories = []
+    for _ in range(2):
+        cli.main(args)
+        run_dir = Path(json.loads(capsys.readouterr().out)["run_dir"])
+        assert run_dir.parent == Path("data/datasets")
+        assert (run_dir / "snapshot.json").exists()
+        assert len(list((run_dir / "conversations").glob("*.json"))) == 1
+        directories.append(run_dir)
+    assert directories[0] != directories[1]
+    cli.main(["dataset", "triage", str(directories[0]), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["run_dir"] == str(directories[0])
+    with pytest.raises(SystemExit):
+        cli.main(["dataset", "triage", "--confirm"])
+    assert "supply a saved run directory" in capsys.readouterr().err
+
+
+def test_directory_docs_keep_saved_votes_but_coordinator_changes_do_not(tmp_path, monkeypatch):
+    resource_dir = tmp_path / "resources"
+    skill_path = resource_dir / "skills/sft-trace-triage/SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    current = triage.files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text()
+    skill_path.write_text(current.replace(
+        "flag is needed. Use the run directory printed by the preview command.",
+        "flag is needed. The directory defaults to `data/triage` when omitted.",
+    ))
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(triage.load_config(None)))
+    run_dir = tmp_path / "run"
+    with monkeypatch.context() as patch:
+        patch.setattr(triage, "files", lambda _: resource_dir)
+        run(run_dir, runner_mode="deepagent", config_path=config_path)
+    saved_votes = (run_dir / "judgments.jsonl").read_bytes()
+    assert run(run_dir, runner_mode="deepagent", config_path=config_path)["status"] == "complete"
+    assert (run_dir / "judgments.jsonl").read_bytes() == saved_votes
+    skill_path.write_text(current.replace("strict majority", "unanimous vote"))
+    monkeypatch.setattr(triage, "files", lambda _: resource_dir)
+    with pytest.raises(PipelineError, match="different input.*new output directory"):
+        run(run_dir, runner_mode="deepagent", config_path=config_path)
 
 
 @pytest.mark.parametrize("fetch", [False, True])
