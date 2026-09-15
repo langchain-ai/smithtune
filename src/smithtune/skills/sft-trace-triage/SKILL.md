@@ -19,7 +19,7 @@ Do not judge or rewrite the trajectory yourself.
 
 Use `code_mode` with:
 
-- `pending_tasks(limit=32)`: up to 128 unattempted `{trajectory_id, judge}` pairs.
+- `pending_tasks(limit=128)`: up to 128 unattempted `{trajectory_id, judge}` pairs.
 - `judge_batch(tasks)`: dispatch those pairs with the configured concurrency.
   Results are saved before the function returns.
 

@@ -22,7 +22,7 @@ class JudgeTasks:
         self.claimed = set()
         self.finished = {}
 
-    def pending_tasks(self, limit: int = 32) -> list[dict]:
+    def pending_tasks(self, limit: int = 128) -> list[dict]:
         """List up to 128 pending trajectory/judge pairs, without copying trajectory bodies."""
         if type(limit) is not int or not 1 <= limit <= 128:
             raise ValueError("limit must be between 1 and 128")
@@ -104,7 +104,7 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
 
     @tool
     def code_mode(code: str) -> dict:
-        """Execute sandboxed Python. Use pending_tasks(limit=32) and judge_batch(tasks). judge_batch launches isolated judge subagents in
+        """Execute sandboxed Python. Use pending_tasks(limit=128) and judge_batch(tasks). judge_batch launches isolated judge subagents in
         parallel and saves checked votes. No shell, network, or host files.
         Example: jobs = pending_tasks(); judge_batch(jobs) if jobs else []
         Each call has fresh Python state. Return counts or compact task status.
