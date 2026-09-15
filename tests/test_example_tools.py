@@ -95,9 +95,9 @@ def test_same_thread_name_in_different_projects_stays_separate():
 @pytest.mark.parametrize("native", [False, True])
 def test_trace_only_example_queries_every_llm_in_that_trace(native):
     ex = example(1)
-    del ex["metadata"]["source_project_id"]
     ex["metadata"].update(source_scope="trace", source_scope_id="trace-1")
     if native:
+        del ex["metadata"]["source_project_id"]
         ex["source_session_id"] = "project-1"
     queries = []
 
@@ -105,9 +105,6 @@ def test_trace_only_example_queries_every_llm_in_that_trace(native):
         if command[2].startswith("/api/v1/sessions/"):
             return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
                                                       "start_time": "2026-09-01T00:00:00Z"}))
-        if command[2] == "/api/v1/runs/trace-1":
-            queries.append({"lookup": "trace-1"})
-            return SimpleNamespace(stdout=json.dumps({"id": "trace-1", "session_id": "project-1"}))
         body = json.loads(command[command.index("--body") + 1])
         queries.append(body)
         assert body["project_ids"] == ["project-1"]
@@ -117,7 +114,7 @@ def test_trace_only_example_queries_every_llm_in_that_trace(native):
 
     contracts = dataset.capture_example_contracts("workspace-id", [ex], runner=runner)
     assert len(contracts[ex["id"]].tools) == 2
-    assert len(queries) == (1 if native else 2)
+    assert len(queries) == 1
 
 
 def test_toolless_source_is_valid_but_missing_source_calls_are_not():
@@ -412,9 +409,8 @@ def test_mixed_workspaces_route_and_cache_sources_separately():
         assert contract.tools[0]["function"]["name"] == workspace
 
 
-def test_trace_project_discovery_uses_source_workspace():
+def test_trace_with_explicit_project_uses_source_workspace():
     ex = example(1)
-    del ex["metadata"]["source_project_id"]
     ex["metadata"].update(source_scope="trace", source_scope_id="trace-1")
     queries = []
 
@@ -423,9 +419,6 @@ def test_trace_project_discovery_uses_source_workspace():
         if command[2].startswith("/api/v1/sessions/"):
             return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
                                                       "start_time": "2026-09-01T00:00:00Z"}))
-        if command[2] == "/api/v1/runs/trace-1":
-            queries.append({"lookup": "trace-1"})
-            return SimpleNamespace(stdout=json.dumps({"id": "trace-1", "session_id": "project-1"}))
         body = json.loads(command[command.index("--body") + 1])
         queries.append(body)
         runs = [llm("run-1", [])]
@@ -434,7 +427,7 @@ def test_trace_project_discovery_uses_source_workspace():
     contracts = dataset.capture_example_contracts(
         "dataset-workspace", [ex], source_workspace_id="source-workspace", runner=runner,
     )
-    assert len(queries) == 2
+    assert len(queries) == 1
     assert contracts[ex["id"]].provenance["source_workspace_id"] == "source-workspace"
 
 
@@ -629,3 +622,16 @@ def test_project_history_start_is_fetched_once_per_workspace_and_project():
 
     assert len(dataset.capture_example_contracts("workspace-id", examples, runner=runner)) == 2
     assert lookups == ["/api/v1/sessions/project-1"]
+
+
+@pytest.mark.parametrize("scope", ["thread", "trace"])
+def test_missing_source_project_fails_without_discovery(scope):
+    ex = example(1)
+    del ex["metadata"]["source_project_id"]
+    ex["metadata"].update(source_scope=scope, source_scope_id=f"{scope}-1")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("missing source project must not trigger a network request")
+
+    with pytest.raises(PipelineError, match=r"example example-1: cannot collect tools: missing source project ID; add metadata.source_project_id"):
+        dataset.capture_example_contracts("workspace-id", [ex], runner=unexpected)

@@ -646,11 +646,8 @@ def capture_example_contracts(
             project_id = example.get("source_session_id") or metadata.get("source_project_id")
             if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
                 raise PipelineError("conflicting source project IDs")
-            if project_id is None and scope == "trace":
-                root = _read_contract_run(source_workspace, scope_id, runner=runner)
-                project_id = root.get("session_id")
             if not isinstance(project_id, str) or not project_id:
-                raise PipelineError("missing source project ID; use source_session_id or metadata.source_project_id, or supply --inference-contract")
+                raise PipelineError("missing source project ID; add metadata.source_project_id to the example (or supply source_session_id)")
             project_key = (source_workspace, project_id)
             if project_key not in project_starts:
                 project_starts[project_key] = _project_start_time(source_workspace, project_id, runner=runner)
