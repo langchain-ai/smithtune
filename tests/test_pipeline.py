@@ -40,7 +40,8 @@ def example(index: int, messages: list[dict] | None = None, thread: str | None =
         },
         "outputs": None,
         "metadata": {
-            "source_thread_id": thread or f"thread-{index}",
+            "source_scope": "thread",
+            "source_scope_id": thread or f"thread-{index}",
             "trajectory_format": "messages",
             "conversation_scope": "root",
         },
@@ -136,8 +137,6 @@ def loaded_contract(tmp_path: Path, *, legacy: bool = True) -> inference_contrac
 
 def test_download_dataset_pages_past_one_hundred(tmp_path: Path):
     rows = [example(i) for i in range(205)]
-    for row in rows:
-        row["source_thread_id"] = row["metadata"].pop("source_thread_id")
     commands: list[list[str]] = []
 
     def runner(command, capture=False):
@@ -164,7 +163,7 @@ def test_download_dataset_pages_past_one_hundred(tmp_path: Path):
     assert all("workspace-id" in command for command in commands)
     assert all(any("dataset-id" in argument for argument in command) for command in commands)
     dataset_ops.validate_trajectories(returned, 205)
-    assert all(row["_source"]["source_thread_id"] for row in dataset_ops.prepare_sft_rows(returned))
+    assert all(row["_source"]["source_scope_id"] for row in dataset_ops.prepare_sft_rows(returned))
 
 
 def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
@@ -315,66 +314,46 @@ def test_validation_requires_an_assistant_training_target():
         dataset_ops.validate_trajectories([example(0, messages)], 1)
 
 
-def test_split_groups_source_threads_without_leakage():
-    examples = [example(i, thread=f"thread-{i // 2}") for i in range(100)]
+def test_split_is_stable_and_disjoint_across_row_order():
+    examples = [example(i) for i in range(100)]
     dataset_ops.validate_trajectories(examples, 100)
     rows = dataset_ops.prepare_sft_rows(examples)
     first = dataset_ops.split_rows(rows)
     second = dataset_ops.split_rows(list(reversed(rows)))
-    train_threads = {row["_source"]["source_thread_id"] for row in first[0]}
-    validation_threads = {row["_source"]["source_thread_id"] for row in first[1]}
-    test_threads = {row["_source"]["source_thread_id"] for row in first[2]}
-    assert len(first[0]) == 80
-    assert len(first[1]) == 10
-    assert len(first[2]) == 10
-    assert validation_threads == {row["_source"]["source_thread_id"] for row in second[1]}
-    assert test_threads == {row["_source"]["source_thread_id"] for row in second[2]}
-    assert train_threads.isdisjoint(validation_threads | test_threads)
-    assert validation_threads.isdisjoint(test_threads)
+    ids = [{row["_source"]["source_scope_id"] for row in part} for part in first]
+    assert [len(part) for part in first] == [80, 10, 10]
+    assert ids == [{row["_source"]["source_scope_id"] for row in part} for part in second]
+    assert ids[0].isdisjoint(ids[1] | ids[2]) and ids[1].isdisjoint(ids[2])
 
 
-def test_source_identity_supports_native_legacy_and_standalone_trace():
-    native = example(1)
-    native["source_thread_id"] = "native-thread"
-    native["metadata"].pop("source_thread_id")
-    legacy = example(2, thread="legacy-thread")
-    trace = example(3)
-    trace["metadata"].pop("source_thread_id")
-    trace["metadata"]["source_trace_id"] = "trace-3"
+def test_source_identity_reads_scope_and_id_from_metadata():
+    thread = example(1, thread="thread-a")
+    trace = example(2)
+    trace["metadata"].update(source_scope="trace", source_scope_id="trace-2")
+    # Top-level fields are not consulted; metadata is the single source of identity.
+    trace["source_thread_id"] = "ignored"
 
-    dataset_ops.validate_trajectories([native, legacy, trace], 3)
-    rows = dataset_ops.prepare_sft_rows([native, legacy, trace])
+    dataset_ops.validate_trajectories([thread, trace], 2)
+    rows = dataset_ops.prepare_sft_rows([thread, trace])
 
-    assert rows[0]["_source"]["source_thread_id"] == "native-thread"
-    assert rows[0]["_source"]["source_trace_id"] is None
-    assert rows[1]["_source"]["source_thread_id"] == "legacy-thread"
-    assert rows[2]["_source"]["source_thread_id"] is None
-    assert rows[2]["_source"]["source_trace_id"] == "trace-3"
+    assert rows[0]["_source"]["source_scope"] == "thread" and rows[0]["_source"]["source_scope_id"] == "thread-a"
+    assert rows[1]["_source"]["source_scope"] == "trace" and rows[1]["_source"]["source_scope_id"] == "trace-2"
 
 
-def test_source_identity_rejects_conflicting_thread_ids():
-    conflicting = example(1, thread="legacy-thread")
-    conflicting["source_thread_id"] = "native-thread"
-
-    with pytest.raises(PipelineError, match="conflicting source_thread_id"):
-        dataset_ops.validate_trajectories([conflicting], 1)
-
-
-def test_source_identity_validates_and_reconciles_trace_ids():
-    with pytest.raises(PipelineError, match="identity source_trace_id must be a non-empty string"):
-        dataset_ops._source_identity({"source_trace_id": 123, "metadata": {}})
-    with pytest.raises(PipelineError, match="identity metadata.source_trace_id must be a non-empty string"):
-        dataset_ops._source_identity({"metadata": {"source_trace_id": ""}})
-    with pytest.raises(PipelineError, match="conflicting source_trace_id"):
-        dataset_ops._source_identity(
-            {"source_trace_id": "trace-a", "metadata": {"source_trace_id": "trace-b"}}
-        )
-
-    identity = dataset_ops._source_identity(
-        {"source_trace_id": "trace-a", "metadata": {"source_trace_id": "trace-a"}}
-    )
-
-    assert identity == {"source_thread_id": None, "source_trace_id": "trace-a"}
+@pytest.mark.parametrize(("metadata", "match"), [
+    ({}, "source_scope must be thread or trace"),
+    ({"source_scope": "run", "source_scope_id": "x"}, "source_scope must be thread or trace"),
+    ({"source_scope": "thread"}, "source_scope_id must be a non-empty string"),
+    ({"source_scope": "trace", "source_scope_id": ""}, "source_scope_id must be a non-empty string"),
+    ({"source_scope": "trace", "source_scope_id": 123}, "source_scope_id must be a non-empty string"),
+])
+def test_source_identity_rejects_missing_or_invalid_scope(metadata, match):
+    with pytest.raises(PipelineError, match=match):
+        dataset_ops._source_identity({"metadata": metadata})
+    invalid = example(1)
+    invalid["metadata"] = {"trajectory_format": "messages", "conversation_scope": "root", **metadata}
+    with pytest.raises(PipelineError, match=match):
+        dataset_ops.validate_trajectories([invalid], 1)
 
 
 def test_message_errors_identify_the_example_and_message_position():
@@ -392,38 +371,32 @@ def test_message_errors_identify_the_example_and_message_position():
         dataset_ops.prepare_sft_rows([extra_keys])
 
 
-def test_split_uses_threads_before_traces_and_preserves_legacy_ranking():
-    examples = [example(index, thread=f"thread-{index}") for index in range(10)]
-    for index, item in enumerate(examples):
-        item["metadata"]["source_trace_id"] = f"trace-{index}"
-    rows = dataset_ops.prepare_sft_rows(examples)
+def test_split_ranks_conversations_by_hashed_scope_id():
+    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)])
     first = dataset_ops.split_rows(rows)
     second = dataset_ops.split_rows(list(reversed(rows)))
-    legacy_ranked = sorted(
-        {f"thread-{index}" for index in range(10)},
+    ranked = sorted(
+        (f"thread-{index}" for index in range(10)),
         key=lambda value: hashlib.sha256(f"{dataset_ops.SPLIT_SEED}:{value}".encode()).hexdigest(),
     )
 
-    assert {row["_source"]["source_thread_id"] for row in first[1]} == {legacy_ranked[0]}
-    assert {row["_source"]["source_thread_id"] for row in first[2]} == {legacy_ranked[1]}
-    assert [[row["_source"]["example_id"] for row in part] for part in first] != [
-        [row["_source"]["example_id"] for row in part] for part in second
-    ]
-    assert [{dataset_ops._source_group(row) for row in part} for part in first] == [
-        {dataset_ops._source_group(row) for row in part} for part in second
+    assert [row["_source"]["source_scope_id"] for row in first[1]] == [ranked[0]]
+    assert [row["_source"]["source_scope_id"] for row in first[2]] == [ranked[1]]
+    assert [row["_source"]["example_id"] for row in first[0]] != [row["_source"]["example_id"] for row in second[0]]
+    assert [{row["_source"]["source_scope_id"] for row in part} for part in first] == [
+        {row["_source"]["source_scope_id"] for row in part} for part in second
     ]
 
 
-def test_standalone_traces_are_independent_split_groups():
+def test_trace_scoped_conversations_split_like_threads():
     examples = [example(index) for index in range(10)]
     for index, item in enumerate(examples):
-        item["metadata"].pop("source_thread_id")
-        item["metadata"]["source_trace_id"] = f"trace-{index}"
+        item["metadata"].update(source_scope="trace", source_scope_id=f"trace-{index}")
     rows = dataset_ops.prepare_sft_rows(examples)
     splits = dataset_ops.split_rows(rows)
 
     assert [len(part) for part in splits] == [8, 1, 1]
-    assert all(row["_source"]["source_thread_id"] is None for part in splits for row in part)
+    assert all(row["_source"]["source_scope"] == "trace" for part in splits for row in part)
 
 
 def test_split_supports_test_only_and_validation_only_holdouts():
@@ -465,10 +438,10 @@ def test_split_treats_fractions_summing_to_one_as_no_training_partition(
     assert len(validation) == round(10 * validation_fraction)
 
 
-def test_split_isolation_rejects_duplicate_content_across_threads():
+def test_split_isolation_rejects_duplicate_content_across_conversations():
     train_row = dataset_ops.prepare_sft_rows([example(1, thread="train-thread")])[0]
     test_row = copy.deepcopy(train_row)
-    test_row["_source"]["source_thread_id"] = "test-thread"
+    test_row["_source"]["source_scope_id"] = "test-thread"
 
     with pytest.raises(PipelineError, match="content hash overlap"):
         dataset_ops._validate_split_isolation([train_row], [], [test_row])
@@ -617,7 +590,7 @@ def test_prepare_accepts_a_test_only_dataset(tmp_path: Path):
     )
 
     assert manifest["split"] == {
-        "method": "sha256(seed:source_thread_id)",
+        "method": "sha256(seed:source_scope_id)",
         "seed": dataset_ops.SPLIT_SEED,
         "validation_fraction": 0.0,
         "test_fraction": 1.0,
@@ -693,8 +666,7 @@ def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyP
         "messages": [],
         "_source": {
             "example_id": "one",
-            "source_thread_id": "thread-one",
-            "source_trace_id": "trace-one",
+            "source_scope": "thread", "source_scope_id": "thread-one",
         },
     }
     accepted, rejected, audit = rendering.validate_model_context([row], model)
@@ -702,8 +674,7 @@ def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyP
     assert rejected == [
         {
             "example_id": "one",
-            "source_thread_id": "thread-one",
-            "source_trace_id": "trace-one",
+            "source_scope": "thread", "source_scope_id": "thread-one",
             "rendered_tokens": 3,
             "context_limit": 2,
             "reason": "rendered example exceeds model context limit",
@@ -744,7 +715,7 @@ def test_model_context_passes_tools_to_renderer_and_fails_closed(
     row = {
         "messages": [{"role": "user", "content": "find x"}],
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
-        "_source": {"example_id": "one", "source_thread_id": "thread-one"},
+        "_source": {"example_id": "one", "source_scope": "thread", "source_scope_id": "thread-one"},
     }
 
     accepted, rejected, _ = rendering.validate_model_context([row], model)
@@ -786,7 +757,7 @@ def test_replay_cases_slice_before_even_tool_boundaries():
     rows = [
         {
             "messages": messages,
-            "_source": {"example_id": "example-1", "source_thread_id": "thread-1"},
+            "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
         }
     ]
 
@@ -811,7 +782,7 @@ def test_replay_cases_include_every_assistant_message_by_default():
     rows = [
         {
             "messages": messages,
-            "_source": {"example_id": "example-1", "source_thread_id": "thread-1"},
+            "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
         }
     ]
 
@@ -845,7 +816,7 @@ def test_replay_cases_preserve_tools_and_contract_hash():
             "tools": tools,
             "_source": {
                 "example_id": "example-1",
-                "source_thread_id": "thread-1",
+                "source_scope": "thread", "source_scope_id": "thread-1",
                 "contract_sha256": "contract-hash",
             },
         }
@@ -866,16 +837,16 @@ def test_replay_cases_include_trace_provenance():
             ],
             "_source": {
                 "example_id": "example-1",
-                "source_thread_id": None,
-                "source_trace_id": "trace-1",
+                "source_scope": "trace",
+                "source_scope_id": "trace-1",
             },
         }
     ]
 
     cases = replay.build_replay_cases(rows)
 
-    assert cases[0]["source_thread_id"] is None
-    assert cases[0]["source_trace_id"] == "trace-1"
+    assert cases[0]["source_scope"] == "trace"
+    assert cases[0]["source_scope_id"] == "trace-1"
 
 
 def test_replay_context_rejects_without_truncation(monkeypatch: pytest.MonkeyPatch):
@@ -892,8 +863,8 @@ def test_replay_context_rejects_without_truncation(monkeypatch: pytest.MonkeyPat
     case = {
         "id": "case",
         "example_id": "example",
-        "source_thread_id": None,
-        "source_trace_id": "trace-1",
+        "source_scope": "trace",
+        "source_scope_id": "trace-1",
         "messages": [],
     }
 
@@ -902,8 +873,8 @@ def test_replay_context_rejects_without_truncation(monkeypatch: pytest.MonkeyPat
     assert accepted == []
     assert rejected[0]["prompt_tokens"] == 3
     assert rejected[0]["context_limit"] == 4
-    assert rejected[0]["source_thread_id"] is None
-    assert rejected[0]["source_trace_id"] == "trace-1"
+    assert rejected[0]["source_scope"] == "trace"
+    assert rejected[0]["source_scope_id"] == "trace-1"
 
 
 def test_replay_context_counts_tool_declarations(monkeypatch: pytest.MonkeyPatch):
@@ -970,7 +941,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
         "tools": list(contract.tools),
         "_source": {
             "example_id": "example-1",
-            "source_thread_id": "thread-1",
+            "source_scope": "thread", "source_scope_id": "thread-1",
             "contract_sha256": contract.contract_sha256,
         },
     }
@@ -1034,7 +1005,7 @@ def test_replay_evaluation_reports_text_scores(tmp_path: Path, monkeypatch: pyte
             {"role": "user", "content": "What is x?", "id": "user-1"},
             {"role": "assistant", "content": "x is 1", "id": "assistant-1"},
         ],
-        "_source": {"example_id": "example-1", "source_thread_id": "thread-1"},
+        "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
     }
     (data_dir / "prepared" / "test.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     monkeypatch.setattr(
@@ -1080,7 +1051,7 @@ def test_replay_resume_rejects_a_different_model_set(
             {"role": "user", "content": "What is x?", "id": "user-1"},
             {"role": "assistant", "content": "x is 1", "id": "assistant-1"},
         ],
-        "_source": {"example_id": "example-1", "source_thread_id": "thread-1"},
+        "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
     }
     (data_dir / "prepared" / "test.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     monkeypatch.setattr(

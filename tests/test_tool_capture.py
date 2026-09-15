@@ -77,7 +77,7 @@ def test_capture_combines_tools_from_all_pages_and_traces(tmp_path):
     # Preparation already shares the captured union with every example.
     examples = [{"id": str(i), "inputs": {"messages": [
         {"role": "human", "content": "Hi"}, {"role": "ai", "content": "Hello"},
-    ]}, "metadata": {"source_thread_id": f"thread-{i}"}} for i in range(2)]
+    ]}, "metadata": {"source_scope": "thread", "source_scope_id": f"thread-{i}"}} for i in range(2)]
     rows = dataset.prepare_sft_rows(examples, contract=contract)
     assert all(row["tools"] == list(contract.tools) for row in rows)
 

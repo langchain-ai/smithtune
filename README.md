@@ -81,7 +81,7 @@ the returned dataset ID in `prepare`.
 
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
 - `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
-- Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default)
+- Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
 - Choose a new dataset name. If an import fails, inspect its receipt in `data/selections/` before retrying
 
 ## Prepare data
@@ -92,7 +92,8 @@ Optional top-level arguments are combined when the rest of the tool definition
 matches; the expanded schema applies to the whole conversation. Provider built-ins
 (such as tool search) and incompatible tool definitions remain unsupported.
 
-Existing datasets need source thread/trace and project IDs; CLI-created datasets
+Existing datasets need `source_scope` (thread or trace), `source_scope_id`, and
+`source_project_id` in each example's metadata; CLI-created datasets
 include these automatically. Recorded system messages are preserved; the default
 Qwen renderer requires them at the start.
 
@@ -145,7 +146,7 @@ If source traces live in another workspace, add
 still identifies the dataset workspace. Per-example `metadata.source_workspace_id`
 takes precedence over this flag, which defaults to the dataset workspace. Your
 LangSmith API key must have access to both. `dataset create` saves the source
-workspace automatically; existing examples still need valid source thread/trace
+workspace automatically; existing examples still need valid source scope
 and project IDs.
 
 Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and

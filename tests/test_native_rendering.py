@@ -70,7 +70,7 @@ def test_native_loading_and_loops_conversion_do_not_import_fireworks(monkeypatch
 def test_each_native_datum_is_checked_against_context_limit(monkeypatch):
     renderer = _renderer()
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: renderer)
-    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "e", "source_thread_id": "t"}}
+    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "e", "source_scope": "thread", "source_scope_id": "t"}}
     maximum = max(len(datum.token_ids) for datum in renderer.render(MESSAGES, TOOLS))
     model = replace(MODEL, max_seq_len=maximum, trainer_max_seq_len=maximum)
     accepted, rejected, audit = rendering.validate_model_context([row], model)

@@ -201,11 +201,11 @@ def test_import_fetches_each_trajectory_and_creates_one_example(tmp_path):
         ("/v1/trajectory", {"project_id": uid(101), "thread_id": "a",
                             "format": "messages", "include": {"system_messages": True}}),
         ("/api/v1/examples", {"dataset_id": uid(200), "inputs": {"messages": api.messages}, "outputs": None,
-                              "metadata": {**COMMON_METADATA, "selection_scope": "thread", "source_thread_id": "a"}}),
+                              "metadata": {**COMMON_METADATA, "source_scope": "thread", "source_scope_id": "a"}}),
         ("/v1/trajectory", {"project_id": uid(101), "trace_id": uid(3),
                             "format": "messages", "include": {"system_messages": True}}),
         ("/api/v1/examples", {"dataset_id": uid(200), "inputs": {"messages": api.messages}, "outputs": None,
-                              "metadata": {**COMMON_METADATA, "selection_scope": "trace", "source_trace_id": uid(3)}}),
+                              "metadata": {**COMMON_METADATA, "source_scope": "trace", "source_scope_id": uid(3)}}),
     ]
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["status"] == "complete"
@@ -222,7 +222,7 @@ def test_partial_failure_has_receipt_and_never_retries(tmp_path):
     api = API([[root(1, "a"), root(2, "b")]])
     select(tmp_path, api)
     def fail(path, body):
-        if path == "/api/v1/examples" and body["metadata"]["source_thread_id"] == "b":
+        if path == "/api/v1/examples" and body["metadata"]["source_scope_id"] == "b":
             raise subprocess.CalledProcessError(1, "langsmith", stderr="request timed out; private message")
     api.failure = fail
     with pytest.raises(PipelineError, match="confirmed=1.*source=thread_id=b") as error:
@@ -406,8 +406,8 @@ def test_create_download_prepare(tmp_path):
     # Provider JSONL strips provenance; the preserved raw examples keep it.
     assert all(row["messages"][0]["role"] == "user" for row in rows)
     source_rows = dataset.prepare_sft_rows(api.examples)
-    assert sum(bool(row["_source"]["source_thread_id"]) for row in source_rows) == 8
-    assert sum(bool(row["_source"]["source_trace_id"]) and not row["_source"]["source_thread_id"] for row in source_rows) == 4
+    assert sum(row["_source"]["source_scope"] == "thread" for row in source_rows) == 8
+    assert sum(row["_source"]["source_scope"] == "trace" for row in source_rows) == 4
 
 
 def test_create_freezes_paginated_selection_before_import(tmp_path):
@@ -451,23 +451,58 @@ def test_create_validates_name_before_querying(tmp_path):
     assert api.calls == []
 
 
-def test_create_failure_reports_partial_dataset_and_saved_receipt(tmp_path):
+def test_create_failure_reports_partial_dataset_and_saved_receipt(tmp_path, monkeypatch):
     api = API([[root(1, "a"), root(2)]])
     def fail(path, body):
         if path == "/v1/trajectory" and body.get("trace_id") == uid(2):
             raise subprocess.CalledProcessError(1, "langsmith", stderr="timeout")
     api.failure = fail
+    monkeypatch.setattr(curation, "_sleep", lambda seconds: None)
     with pytest.raises(PipelineError, match=f"confirmed=1.*source=trace_id={uid(2)}.*receipt="):
         create(tmp_path, api)
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
     assert receipt["status"] == "failed" and receipt["dataset_id"] == uid(200)
     assert receipt["example_ids"] == [uid(300)]
-    assert api.trajectory_calls() == [{"thread_id": "a"}, {"trace_id": uid(2)}]
+    assert api.trajectory_calls() == [{"thread_id": "a"}] + [{"trace_id": uid(2)}] * 3
 
 
-def test_concurrent_import_bounds_in_flight_work_and_drains_after_failure(tmp_path):
+def test_transient_trajectory_failures_are_retried_but_example_writes_are_not(tmp_path, monkeypatch):
+    api = API([[root(1, "a"), root(2, "b")]])
+    sleeps = []
+    monkeypatch.setattr(curation, "_sleep", sleeps.append)
+    attempts = {"a": 0, "b": 0}
+    def flaky(path, body):
+        if path == "/v1/trajectory":
+            attempts[body["thread_id"]] += 1
+            if body["thread_id"] == "a" and attempts["a"] < 3:
+                raise subprocess.CalledProcessError(1, "langsmith", stderr="connection reset")
+        if path == "/api/v1/examples" and body["metadata"]["source_scope_id"] == "b":
+            raise subprocess.CalledProcessError(1, "langsmith", stderr="connection reset")
+    api.failure = flaky
+    with pytest.raises(PipelineError, match="request failed; dataset=.*confirmed=1.*source=thread_id=b.*outcome may be unknown"):
+        create(tmp_path, api)
+    assert attempts == {"a": 3, "b": 1}
+    assert sleeps == [1.0, 2.0]
+    assert sum(path == "/api/v1/examples" for path, _ in api.calls) == 2
+
+
+def test_trajectory_fetch_gives_up_after_three_attempts(tmp_path, monkeypatch):
+    api = API([[root(1, "a")]])
+    monkeypatch.setattr(curation, "_sleep", lambda seconds: None)
+    def always_fail(path, body):
+        if path == "/v1/trajectory":
+            raise subprocess.CalledProcessError(1, "langsmith", stderr="HTTP 503")
+    api.failure = always_fail
+    with pytest.raises(PipelineError, match="HTTP 503 after 3 attempt"):
+        create(tmp_path, api)
+    assert sum(path == "/v1/trajectory" for path, _ in api.calls) == 3
+    assert not any(path == "/api/v1/examples" for path, _ in api.calls)
+
+
+def test_concurrent_import_bounds_in_flight_work_and_drains_after_failure(tmp_path, monkeypatch):
     import threading
     import time
+    monkeypatch.setattr(curation, "_sleep", lambda seconds: None)
     api = API([[root(i, f"thread-{i}") for i in range(1, 13)]])
     gate, active, peak = threading.Lock(), [0], [0]
     def fail_first_and_slow_others(path, body):
@@ -488,8 +523,9 @@ def test_concurrent_import_bounds_in_flight_work_and_drains_after_failure(tmp_pa
     assert 1 < peak[0] <= 3
     # The first batch of four starts together; after the failure nothing new is
     # submitted, and the three slow fetches already in flight drain to completion.
-    started = sorted(next(iter(call.values())) for call in api.trajectory_calls())
-    assert started == [f"thread-{i}" for i in range(1, 5)]
+    started = [next(iter(call.values())) for call in api.trajectory_calls()]
+    assert sorted(set(started)) == [f"thread-{i}" for i in range(1, 5)]
+    assert started.count("thread-1") == 3 and len(started) == 6
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
     assert receipt["status"] == "failed" and receipt["concurrency"] == 4
     assert receipt["in_flight"] == [{"key": "thread_id", "id": "thread-1", "pending_write": None}]

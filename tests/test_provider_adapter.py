@@ -28,7 +28,7 @@ def _write_raw_dataset(root, count=100):
             },
             "outputs": None,
             "metadata": {
-                "source_thread_id": f"thread-{index}",
+                "source_scope": "thread", "source_scope_id": f"thread-{index}",
                 "trajectory_format": "messages",
                 "conversation_scope": "root",
             },

@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
@@ -28,6 +29,10 @@ MAX_LIMIT = 2000
 # Conversations fetched and written at once; bounded to stay gentle on the API.
 MAX_CONCURRENCY = 4
 DEFAULT_CONCURRENCY = 4
+# Trajectory reads are idempotent, so transient failures are retried; example writes are not.
+FETCH_ATTEMPTS = 3
+FETCH_BACKOFF_SECONDS = 1.0
+_sleep = time.sleep
 
 
 def _api(workspace_id, method, path, body=None, *, runner=_run):
@@ -39,7 +44,7 @@ def _api(workspace_id, method, path, body=None, *, runner=_run):
     except subprocess.CalledProcessError as exc:
         # API errors can echo message contents; only expose the HTTP status.
         status = re.search(r"\bHTTP [45]\d\d\b", exc.stderr or "")
-        detail = status.group() if status else "request failed; outcome may be unknown"
+        detail = status.group() if status else "request failed"
         if path == "/api/v1/datasets" and detail == "HTTP 409":
             detail += "; dataset name already exists"
         raise PipelineError(f"LangSmith {method} {path}: {detail}") from exc
@@ -238,11 +243,20 @@ def _selected(value: Any, matches: dict[str, dict]) -> list[dict[str, str]]:
     return selected
 
 
-def _fetch_trajectory(workspace_id: str, project_id: str, item: dict[str, str], *, runner: Callable[..., Any]) -> list:
-    trajectory = _api(workspace_id, "POST", "/v1/trajectory", {
-        "project_id": project_id, item["key"]: item["id"],
-        "format": "messages", "include": {"system_messages": True},
-    }, runner=runner)
+def _fetch_trajectory(
+    workspace_id: str, project_id: str, item: dict[str, str], *,
+    runner: Callable[..., Any],
+) -> list:
+    body = {"project_id": project_id, item["key"]: item["id"],
+            "format": "messages", "include": {"system_messages": True}}
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            trajectory = _api(workspace_id, "POST", "/v1/trajectory", body, runner=runner)
+            break
+        except PipelineError as exc:
+            if attempt == FETCH_ATTEMPTS or "returned invalid JSON" in str(exc):
+                raise PipelineError(f"{exc} after {attempt} attempt(s)") from exc
+            _sleep(FETCH_BACKOFF_SECONDS * attempt)
     if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list) or not trajectory["messages"]:
         raise PipelineError(f"{item['key']} {item['id']} returned no messages")
     if trajectory.get("next_cursor") or trajectory.get("prev_cursor"):
@@ -295,7 +309,7 @@ def _import_selection(
             receipt["in_flight"].append(entry)
             _save_receipt(receipt_path, receipt)
         messages = _fetch_trajectory(workspace_id, project_id, item, runner=runner)
-        metadata = {**common, "selection_scope": item["key"].removesuffix("_id"), f"source_{item['key']}": item["id"]}
+        metadata = {**common, "source_scope": item["key"].removesuffix("_id"), "source_scope_id": item["id"]}
         with lock:
             entry["pending_write"] = "example"
             _save_receipt(receipt_path, receipt)

@@ -155,7 +155,7 @@ def test_invalid_tool_arguments_are_rejected(arguments):
 def test_baseten_preparation_and_datum_conversion_share_native_renderer(monkeypatch):
     native = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer())
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: native)
-    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "example", "source_thread_id": "thread"}}
+    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "example", "source_scope": "thread", "source_scope_id": "thread"}}
     token_datum = native.render(MESSAGES, TOOLS)[0]
     limit = len(token_datum.token_ids)
     model = replace(baseten.DEFAULT_MODEL, max_seq_len=limit, trainer_max_seq_len=limit)
