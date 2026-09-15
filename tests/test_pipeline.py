@@ -202,7 +202,7 @@ def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
             return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
                                                       "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
-        if body.get("ids") == ["trace-id"]:
+        if body.get("ids") == ["trace-id"] or body.get("is_root"):
             result = {"id": "trace-id", "session_id": "project-id",
                       "extra": {"metadata": {"thread_id": "thread-id"}}}
         else:

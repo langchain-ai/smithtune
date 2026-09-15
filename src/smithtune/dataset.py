@@ -214,15 +214,26 @@ def _query_contract_runs(
 def _query_thread_llm_runs(
     workspace_id: str, project_id: str, thread_id: str, *, start_time: str, runner: Callable[..., Any],
 ) -> list[dict[str, Any]]:
-    # Child calls need not repeat their thread ID. Query each root metadata
-    # alias separately: the run API does not support OR across these joins.
-    thread_runs: dict[str, dict[str, Any]] = {}
+    # Child calls need not repeat their thread ID. Resolve roots first to
+    # avoid an expensive trace_filter join when retrieving their LLM calls.
+    trace_ids: set[str] = set()
     for key in ("thread_id", "conversation_id", "session_id"):
         thread_filter = f"and(eq(metadata_key,{json.dumps(key)}),eq(metadata_value,{json.dumps(thread_id)}))"
+        roots = _query_contract_runs(workspace_id, {
+            "project_ids": [project_id], "is_root": True, "filter": thread_filter,
+            "selects": ["ID", "PROJECT_ID"], "min_start_time": start_time,
+        }, runner=runner)
+        trace_ids.update(root["id"] for root in roots)
+    ordered_traces = sorted(trace_ids)
+    thread_runs: dict[str, dict[str, Any]] = {}
+    for offset in range(0, len(ordered_traces), LANGSMITH_PAGE_SIZE):
+        batch = ordered_traces[offset : offset + LANGSMITH_PAGE_SIZE]
         for run in _query_contract_runs(workspace_id, {
-            "project_ids": [project_id], "run_type": "LLM", "trace_filter": thread_filter,
-            "min_start_time": start_time,
+            "project_ids": [project_id], "run_type": "LLM",
+            "filter": f"in(trace_id, {json.dumps(batch)})", "min_start_time": start_time,
         }, runner=runner):
+            if run.get("trace_id") not in batch:
+                raise PipelineError("LangSmith returned a run from a different trace")
             if run["id"] in thread_runs and thread_runs[run["id"]] != run:
                 raise PipelineError(f"run {run['id']} changed during the thread scan; capture again")
             thread_runs[run["id"]] = run

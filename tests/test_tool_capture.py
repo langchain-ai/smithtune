@@ -44,6 +44,11 @@ def page(runs, cursor=None):
 
 def capture_runner(source, pages, *, thread_key="thread_id", thread_id="thread-1"):
     commands = []
+    trace_ids = {source["trace_id"]}
+    for response in pages:
+        for run in response.get("items") or []:
+            if isinstance(run, dict) and run.get("trace_id"):
+                trace_ids.add(run["trace_id"])
     pages = iter(pages)
 
     def runner(command, capture=False):
@@ -65,10 +70,15 @@ def capture_runner(source, pages, *, thread_key="thread_id", thread_id="thread-1
         elif body.get("ids") == [source["trace_id"]]:
             response = page([{"id": source["trace_id"], "session_id": "project-1",
                               "extra": {"metadata": {thread_key: thread_id}}}])
+        elif body.get("is_root"):
+            assert "trace_filter" not in body
+            roots = [{"id": tid, "session_id": "project-1"} for tid in sorted(trace_ids)]
+            response = page(roots if json.dumps(thread_key) in body["filter"] else [])
         else:
             assert body["project_ids"] == ["project-1"]
             assert body["run_type"] == "LLM"
-            assert "trace_filter" in body and "filter" not in body
+            assert body["filter"] == f"in(trace_id, {json.dumps(sorted(trace_ids))})"
+            assert "trace_filter" not in body
             response = next(pages, page([]))
         return SimpleNamespace(stdout=json.dumps(response))
 
@@ -91,7 +101,7 @@ def test_capture_combines_tools_from_all_pages_and_traces(tmp_path):
     assert contract.provenance["source_trace_ids"] == ["trace-1", "trace-2"]
     assert summary["llm_run_count"] == 3 and summary["trace_count"] == 2
     assert summary["tool_count"] == 2
-    assert commands[3]["cursor"] == "page-2"
+    assert [body for body in commands if body.get("run_type") == "LLM"][1]["cursor"] == "page-2"
 
     # Preparation already shares the captured union with every example.
     examples = [{"id": str(i), "inputs": {"messages": [
@@ -165,7 +175,7 @@ def test_thread_lookup_uses_root_metadata_aliases_and_escapes_values(tmp_path, k
     runner, commands = capture_runner(source, [page([source])], thread_key=key, thread_id=thread_id)
     result = dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
     assert result["source_thread_id"] == thread_id
-    assert [body["trace_filter"] for body in commands[2:]] == [
+    assert [body["filter"] for body in commands if body.get("is_root")] == [
         f"and(eq(metadata_key,{json.dumps(alias)}),eq(metadata_value,{json.dumps(thread_id)}))"
         for alias in ("thread_id", "conversation_id", "session_id")
     ]
@@ -224,7 +234,7 @@ def test_provider_function_formats_are_not_mistaken_for_builtins(definition):
 def test_runs_across_root_thread_aliases_are_combined_and_deduplicated(tmp_path):
     source = llm("run-1", [tool("weather")])
     later = llm("run-2", [tool("swell")], trace_id="trace-2")
-    runner, _ = capture_runner(source, [page([source]), page([source, later]), page([])])
+    runner, _ = capture_runner(source, [page([source], "page-2"), page([source, later])])
     path = tmp_path / "contract.json"
     result = dataset.capture_inference_contract("workspace-1", "run-1", path, runner=runner)
     assert result["llm_run_count"] == 2
@@ -434,3 +444,64 @@ def test_direct_run_lookup_checks_identity_and_escapes_path():
 
     with pytest.raises(PipelineError, match="did not return the requested run"):
         dataset._read_contract_run("workspace-1", "run/other?query", runner=runner)
+
+
+def test_thread_capture_unions_paginated_roots_and_batches_llm_queries(monkeypatch):
+    monkeypatch.setattr(dataset, "_utc_now", lambda: "2026-09-15T00:00:00Z")
+    traces = [f"trace-{i:03}" for i in range(102)]
+    root_calls, llm_calls = [], []
+
+    def runner(command, capture=False):
+        body = json.loads(command[command.index("--body") + 1])
+        assert "trace_filter" not in body
+        if body.get("is_root"):
+            root_calls.append(body)
+            assert body["selects"] == ["ID", "PROJECT_ID"]
+            if '"thread_id"' in body["filter"]:
+                ids, cursor = (traces[:60], "roots-next") if not body.get("cursor") else (traces[60:100], None)
+            elif '"conversation_id"' in body["filter"]:
+                ids, cursor = traces[99:], None
+            else:
+                ids, cursor = [], None
+            response = page([{"id": tid, "session_id": "project-1"} for tid in ids], cursor)
+        else:
+            llm_calls.append(body)
+            assert body["run_type"] == "LLM"
+            batch = json.loads(body["filter"][len("in(trace_id, "):-1])
+            assert len(batch) <= 100
+            if len(batch) == 100:
+                ids, cursor = (batch[:50], "llms-next") if not body.get("cursor") else (batch[50:], None)
+            else:
+                ids, cursor = batch, None
+            response = page([llm(f"run-{tid}", [], trace_id=tid) for tid in ids], cursor)
+        return SimpleNamespace(stdout=json.dumps(response))
+
+    runs = dataset._query_thread_llm_runs("workspace-1", "project-1", "thread-1",
+                                        start_time="2026-09-01T00:00:00Z", runner=runner)
+    assert len(runs) == 102
+    assert {run["trace_id"] for run in runs} == set(traces)
+    assert len(root_calls) == 4
+    assert len(llm_calls) == 3
+    assert "cursor" not in llm_calls[-1]
+
+
+def test_thread_capture_with_no_roots_does_not_query_llm_runs():
+    def runner(command, capture=False):
+        body = json.loads(command[command.index("--body") + 1])
+        assert body["is_root"] is True
+        return SimpleNamespace(stdout=json.dumps(page([])))
+
+    assert dataset._query_thread_llm_runs("workspace-1", "project-1", "thread-1",
+                                         start_time="2026-09-01T00:00:00Z", runner=runner) == []
+
+
+def test_thread_capture_rejects_llm_from_unrequested_trace():
+    def runner(command, capture=False):
+        body = json.loads(command[command.index("--body") + 1])
+        runs = ([{"id": "trace-1", "session_id": "project-1"}] if body.get("is_root")
+                else [llm("wrong", [], trace_id="other-trace")])
+        return SimpleNamespace(stdout=json.dumps(page(runs)))
+
+    with pytest.raises(PipelineError, match="different trace"):
+        dataset._query_thread_llm_runs("workspace-1", "project-1", "thread-1",
+                                      start_time="2026-09-01T00:00:00Z", runner=runner)

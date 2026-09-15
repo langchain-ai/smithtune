@@ -39,11 +39,20 @@ def source_runner(groups):
         assert command[command.index("--workspace") + 1] == "workspace-id"
         queries.append(body)
         project = body["project_ids"][0]
+        found = []
         for (source_project, thread), runs in groups.items():
-            if project == source_project and json.dumps(thread) in body.get("trace_filter", ""):
-                if '"thread_id"' in body["trace_filter"]:
-                    return SimpleNamespace(stdout=json.dumps(page(runs)))
-        return SimpleNamespace(stdout=json.dumps(page([])))
+            if project != source_project:
+                continue
+            if body.get("is_root"):
+                if json.dumps(thread) in body["filter"] and '\"thread_id\"' in body["filter"]:
+                    found.extend({"id": f"{thread}:{tid}", "session_id": project}
+                                 for tid in sorted({r["trace_id"] for r in runs}))
+            else:
+                for item in runs:
+                    trace_id = f"{thread}:{item['trace_id']}"
+                    if json.dumps(trace_id) in body["filter"]:
+                        found.append({**item, "trace_id": trace_id})
+        return SimpleNamespace(stdout=json.dumps(page(found)))
 
     return run, queries
 
@@ -80,7 +89,7 @@ def test_examples_get_their_own_complete_union_and_repeated_sources_are_cached()
     assert contracts["example-3"].provenance["source_example_id"] == "example-3"
     assert all(contract.inference_settings == {} for contract in contracts.values())
     assert examples == original
-    assert len(queries) == 6
+    assert len(queries) == 8
 
 
 def test_same_thread_name_in_different_projects_stays_separate():
@@ -396,13 +405,16 @@ def test_mixed_workspaces_route_and_cache_sources_separately():
                                                       "start_time": "2026-09-01T00:00:00Z"}))
         body = json.loads(command[command.index("--body") + 1])
         calls.append(workspace)
-        runs = [llm(f"run-{workspace}", [tool(workspace)])] if '"thread_id"' in body["trace_filter"] else []
+        if body.get("is_root"):
+            runs = [{"id": "trace-1", "session_id": "project-1"}] if '"thread_id"' in body["filter"] else []
+        else:
+            runs = [llm(f"run-{workspace}", [tool(workspace)])]
         return SimpleNamespace(stdout=json.dumps(page(runs)))
 
     contracts = dataset.capture_example_contracts(
         "workspace-id", examples, source_workspace_id="default-source", runner=runner,
     )
-    assert calls == ["default-source"] * 3 + ["other"] * 3 + ["workspace-id"] * 3
+    assert calls == ["default-source"] * 4 + ["other"] * 4 + ["workspace-id"] * 4
     for ex, workspace in zip(examples, ["default-source", "other", "other", "workspace-id"], strict=True):
         contract = contracts[ex["id"]]
         assert contract.provenance["source_workspace_id"] == workspace
