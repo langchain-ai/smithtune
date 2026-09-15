@@ -11,6 +11,32 @@ uv run --no-sync pytest
 uv run --no-sync ruff check
 ```
 
+For the optional Deep Agents judge runner:
+
+```bash
+sfw uv sync --locked --extra test --extra deepagents --python 3.12
+uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage_coordinator.py tests/test_triage.py
+```
+
+Deep Agents, its OpenAI adapter, and Monty are pinned in the optional `deepagents` extra.
+Tests use the actual agent graph with a deterministic local model. They check
+coordinator skill loading, Python sandbox execution, subagent dispatch, bounded
+concurrency, fresh judge context, full evidence retention, and resume.
+Monty is the Pydantic project's MIT-licensed Python sandbox. Version 0.0.23
+was checked against its source, PyPI metadata, and OSV on 2026-09-14; no published
+advisories were returned. Code gets no host mounts or OS handlers. Only the
+reviewed trace/task functions cross the sandbox boundary. Judges can only
+read saved runs; the coordinator can dispatch bounded judge batches.
+Provider transport tests replace HTTP requests at the service boundary; no
+test uses paid inference or creates a live deployment.
+
+The default council is read from the packaged `config.example.json`; CLI,
+Python, and exported skill defaults must agree. Terra uses OpenAI Responses
+for reasoning with tools. Fireworks chat responses preserve `reasoning_content`
+through the pinned OpenAI adapter, with streaming disabled. Keep the tool
+round-trip checks when changing either transport. Bump the triage agent version
+when model transport or evidence presentation changes.
+
 `sfw` is used for contributor dependency installation. It is not a smithtune runtime
 prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.
@@ -76,6 +102,9 @@ python scripts/check_dist.py
 This builds smithtune's wheel and source distribution, installs dependencies from
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
+The default wheel is tested first, then the optional Deep Agents extra. Both
+distributions must include the portable skill and support `skill export` outside
+the checkout.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves

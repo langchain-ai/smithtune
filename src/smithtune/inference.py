@@ -92,12 +92,7 @@ def _fireworks_chat_completion(
     return message
 
 
-def _anthropic_chat_completion(
-    model: str,
-    messages: list[dict[str, Any]],
-    max_tokens: int,
-    json_mode: bool = False,
-) -> dict[str, Any]:
+def _anthropic_gateway_key() -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     custom_headers = os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
     if custom_headers:
@@ -114,6 +109,16 @@ def _anthropic_chat_completion(
                     break
     if not api_key:
         raise PipelineError("ANTHROPIC_CUSTOM_HEADERS or ANTHROPIC_API_KEY is not set")
+    return api_key
+
+
+def _anthropic_chat_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    json_mode: bool = False,
+) -> dict[str, Any]:
+    api_key = _anthropic_gateway_key()
     system = [message["content"] for message in messages if message.get("role") == "system"]
     conversation = [message for message in messages if message.get("role") != "system"]
     if not all(message.get("role") in {"user", "assistant"} for message in conversation):

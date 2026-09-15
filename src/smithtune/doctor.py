@@ -14,14 +14,14 @@ INSTALL_HELP = {
 
 def diagnose() -> dict:
     packages = {}
-    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "transformers", "trl", "torch"):
+    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "transformers", "trl", "torch", "deepagents", "langchain-openai", "pydantic-monty"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
             packages[name] = None
     tools = {}
     for name, operations in (
-        ("langsmith", "dataset create, capture-contract, prepare (unless --no-fetch)"),
+        ("langsmith", "dataset create, dataset triage (new snapshot), capture-contract, prepare (unless --no-fetch)"),
         ("firectl", "deploy, undeploy"),
     ):
         available = shutil.which(name) is not None
@@ -34,7 +34,7 @@ def diagnose() -> dict:
         "tools": tools,
         "credentials": {
             name: "set" if os.environ.get(name) else "unset"
-            for name in ("LANGSMITH_API_KEY", "FIREWORKS_API_KEY", "BASETEN_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS")
+            for name in ("LANGSMITH_API_KEY", "FIREWORKS_API_KEY", "OPENAI_API_KEY", "SMITHTUNE_ANTHROPIC_API_KEY", "BASETEN_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS")
         },
         "note": "Offline checks only; credential validity and service access have not been tested. Missing prerequisites are required only for the operations that use them.",
     }

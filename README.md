@@ -22,7 +22,7 @@ Install these companion tools for the operations you use:
 
 | Tool | Required for |
 | --- | --- |
-| [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Dataset creation, contract capture, and fetching data during preparation |
+| [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Trace selection, dataset creation, contract capture, and fetching data during preparation |
 | [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) | Fireworks deployment and undeployment |
 
 Install the LangSmith CLI with the official installer, then start a new shell
@@ -83,6 +83,180 @@ the returned dataset ID in `prepare`.
 - `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
 - Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
 - Choose a new dataset name. If an import fails, inspect its receipt in `data/selections/` before retrying
+
+## Label traces with an agent council
+
+`dataset triage` downloads traces locally and labels each one for SFT.
+It starts a Deep Agent coordinator, which uses Python code to launch judge
+subagents. The default council uses three different models:
+
+| Judge | API provider | Model ID |
+| --- | --- | --- |
+| DeepSeek V4.1 Flash | Fireworks | `accounts/fireworks/models/deepseek-v4p1-flash` |
+| GLM-5.3-Flash | Fireworks | `accounts/fireworks/models/glm-5p3-flash` |
+| GPT-5.6 Terra | OpenAI | `gpt-5.6-terra` |
+
+Each judge gets fresh context. DeepSeek also runs the coordinator.
+This selects training examples; `evaluate` tests a trained model.
+
+Install the optional agent support and set `FIREWORKS_API_KEY`, `OPENAI_API_KEY`,
+and `LANGSMITH_API_KEY` in your environment:
+
+```bash
+uv tool install --upgrade --python 3.12 \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
+```
+
+**1. Download and preview.** Supply the source only on the first run:
+
+```bash
+smithtune dataset triage data/triage \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --limit 100
+```
+
+This saves the messages and full run trees in `snapshot.json`, and the council
+settings and vote count in `plan.json`. It makes no judge calls. Selected
+threads expand to their full history, including turns outside the time window.
+Thus the number of traces to judge can exceed `--limit`.
+Successful read responses are saved under `download/`. If downloading stops,
+repeat the command to reuse them. The CLI waits and retries when LangSmith
+returns a rate limit. Trace run data comes from the V2 endpoint,
+`GET /api/v2/traces/{trace_id}/runs`. Empty turns remain in the saved evidence;
+training-format checks do not stop the download.
+If a root run is missing, the saved trace includes a warning for the judges.
+That conversation cannot enter training through this import flow.
+
+Before judging, the CLI filters traces with multimodal content in their
+messages, run inputs/outputs, or media attachments. Those traces get `0` with
+a filter reason and incur no judge calls. Every remaining trace is sent to
+the three default judges, or to your chosen council.
+The check includes conversation history supplied to the judge. It does not
+remove media blocks and then judge an altered trace.
+
+**2. Label, or resume an interrupted run:**
+
+```bash
+smithtune dataset triage data/triage --confirm
+```
+
+The CLI reuses the saved source and settings. New defaults apply only to new
+plans; existing plans retain their selected models. It saves each vote as it finishes.
+Repeating the command retries incomplete votes; a completed run makes no new
+agent calls. The directory defaults to `data/triage` if omitted.
+
+```text
+LangSmith traces
+      | V2 download; save messages, runs, and tool schemas
+      v
+Local snapshot
+      |
+Media filter ---- media found ----> 0 + reason; no judge calls
+      | text only
+      v
+Deep Agent coordinator -> Python code -> independent judge subagents
+                                               | read saved evidence
+                                               v
+                                  Validated votes -> majority label
+                                               |
+                                   labels.jsonl: 1/0 + reason
+                                               |
+                                  dataset create --triage-dir
+                                               | upload all-pass conversations
+                                               v
+                                     prepare -> plan -> train
+```
+
+Judges read the conversation and a run index. Long messages carry a `read_full`
+reference. Judges use read-only Python with `read_message(index)` and
+`read_run(id)` to inspect original messages and run inputs/outputs. Previews
+are marked as incomplete; the full saved content remains available through
+code. Media references are saved as JSON, not rendered for the judges. Judges
+cannot run recorded tools, access host files or secrets, or delegate further.
+The coordinator cannot write a verdict in place of a judge.
+
+The result is one line per trace in `labels.jsonl`:
+
+```json
+{"trace_id":"...","keep":1,"reason":"2/3 judges voted 1. The answer completes the request and the tool results support it."}
+```
+
+`1` means use for SFT; `0` means do not use. A majority of the council decides
+the label; a tie gives `0`. The reason combines the reasons from judges who
+voted for that label. The CLI ends with counts and the result path. `report.md`
+explains each label in plain text. Detailed votes and source quotes stay in
+`judgments.jsonl` for inspection. No extra model call is needed for the report.
+
+If a judge cannot finish, the reason says "Labeling incomplete" and the trace
+has `0` until a retry completes it. The command reports the unfinished count
+and exits with code 1. Repeat the same command to retry. Labels stay local;
+triage does not write feedback to LangSmith.
+
+**3. Create a dataset from accepted conversations:**
+
+```bash
+smithtune dataset create --triage-dir data/triage --name selected-sft --confirm
+```
+
+Every trace in a conversation must pass. This prevents a passing turn from
+bringing rejected earlier behavior into training. Unsupported content and tool contracts
+are excluded and counted in the summary. Import uses the saved messages and
+tool schemas without fetching the source again. Pass the returned dataset ID
+to `prepare` below. Keep a separate test set for model comparisons.
+
+After a partial import, inspect `dataset-import.json` before retrying. Dataset
+imports do not resume automatically. Other complete conversations can still
+be imported when some trace labels are incomplete.
+
+### Change the council or selection rules
+
+Use one `--judges` list. Omit it to use these three defaults. Use `--rule`
+to add project rules:
+
+```bash
+smithtune dataset triage data/custom-council \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra \
+  --rule 'Drop answers that claim an action succeeded without evidence.'
+```
+
+Choose any subset, or repeat a model to give it independent judge slots.
+For other models, use `provider:model` in the same list, for example
+`--judges openai:<model-id>,fireworks:accounts/fireworks/models/<model-id>`.
+The list replaces the council and is saved for confirm and resume; you do not
+need to repeat it. The first judge model also runs the
+coordinator. Terra uses OpenAI Responses for reasoning with tools. The Fireworks
+adapter preserves reasoning fields between tool calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
+uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
+`anthropic-gateway` uses the LangSmith Anthropic gateway credential.
+
+`--concurrency` sets the maximum active judge tasks (default 4). Advanced
+options remain supported: `--config` for a judge JSON file, `--runner api` for
+direct calls without agents, `--attempts` (default 3), `--max-input-chars`
+(default 200,000), and `--max-output-tokens` (default 4,096). Agent input limits
+apply to the conversation, run index, and rubric; direct calls include full
+run payloads. Oversize inputs remain incomplete. Each judge attempt has at most
+24 graph steps. Coordinator calls add to judge cost. `agent-state.json` records
+its status; votes include judge code-call counts and run IDs read.
+
+The source defaults to a seeded sample of 100 matching roots before thread
+expansion. `--filter` accepts LangSmith root-run filters. Once judging starts,
+changed evidence, rules, models, skill, or input/output limits require a new
+run directory. One process can use a directory at a time.
+
+Any CLI-capable agent can load the same portable skill:
+
+```bash
+smithtune skill export --output ./skills
+```
+
+This exports `sft-trace-triage/SKILL.md`, the judge rubric, and an optional
+config example. The skill uses the CLI for download, labels, resume, and import.
+
+See the [trace-labeling audit](docs/trace-labeling-audit.md) for live checks,
+packaging coverage, and current quality and scaling limits.
 
 ## Prepare data
 

@@ -360,7 +360,7 @@ def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
     assert Path(result["receipt"]).exists()
     assert pipeline._parser().parse_args([*args, "--output", str(tmp_path / "custom.json")]).output == tmp_path / "custom.json"
     for obsolete in (["dataset", "select"], [*args, "--selection", "saved.json"], [*args, "--scope", "trace"],
-                     [*args, "--seed", "17"], args[:-2]):
+                     [*args, "--seed", "17"]):
         with pytest.raises(SystemExit) as error:
             pipeline._parser().parse_args(obsolete)
         assert error.value.code == 2

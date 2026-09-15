@@ -564,6 +564,12 @@ def validate_trajectories(
         messages = inputs.get("messages") if isinstance(inputs, dict) else None
         if not isinstance(messages, list) or not messages:
             raise PipelineError(f"example {example_id} has no messages")
+        saved_triage = metadata.get("smithtune_triage")
+        if saved_triage is not None and (
+            not isinstance(saved_triage, dict)
+            or saved_triage.get("messages_sha256") != json_sha256(messages)
+        ):
+            raise PipelineError(f"example {example_id}: triaged example messages changed after judging")
         for position, message in enumerate(messages):
             try:
                 _validate_source_message(message)
@@ -650,6 +656,15 @@ def capture_example_contracts(
         if example_id in contracts:
             continue
         try:
+            saved_triage = (example.get("metadata") or {}).get("smithtune_triage")
+            if saved_triage is not None:
+                if not isinstance(saved_triage, dict) or saved_triage.get("messages_sha256") != json_sha256(example["inputs"]["messages"]):
+                    raise PipelineError("triaged example messages changed after judging")
+                payload = parse_inference_contract(saved_triage.get("contract")).to_dict()
+                payload["provenance"].update(source_example_id=example_id,
+                                             source_project_id=example["metadata"].get("source_project_id"))
+                contracts[example_id] = parse_inference_contract(payload)
+                continue
             source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
             identity = _source_identity(example)
             scope, scope_id = identity["source_scope"], identity["source_scope_id"]
