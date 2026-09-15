@@ -1770,11 +1770,14 @@ def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkey
 def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     commands = []
     monkeypatch.setattr(fireworks, "_run", lambda command, **kwargs: commands.append(command))
-    monkeypatch.setattr(
-        fireworks,
-        "_inference_smoke_test",
-        lambda route: {"http_status": 200, "finish_reason": "stop"},
-    )
+    def smoke_test(route):
+        saved = json.loads((tmp_path / "endpoint.json").read_text())
+        assert saved["model"] == route
+        assert saved["deployment"] == "accounts/account-id/deployments/deployment-id"
+        assert saved["smoke_test"] == {"status": "pending"}
+        return {"http_status": 200, "finish_reason": "stop"}
+
+    monkeypatch.setattr(fireworks, "_inference_smoke_test", smoke_test)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
 
     endpoint = fireworks.FireworksProvider().deploy(
@@ -1786,12 +1789,32 @@ def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch
         confirm=True,
     )
 
+    assert json.loads((tmp_path / "endpoint.json").read_text()) == endpoint
+    assert endpoint["smoke_test"] == {"http_status": 200, "finish_reason": "stop"}
     assert commands[0][:3] == ["firectl", "deployment", "create"]
     assert endpoint["inference_url"].startswith("https://api.fireworks.ai/inference/v1/")
     assert endpoint["model"] == (
         "accounts/account-id/models/output-model#"
         "accounts/account-id/deployments/deployment-id"
     )
+
+
+@pytest.mark.parametrize("error", [PipelineError("inference smoke test failed with HTTP 503"), TimeoutError("timed out")])
+def test_failed_deployment_smoke_test_retains_receipt(tmp_path, monkeypatch, error):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
+    monkeypatch.setattr(fireworks, "_run", lambda *args, **kwargs: None)
+
+    def fail(route):
+        assert json.loads((tmp_path / "endpoint.json").read_text())["model"] == route
+        raise error
+
+    monkeypatch.setattr(fireworks, "_inference_smoke_test", fail)
+    with pytest.raises(type(error)) as raised:
+        fireworks.FireworksProvider().deploy(tmp_path, "account-id", "output-model", "deployment-id", "shape", confirm=True)
+    assert raised.value is error
+    saved = json.loads((tmp_path / "endpoint.json").read_text())
+    assert saved["deployment"] == "accounts/account-id/deployments/deployment-id"
+    assert saved["smoke_test"] == {"status": "failed"}
 
 
 def test_mutating_steps_require_confirmation(tmp_path: Path):
