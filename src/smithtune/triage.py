@@ -25,6 +25,7 @@ from smithtune.triage_source import conversation_trajectories, load_snapshot, mu
 
 
 JUDGE_ALIASES = {
+    "muse-glimmer-30b": ("fireworks", "accounts/fireworks/models/muse-glimmer-30b"),
     "deepseek-v4.1-flash": ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
     "glm-5.3-flash": ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
     "gpt-5.6-terra": ("openai", "gpt-5.6-terra"),

@@ -140,7 +140,7 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
     try:
         agent.invoke({"messages": [{"role": "user", "content": f"Label all {len(pending)} pending trajectory/judge pairs. Use code mode and judge subagents; concurrency is {concurrency}."}],
                       "files": skill_files()}, config={"recursion_limit": min(1000, 24 + 4 * len(pending)), "max_concurrency": concurrency})
-        state["status"] = "complete" if len(tasks.finished) == len(pending) and all(r["status"] == "complete" for r in tasks.finished.values()) else "incomplete"
+        state["status"] = "complete" if len(tasks.finished) == len(pending) and all(r["status"] in {"complete", "context_exceeded"} for r in tasks.finished.values()) else "incomplete"
     except Exception:
         state.update(status="incomplete", error="coordinator stopped; rerun the same command to finish pending votes")
     except BaseException:

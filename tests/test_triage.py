@@ -512,7 +512,7 @@ def test_skill_export_works_outside_checkout(tmp_path):
     assert exported == triage.load_config(None) == triage.council_settings(tmp_path / "new")["config"]
     assert [(j["provider"], j["model"]) for j in exported["judges"]] == [
         ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
-        ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
+        ("fireworks", "accounts/fireworks/models/muse-glimmer-30b"),
         ("openai", "gpt-5.6-terra"),
     ]
     with pytest.raises(PipelineError, match="already exists"):
@@ -525,7 +525,7 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
     args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
             "--start-time", source()["start_time"], "--end-time", source()["end_time"], str(tmp_path),
-            "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra", "--rule", "Keep supported answers."]
+            "--judges", "deepseek-v4.1-flash,muse-glimmer-30b,gpt-5.6-terra", "--rule", "Keep supported answers."]
     cli.main(args)
     plan = json.loads(capsys.readouterr().out)
     assert plan["judges"] == 3 and plan["runner"] == "deepagent"

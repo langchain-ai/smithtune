@@ -76,7 +76,7 @@ def _parser() -> argparse.ArgumentParser:
 
     triage_cmd = curate_sub.add_parser(
         "triage", help="label full trajectories with an agent council",
-        description="Judge each full conversation once per council model. Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, GLM-5.3-Flash, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
+        description="Judge each full conversation once per council model. Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, Muse Glimmer 30B, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
     )
     triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default for a new run: data/datasets/<generated-id>)")
     source = triage_cmd.add_argument_group("Source (first run only)")
@@ -87,7 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--filter", help="optional root trace filter")
     source.add_argument("--limit", type=int, help="roots to select; each distinct full conversation is judged once (default: 100)")
     council = triage_cmd.add_mutually_exclusive_group()
-    council.add_argument("--judges", help="comma-separated models (default: deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra); other models use provider:model")
+    council.add_argument("--judges", help="comma-separated models (default: deepseek-v4.1-flash,muse-glimmer-30b,gpt-5.6-terra); other models use provider:model")
     council.add_argument("--judge", action="append", help=argparse.SUPPRESS)
     triage_cmd.add_argument("--rule", action="append", help="additional selection rule; repeat for multiple rules")
     triage_cmd.add_argument("--concurrency", type=int, help="maximum concurrent judge tasks (default: 4)")

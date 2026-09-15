@@ -83,14 +83,15 @@ def coordinator_model():
     ])
 
 
-def test_real_coordinator_loads_skill_and_delegates_with_code(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", ["complete", "context_exceeded", "error"])
+def test_real_coordinator_loads_skill_and_delegates_with_code(tmp_path, monkeypatch, status):
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
-    pending, tasks, saved = task_set()
+    pending, tasks, saved = task_set(run=lambda trajectory, judge: {"status": status})
     model = coordinator_model()
     coordinate(pending, tasks.run_task, saved.append, tmp_path, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
     state = json.loads((tmp_path / "agent-state.json").read_text())
-    assert state["status"] == "complete", state
+    assert state["status"] == ("incomplete" if status == "error" else "complete"), state
     assert state["code_calls"] == 1 and state["finished"] == 2
     assert all(set(names) == {"code_mode", "read_file", "task"} for names in model.exposed)
     assert len(saved) == 2
@@ -139,7 +140,7 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
     result = triage.run_triage(source(), work, **args)
     assert result["kept"] == 1 and result["status"] == "complete"
     assert len(seen) == 1
-    # One judge gets the whole conversation and all source run trees.
+    # One judge gets the whole conversation.
     evidence = json.loads(next(m.content for m in seen[0] if isinstance(m, HumanMessage)))["untrusted_trajectory"]
     assert len(evidence) == 4
     imported = triage.create_triaged_dataset(work, "accepted", confirm=True, runner=args["runner"])

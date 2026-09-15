@@ -102,7 +102,7 @@ subagents. The default council uses three different models:
 | Judge | API provider | Model ID |
 | --- | --- | --- |
 | DeepSeek V4.1 Flash | Fireworks | `accounts/fireworks/models/deepseek-v4p1-flash` |
-| GLM-5.3-Flash | Fireworks | `accounts/fireworks/models/glm-5p3-flash` |
+| Muse Glimmer 30B | Fireworks | `accounts/fireworks/models/muse-glimmer-30b` |
 | GPT-5.6 Terra | OpenAI | `gpt-5.6-terra` |
 
 Each judge gets fresh context. DeepSeek also runs the coordinator.
@@ -183,7 +183,8 @@ Deep Agent coordinator -> Python code -> independent judge subagents
 ```
 
 Each judge receives the complete ordered conversation messages in one request,
-with the selection rubric. Reasoning is off for the three default judges.
+with the selection rubric. The CLI requests reasoning off. DeepSeek and Terra
+honor that setting; Muse still returns reasoning on the current Fireworks endpoint.
 Each returns only a 1/0 score and a reason of one or two short sentences. Recorded
 tool calls and results are part of the conversation; judges do not execute them.
 There is no message truncation, summary, paged reader, or local character cap.
@@ -240,7 +241,7 @@ to add project rules:
 smithtune dataset triage data/custom-council \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra \
+  --judges deepseek-v4.1-flash,muse-glimmer-30b,gpt-5.6-terra \
   --rule 'Drop answers that claim an action succeeded without evidence.'
 ```
 
@@ -249,8 +250,9 @@ For other models, use `provider:model` in the same list, for example
 `--judges openai:<model-id>,fireworks:accounts/fireworks/models/<model-id>`.
 The list replaces the council and is saved for confirm and resume; you do not
 need to repeat it. The first judge model also runs the
-coordinator. Terra uses OpenAI Responses. Reasoning is disabled for Terra and
-Fireworks council calls. Fireworks uses its official API and `FIREWORKS_API_KEY`; OpenAI
+coordinator. Terra uses OpenAI Responses with reasoning off. Fireworks council
+calls also request reasoning off; Muse still generates reasoning. Fireworks uses
+its official API and `FIREWORKS_API_KEY`; OpenAI
 uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
 `anthropic-gateway` uses the LangSmith Anthropic gateway credential.
 
