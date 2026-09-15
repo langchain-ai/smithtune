@@ -21,7 +21,7 @@ from smithtune.dataset import (
 )
 from smithtune.eval_deployment import EvalDeployment, TemporaryDeployment
 from smithtune.artifacts import exclusive_output
-from smithtune.inference import ANTHROPIC_MODEL_PREFIX, _chat_completion, _inference_messages
+from smithtune.inference import ANTHROPIC_ENDPOINTS, anthropic_connection, _chat_completion, _inference_messages
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import _require_confirm, _set_skill_session
@@ -516,13 +516,10 @@ def run_replay_evaluation(
         raise PipelineError("evaluation concurrency must be positive")
     if chat is None and not os.environ.get("FIREWORKS_API_KEY"):
         raise PipelineError("FIREWORKS_API_KEY is not set")
-    if (
-        chat is None
-        and judge_model.startswith(ANTHROPIC_MODEL_PREFIX)
-        and not os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
-        and not os.environ.get("ANTHROPIC_API_KEY")
-    ):
-        raise PipelineError("ANTHROPIC_CUSTOM_HEADERS or ANTHROPIC_API_KEY is not set")
+    judge_provider = judge_model.partition("/")[0]
+    judge_endpoint = ANTHROPIC_ENDPOINTS.get(judge_provider, (None, None))[0]
+    if chat is None and judge_endpoint is not None:
+        anthropic_connection(judge_provider)
     _set_skill_session()
     plan = prepare_replay_evaluation(
         data_dir,
@@ -542,6 +539,8 @@ def run_replay_evaluation(
         models.insert(0, ("base", base_model))
     config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
               "serving_mode": "preemptible" if deployment else "existing"}
+    if judge_endpoint is not None:
+        config["judge_endpoint"] = judge_endpoint
     if deployment:
         config["deployment"] = asdict(deployment)
         plan["deployment"] = deployment.plan()
@@ -553,6 +552,8 @@ def run_replay_evaluation(
             raise PipelineError("existing replay results use different models")
         if saved_config != config:
             raise PipelineError("existing replay results use different evaluation settings")
+    if results and judge_endpoint is not None and not config_path.exists():
+        raise PipelineError("existing replay results do not record the judge endpoint; use a new output directory")
     cases_by_id = {case["id"]: case for case in cases}
     for result in results:
         saved_case = result.get("case", {})

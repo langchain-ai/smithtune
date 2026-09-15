@@ -620,8 +620,8 @@ def test_source_pagination_is_bounded(tmp_path, monkeypatch):
 @pytest.mark.parametrize("provider,url,key", [
     ("fireworks", "https://api.fireworks.ai/inference/v1/chat/completions", "FIREWORKS_API_KEY"),
     ("openai", "https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
-    ("anthropic", "https://api.anthropic.com/v1/messages", "SMITHTUNE_ANTHROPIC_API_KEY"),
-    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "ANTHROPIC_API_KEY"),
+    ("anthropic", "https://api.anthropic.com/v1/messages", "ANTHROPIC_API_KEY"),
+    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "LANGSMITH_GATEWAY_API_KEY"),
 ])
 def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch, provider, url, key):
     from smithtune import inference

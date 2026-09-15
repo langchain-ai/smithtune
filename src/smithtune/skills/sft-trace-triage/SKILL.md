@@ -68,3 +68,6 @@ Do not refetch or edit messages after judging. Changed source, rubric, or models
 need a new run. Labels remain local; this command does not write trace feedback.
 Fireworks calls always use its official API. Replay evaluation is a separate
 flow under `evaluate`.
+
+Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses
+`LANGSMITH_GATEWAY_API_KEY`.

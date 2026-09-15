@@ -271,7 +271,8 @@ def _parser() -> argparse.ArgumentParser:
         help="optional base-model serving route for before-versus-after comparison",
     )
     evaluation.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
-    evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL)
+    evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
+                            help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway")
     evaluation.add_argument("--confirm", action="store_true")
 
     remove = sub.add_parser("undeploy", help="delete the on-demand deployment")

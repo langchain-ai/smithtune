@@ -1,0 +1,103 @@
+import json
+
+import pytest
+
+from smithtune import doctor, evaluation, inference, triage_judges
+from smithtune.providers.base import PipelineError
+
+
+@pytest.mark.parametrize("provider,origin,key", [
+    ("anthropic", "https://api.anthropic.com", "direct-test-key"),
+    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic", "gateway-test-key"),
+])
+@pytest.mark.parametrize("caller", ["replay", "triage"])
+def test_judging_keeps_provider_credentials_separate(monkeypatch, provider, origin, key, caller):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-test-key")
+    monkeypatch.setenv("LANGSMITH_GATEWAY_API_KEY", "gateway-test-key")
+    monkeypatch.setenv("SMITHTUNE_ANTHROPIC_API_KEY", "obsolete-test-key")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"obsolete-header"}')
+    captured = []
+
+    def post(request, label):
+        captured.append(request)
+        return {"content": [{"type": "text", "text": '{"keep":1,"reason":"good"}'}]}
+
+    monkeypatch.setattr(inference, "_post_json", post)
+    messages = [{"role": "system", "content": "Judge accurately."}, {"role": "user", "content": "saved evidence"}]
+    if caller == "replay":
+        inference._chat_completion(f"{provider}/claude-example", messages, 123, True)
+    else:
+        triage_judges.api_judge({"provider": provider, "model": "claude-example"}, messages, 123)
+    request, = captured
+    assert request.full_url == origin + "/v1/messages"
+    assert request.get_header("X-api-key") == key
+    assert request.get_header("Anthropic-version") == "2023-06-01"
+    assert json.loads(request.data) == {"model": "claude-example", "system": "Judge accurately.",
+                                      "messages": messages[1:], "max_tokens": 123}
+
+
+@pytest.mark.parametrize("provider,missing", [
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("anthropic-gateway", "LANGSMITH_GATEWAY_API_KEY"),
+])
+def test_missing_key_never_falls_back_to_other_credentials(monkeypatch, provider, missing):
+    for name in ("ANTHROPIC_API_KEY", "LANGSMITH_GATEWAY_API_KEY", "SMITHTUNE_ANTHROPIC_API_KEY"):
+        monkeypatch.setenv(name, "test-other-key")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"x-api-key":"test-other-key"}')
+    monkeypatch.delenv(missing)
+    monkeypatch.setattr(inference, "_post_json", lambda *_: pytest.fail("must fail before any request"))
+    with pytest.raises(PipelineError, match=missing):
+        inference._chat_completion(f"{provider}/claude-example", [{"role": "user", "content": "case"}], 128)
+    with pytest.raises(PipelineError, match=missing):
+        triage_judges.check_credentials([{"provider": provider, "name": "judge"}])
+
+
+def test_doctor_reports_only_credential_presence(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-test-key")
+    monkeypatch.setenv("LANGSMITH_GATEWAY_API_KEY", "gateway-test-key")
+    result = doctor.diagnose()
+    assert result["credentials"]["ANTHROPIC_API_KEY"] == "set"
+    assert result["credentials"]["LANGSMITH_GATEWAY_API_KEY"] == "set"
+    assert "test-key" not in json.dumps(result)
+    assert "SMITHTUNE_ANTHROPIC_API_KEY" not in result["credentials"]
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in result["credentials"]
+
+
+@pytest.mark.parametrize("previous", ["missing_endpoint", "gateway_endpoint", "missing_config"])
+def test_replay_rejects_results_with_unverified_or_changed_judge_endpoint(tmp_path, monkeypatch, previous):
+    from test_pipeline import write_manifest
+
+    data_dir, output = tmp_path / "data", tmp_path / "evaluation"
+    write_manifest(data_dir)
+    row = {"messages": [{"role": "user", "content": "What is x?"}, {"role": "assistant", "content": "x is 1"}],
+           "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"}}
+    (data_dir / "prepared/test.jsonl").write_text(json.dumps(row) + "\n")
+    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []))
+
+    def chat(model, messages, max_tokens, json_mode, request_contract=None):
+        if json_mode:
+            evidence = json.loads(messages[1]["content"])
+            passed = evidence["candidate_next_action"]["content"] == evidence["reference_next_action"]["content"]
+            return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "text check"})}
+        return {"role": "assistant", "content": "x is 1"}
+
+    options = dict(data_dir=data_dir, output_dir=output, tuned_model="tuned-model",
+                   judge_model="anthropic/claude-example", confirm=True, chat=chat)
+    evaluation.run_replay_evaluation(**options)
+    config_path = output / "evaluation-config.json"
+    config = json.loads(config_path.read_text())
+    assert config["judge_endpoint"] == "https://api.anthropic.com"
+    results_before = (output / "results.jsonl").read_bytes()
+    options["chat"] = lambda *_args, **_kwargs: pytest.fail("completed replay must not repeat calls")
+    evaluation.run_replay_evaluation(**options)
+    if previous == "missing_config":
+        config_path.unlink()
+    else:
+        if previous == "missing_endpoint":
+            config.pop("judge_endpoint")
+        else:
+            config["judge_endpoint"] = "https://gateway.smith.langchain.com/anthropic"
+        config_path.write_text(json.dumps(config))
+    with pytest.raises(PipelineError, match="evaluation settings|judge endpoint"):
+        evaluation.run_replay_evaluation(**options)
+    assert (output / "results.jsonl").read_bytes() == results_before

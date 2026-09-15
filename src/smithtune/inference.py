@@ -13,10 +13,10 @@ from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
 
 
-ANTHROPIC_INFERENCE_URL = "https://gateway.smith.langchain.com/anthropic/v1/messages"
-
-
-ANTHROPIC_MODEL_PREFIX = "anthropic/"
+ANTHROPIC_ENDPOINTS = {
+    "anthropic": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+    "anthropic-gateway": ("https://gateway.smith.langchain.com/anthropic", "LANGSMITH_GATEWAY_API_KEY"),
+}
 
 
 REQUEST_TIMEOUT_SECONDS = 300
@@ -92,24 +92,15 @@ def _fireworks_chat_completion(
     return message
 
 
-def _anthropic_gateway_key() -> str:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    custom_headers = os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
-    if custom_headers:
-        try:
-            parsed_headers = json.loads(custom_headers)
-        except json.JSONDecodeError:
-            parsed_headers = dict(
-                line.split(":", 1) for line in custom_headers.splitlines() if ":" in line
-            )
-        if isinstance(parsed_headers, dict):
-            for name, value in parsed_headers.items():
-                if name.strip().lower() == "x-api-key" and isinstance(value, str):
-                    api_key = value.strip()
-                    break
-    if not api_key:
-        raise PipelineError("ANTHROPIC_CUSTOM_HEADERS or ANTHROPIC_API_KEY is not set")
-    return api_key
+def anthropic_connection(provider: str = "anthropic") -> tuple[str, str]:
+    """Resolve an explicit endpoint and its own credential; never fall back across providers."""
+    if provider not in ANTHROPIC_ENDPOINTS:
+        raise PipelineError(f"unsupported Anthropic provider: {provider}")
+    base_url, credential = ANTHROPIC_ENDPOINTS[provider]
+    key = os.environ.get(credential)
+    if not key or not key.strip():
+        raise PipelineError(f"{credential} is not set for {provider}")
+    return base_url, key
 
 
 def _anthropic_chat_completion(
@@ -117,8 +108,10 @@ def _anthropic_chat_completion(
     messages: list[dict[str, Any]],
     max_tokens: int,
     json_mode: bool = False,
+    *,
+    provider: str = "anthropic",
 ) -> dict[str, Any]:
-    api_key = _anthropic_gateway_key()
+    base_url, api_key = anthropic_connection(provider)
     system = [message["content"] for message in messages if message.get("role") == "system"]
     conversation = [message for message in messages if message.get("role") != "system"]
     if not all(message.get("role") in {"user", "assistant"} for message in conversation):
@@ -130,7 +123,7 @@ def _anthropic_chat_completion(
         "max_tokens": max_tokens,
     }
     request = urllib.request.Request(
-        ANTHROPIC_INFERENCE_URL,
+        base_url + "/v1/messages",
         data=json.dumps(body).encode(),
         method="POST",
         headers={
@@ -139,10 +132,10 @@ def _anthropic_chat_completion(
             "Content-Type": "application/json",
         },
     )
-    result = _post_json(request, f"LangSmith gateway inference for {model}")
+    result = _post_json(request, f"{provider} inference for {model}")
     content = result.get("content")
     if not isinstance(content, list) or not all(isinstance(block, dict) for block in content):
-        raise PipelineError(f"LangSmith gateway inference for {model} returned invalid content")
+        raise PipelineError(f"{provider} inference for {model} returned invalid content")
     text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
     return {"role": "assistant", "content": text}
 
@@ -154,11 +147,12 @@ def _chat_completion(
     json_mode: bool = False,
     request_contract: InferenceContract | None = None,
 ) -> dict[str, Any]:
-    if model.startswith(ANTHROPIC_MODEL_PREFIX):
+    provider, _, model_id = model.partition("/")
+    if provider in ANTHROPIC_ENDPOINTS:
         if request_contract is not None:
             raise PipelineError("agent inference contracts are supported only for Fireworks replay models")
         return _anthropic_chat_completion(
-            model.removeprefix(ANTHROPIC_MODEL_PREFIX), messages, max_tokens, json_mode
+            model_id, messages, max_tokens, json_mode, provider=provider
         )
     return _fireworks_chat_completion(
         model,
