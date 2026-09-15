@@ -128,7 +128,12 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     assert delays == [30]
     # A retry after an interrupted download reuses completed reads.
     (tmp_path / "snapshot.json").unlink()
-    assert triage_source.snapshot(source(), tmp_path, runner=lambda *_a, **_k: pytest.fail("read repeated")) == frozen
+    def only_membership(command, **kwargs):
+        assert command[2] == "/api/v2/runs/query"
+        assert json.loads(command[command.index("--body") + 1])["filter"].startswith("eq(thread_id,")
+        return api(command, **kwargs)
+
+    assert triage_source.snapshot(source(), tmp_path, runner=only_membership) == frozen
 
 
 def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
@@ -787,3 +792,29 @@ def test_old_snapshot_requires_fresh_system_message_capture(tmp_path):
     path.write_text(json.dumps(value))
     with pytest.raises(PipelineError, match="predates system-message capture"):
         triage_source.load_snapshot(tmp_path)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume):
+    api = API()
+    # Identical query timestamps must not let the final check reuse cached IDs.
+    monkeypatch.setattr(triage_source, "_utc_now", lambda: "2026-09-15T00:00:00+00:00")
+
+    def new_turn(command):
+        if command[2] == "/v1/trajectory" and len(api.thread_roots) == 2:
+            if resume:
+                raise KeyboardInterrupt()
+            api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+            api.trajectory_pages["next"]["messages"] += messages(3)
+
+    api.failure = new_turn
+    if resume:
+        with pytest.raises(KeyboardInterrupt):
+            triage_source.snapshot(source(), tmp_path, runner=api)
+        api.failure = None
+        api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+        api.trajectory_pages["next"]["messages"] += messages(3)
+    with pytest.raises(PipelineError, match="conversation-a changed during download"):
+        triage_source.snapshot(source(), tmp_path, runner=api)
+    assert not (tmp_path / "snapshot.json").exists()
+    assert not list((tmp_path / "conversations").glob("*.json"))

@@ -26,10 +26,10 @@ MAX_SOURCE_PAGES = 1000
 MAX_EXPANDED_TRACES = 10_000
 
 
-def _fetch(command, *, runner, cache_dir, **kwargs):
+def _fetch(command, *, runner, cache_dir, use_cache=True, **kwargs):
     """Retry idempotent source reads; never wrap dataset writes."""
     path = cache_dir / (json_sha256({"command": command, "input": kwargs.get("input")}) + ".json")
-    if path.exists():
+    if use_cache and path.exists():
         return subprocess.CompletedProcess(command, 0, stdout=path.read_text(encoding="utf-8"), stderr="")
     for attempt in range(3):
         try:
@@ -49,7 +49,8 @@ def _fetch(command, *, runner, cache_dir, **kwargs):
             json.loads(result.stdout)
         except (ValueError, TypeError):
             return result
-        _atomic_text(path, result.stdout)
+        if use_cache:
+            _atomic_text(path, result.stdout)
         return result
 
 
@@ -211,6 +212,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
     if source_path.exists() and _load_json(source_path) != source:
         raise PipelineError("partial download uses a different source query; use a new output directory")
     _json_dump(source_path, source)
+    live_runner = partial(_fetch, runner=runner, cache_dir=cache_dir, use_cache=False)
     runner = partial(_fetch, runner=runner, cache_dir=cache_dir)
     captured_path = cache_dir / "captured-at.json"
     if not captured_path.exists():
@@ -252,6 +254,12 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
             record["multimodal_types"] = multimodal_types(record)
             record["source_sha256"] = json_sha256(record)
             traces.append(record)
+        if thread:
+            # The trajectory is live; verify membership again without cached reads.
+            current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
+                                             end_time=_utc_now(), runner=live_runner)
+            if set(current_traces) != set(unit_traces):
+                raise PipelineError(f"conversation {thread} changed during download; start a new triage run in a new output directory")
         example_id = str(uuid5(NAMESPACE_URL, json_sha256({"workspace": workspace, "project": project, "key": key, "messages": all_messages})))
         example = {"id": example_id, "inputs": {"messages": all_messages}, "outputs": None,
                    "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
