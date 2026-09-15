@@ -543,3 +543,77 @@ def test_concurrent_import_completes_every_selected_conversation(tmp_path):
     assert sorted(json.dumps(call, sort_keys=True) for call in api.trajectory_calls()) == sorted(
         json.dumps({"thread_id": f"thread-{i}"}) for i in range(1, 10)) + sorted(
         json.dumps({"trace_id": uid(i)}) for i in range(10, 13))
+
+
+def test_import_collects_all_pages_before_writing_one_example(tmp_path):
+    api = API([[root(1, "a")]])
+    select(tmp_path, api)
+    pages = {
+        None: {"messages": api.messages[:2], "next_cursor": "second", "prev_cursor": None},
+        "second": {"messages": [], "next_cursor": "third", "prev_cursor": "first"},
+        "third": {"messages": api.messages[2:], "next_cursor": None, "prev_cursor": "second"},
+    }
+    cursors = []
+
+    def runner(command, **kwargs):
+        response = api(command, **kwargs)
+        if command[2] == "/v1/trajectory":
+            assert api.examples == []
+            body = json.loads(kwargs["input"])
+            cursor = body.get("cursor")
+            cursors.append(cursor)
+            return SimpleNamespace(stdout=json.dumps(pages[cursor]))
+        return response
+
+    result = curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+    assert cursors == [None, "second", "third"]
+    assert result["example_count"] == 1
+    assert api.examples[0]["inputs"]["messages"] == api.messages
+
+
+@pytest.mark.parametrize("recover", [True, False])
+def test_later_page_retries_only_that_page_and_never_writes_partial_example(tmp_path, monkeypatch, recover):
+    api = API([[root(1, "a")]])
+    select(tmp_path, api)
+    sleeps, cursors = [], []
+    monkeypatch.setattr(curation, "_sleep", sleeps.append)
+
+    def runner(command, **kwargs):
+        if command[2] != "/v1/trajectory":
+            return api(command, **kwargs)
+        body = json.loads(kwargs["input"])
+        cursor = body.get("cursor")
+        cursors.append(cursor)
+        if cursor is None:
+            return SimpleNamespace(stdout=json.dumps({"messages": api.messages[:2], "next_cursor": "second"}))
+        if not recover or cursors.count("second") < 3:
+            raise subprocess.CalledProcessError(1, "langsmith", stderr="HTTP 503")
+        return SimpleNamespace(stdout=json.dumps({"messages": api.messages[2:], "next_cursor": None, "prev_cursor": "first"}))
+
+    if recover:
+        curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+        assert api.examples[0]["inputs"]["messages"] == api.messages
+    else:
+        with pytest.raises(PipelineError, match="HTTP 503 after 3 attempt"):
+            curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+        assert api.examples == []
+    assert cursors == [None, "second", "second", "second"]
+    assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("cursor", ["", 123, [], {}, "second"])
+def test_invalid_or_repeated_later_cursor_never_writes_partial_example(tmp_path, cursor):
+    api = API([[root(1, "a")]])
+    select(tmp_path, api)
+    calls = []
+
+    def runner(command, **kwargs):
+        if command[2] != "/v1/trajectory":
+            return api(command, **kwargs)
+        calls.append(json.loads(kwargs["input"]).get("cursor"))
+        return SimpleNamespace(stdout=json.dumps({"messages": api.messages, "next_cursor": "second" if len(calls) == 1 else cursor}))
+
+    with pytest.raises(PipelineError, match="invalid or repeated continuation cursor"):
+        curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+    assert calls == [None, "second"]
+    assert api.examples == []
