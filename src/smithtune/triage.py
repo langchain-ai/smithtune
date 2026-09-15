@@ -17,6 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 from smithtune.artifacts import _atomic_text, _json_dump, _jsonl_dump, _load_json, _load_jsonl, _run, exclusive_output
 from smithtune.curation import _api, _uuid, _write_new
 from smithtune.dataset import validate_trajectories
+from smithtune.dataset_artifacts import load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, indexed_messages, judge_messages, rubric_text, validate_judgment
@@ -148,7 +149,12 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        identity.update(agent_version=6, skill_sha256=json_sha256(skill))
+        skill_hash = json_sha256(skill)
+        # A CLI-directory documentation correction leaves coordinator instructions
+        # unchanged. Preserve its prior identity so saved votes remain reusable.
+        if skill_hash == "244f088d563cb64cfbd337b5f80e6fffa3f4d3a95dadb6e2c47f182f6e636e98":
+            skill_hash = "b7b79171217e4f4b22f488f9f8e1de9fc96c2b8744d3607adaa375131f91fcf5"
+        identity.update(agent_version=6, skill_sha256=skill_hash)
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "traces": len(frozen["traces"]),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(filtered),
@@ -341,7 +347,7 @@ def selected_examples(triage_dir: Path) -> list[dict]:
     for unit in frozen["units"]:
         if training_error(unit) or not all(by_id[tid]["keep"] == 1 and by_id[tid]["status"] == "complete" for tid in unit["trace_ids"]):
             continue
-        example = copy.deepcopy(unit["example"])
+        example = load_conversation(save_conversation(triage_dir, unit["example"]))
         contract = parse_inference_contract(unit["contract"])
         example["metadata"]["smithtune_triage"] = {"identity_sha256": json_sha256(identity),
             "messages_sha256": json_sha256(example["inputs"]["messages"]), "contract": contract.to_dict()}

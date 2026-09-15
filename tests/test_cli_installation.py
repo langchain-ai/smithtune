@@ -89,7 +89,7 @@ def test_default_and_explicit_data_paths_follow_invocation(tmp_path, monkeypatch
         }[command]
         assert cli._parser().parse_args([command, *extras]).data_dir == tmp_path / "data"
         assert cli._parser().parse_args([command, *extras, "--data-dir", "custom"]).data_dir == Path("custom")
-    assert curation.DEFAULT_SELECTION_DIR.resolve() == tmp_path / "data/selections"
+    assert cli.new_run_directory().resolve().parent == tmp_path / "data/datasets"
 
 
 def test_default_selection_is_written_in_working_directory(tmp_path, monkeypatch):
@@ -103,7 +103,7 @@ def test_default_selection_is_written_in_working_directory(tmp_path, monkeypatch
         start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z",
         limit=1, runner=api,
     )
-    assert Path(result["selection"]).resolve().is_relative_to(tmp_path / "data/selections")
+    assert Path(result["selection"]).resolve().is_relative_to(tmp_path / "data/datasets")
     assert Path(result["selection"]).is_file()
 
 

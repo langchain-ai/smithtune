@@ -14,6 +14,7 @@ from pathlib import Path
 
 from smithtune import dataset
 from smithtune import curation, triage
+from smithtune.dataset_artifacts import new_run_directory
 from smithtune.triage_source import load_snapshot, source_options
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
@@ -67,7 +68,8 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
     create.add_argument("--limit", type=int, help=f"number of distinct conversations to import, at most {curation.MAX_LIMIT}; querying stops once this many are found")
     create.add_argument("--concurrency", type=int, default=curation.DEFAULT_CONCURRENCY, help=f"conversations fetched and written at once, 1 to {curation.MAX_CONCURRENCY} (default: %(default)s)")
-    create.add_argument("--output", type=Path, help="selection file path; default: an automatic path under data/selections; import receipt saved alongside it")
+    create.add_argument("--run-dir", type=Path, help="local run directory (default: data/datasets/<generated-id>)")
+    create.add_argument("--output", type=Path, help="selection file path; its parent becomes the run directory; cannot combine with --run-dir")
 
     create.add_argument("--triage-dir", type=Path, help="import frozen all-pass conversations from a completed triage run")
     create.add_argument("--confirm", action="store_true", help="confirm dataset creation from triage labels")
@@ -76,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
         "triage", help="label traces with an agent council",
         description="Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, GLM-5.3-Flash, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
     )
-    triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default: data/triage)")
+    triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default for a new run: data/datasets/<generated-id>)")
     source = triage_cmd.add_argument_group("Source (first run only)")
     source.add_argument("--workspace-id")
     source.add_argument("--project-id")
@@ -329,10 +331,15 @@ def main(argv: list[str] | None = None) -> None:
             }
         elif args.command == "dataset":
             if args.dataset_command == "triage":
-                directory = args.directory or args.output_dir or Path("data/triage")
+                directory = args.directory or args.output_dir
                 if args.directory is not None and args.output_dir is not None:
                     raise PipelineError("use a directory argument or --output-dir, not both")
                 source_fields = (args.workspace_id, args.project_id, args.start_time, args.end_time)
+                if directory is None:
+                    if not all(source_fields):
+                        raise PipelineError("supply a saved run directory to resume, or all source IDs and times to start a new run")
+                    directory = new_run_directory()
+                print(f"Dataset run directory: {directory}", file=sys.stderr)
                 if all(source_fields):
                     source = source_options(*source_fields, filter=args.filter,
                                             limit=100 if args.limit is None else args.limit,
@@ -352,8 +359,9 @@ def main(argv: list[str] | None = None) -> None:
                 value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
                 if args.confirm:
                     value = {key: value[key] for key in ("status", "traces", "filtered_multimodal", "kept", "dropped", "incomplete", "labels", "report")}
+                value["run_dir"] = str(directory)
             elif args.triage_dir is not None:
-                if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output)):
+                if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output, args.run_dir)):
                     raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")
                 value = triage.create_triaged_dataset(args.triage_dir, args.name, confirm=args.confirm)
             else:
@@ -363,7 +371,7 @@ def main(argv: list[str] | None = None) -> None:
                 value = curation.create_dataset(
                     workspace_id=args.workspace_id, project_id=args.project_id,
                     start_time=args.start_time, end_time=args.end_time, name=args.name,
-                    filter=args.filter, limit=args.limit, output=args.output, concurrency=args.concurrency,
+                    filter=args.filter, limit=args.limit, output=args.output, run_dir=args.run_dir, concurrency=args.concurrency,
                 )
         elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(

@@ -13,13 +13,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.dataset_artifacts import load_conversation, new_run_directory, save_conversation
 from smithtune.providers.base import PipelineError
 
 
-DEFAULT_SELECTION_DIR = Path("data") / "selections"
 SCHEMA_VERSION = 2
 # The trajectory endpoint scopes one conversation by either key.
 TRAJECTORY_KEYS = ("thread_id", "trace_id")
@@ -203,13 +203,16 @@ def _select_dataset(
 def create_dataset(
     *, workspace_id: str, project_id: str, start_time: str, end_time: str,
     name: str, limit: int, filter: str | None = None, output: Path | None = None,
+    run_dir: Path | None = None,
     concurrency: int = DEFAULT_CONCURRENCY, runner: Callable[..., Any] = _run,
 ) -> dict:
     """Filter root runs and import the selected conversations in one operation."""
     name = _text(name, "name")
     _check_concurrency(concurrency)
-    if output is None:
-        output = DEFAULT_SELECTION_DIR / f"{uuid4()}.json"
+    if output is not None and run_dir is not None:
+        raise PipelineError("use --run-dir or --output, not both")
+    run_dir = output.parent if output is not None else run_dir or new_run_directory()
+    output = output if output is not None else run_dir / "selection.json"
     selected = _select_dataset(
         workspace_id=workspace_id, project_id=project_id,
         start_time=start_time, end_time=end_time, output=output,
@@ -219,7 +222,7 @@ def create_dataset(
         raise PipelineError(f"no conversations matched the filters; no dataset was created; selection={output}")
     imported = _import_selection(selection=output, name=name, concurrency=concurrency, runner=runner)
     return {
-        **imported, "selection": str(output),
+        **imported, "selection": str(output), "run_dir": str(run_dir),
         "matching_roots": selected["matching_roots"],
         "distinct_conversations": selected["distinct_conversations"],
         "trace_keyed_examples": selected["trace_keyed_examples"],
@@ -319,11 +322,16 @@ def _import_selection(
             _save_receipt(receipt_path, receipt)
         messages = _fetch_trajectory(workspace_id, project_id, item, runner=runner)
         metadata = {**common, "source_scope": item["key"].removesuffix("_id"), "source_scope_id": item["id"]}
+        conversation_path = save_conversation(selection.parent, {
+            "inputs": {"messages": messages}, "outputs": None, "metadata": metadata,
+        })
+        example = load_conversation(conversation_path)
         with lock:
+            entry["conversation"] = str(conversation_path)
             entry["pending_write"] = "example"
             _save_receipt(receipt_path, receipt)
         result = _api(workspace_id, "POST", "/api/v1/examples", {
-            "dataset_id": dataset_id, "inputs": {"messages": messages}, "outputs": None, "metadata": metadata,
+            **example, "dataset_id": dataset_id,
         }, runner=runner)
         example_id = _uuid(result.get("id") if isinstance(result, dict) else None, "returned example ID")
         with lock:
