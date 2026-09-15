@@ -2,7 +2,9 @@
 
 Decide whether the full recorded conversation is good training data for
 supervised fine-tuning. Return only JSON: `{"keep":1,"reason":"..."}` or
-`{"keep":0,"reason":"..."}`. Give a short, concrete reason.
+`{"keep":0,"reason":"..."}`. The `reason` must be one or two short sentences.
+State the main observed behavior that justifies keeping or dropping the
+trajectory. Do not recap the conversation or give a long analysis.
 
 The supplied trajectory contains the complete ordered messages: user requests,
 assistant replies, tool calls, and tool results. Judge all assistant behavior
