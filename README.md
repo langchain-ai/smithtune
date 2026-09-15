@@ -45,7 +45,7 @@ Configure credentials in your environment:
 | --- | --- |
 | Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
-| Baseten preparation and training | `BASETEN_API_KEY` |
+| Baseten preparation, training, and council judging | `BASETEN_API_KEY` |
 | Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
 | Optional LangSmith gateway judging | `LANGSMITH_GATEWAY_API_KEY` |
 
@@ -198,6 +198,19 @@ Use any subset of these aliases, or `provider:model` for other models, such as
 `anthropic:claude-sonnet-5`. The first model also runs the coordinator. Direct
 Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway:<model-id>` uses
 `LANGSMITH_GATEWAY_API_KEY`. The council and rules are saved for resume.
+
+For Baseten judges, set `BASETEN_API_KEY` and use `baseten:<model-slug>` from
+[Baseten Model APIs](https://docs.baseten.co/inference/model-apis/overview).
+For example, this council mixes Baseten, Fireworks, and OpenAI:
+
+```bash
+--judges baseten:deepseek-ai/DeepSeek-V4.1-Flash,glm-5.3-flash,gpt-5.6-terra
+```
+
+Baseten uses `https://inference.baseten.co/v1`; no deployment is needed.
+The first model also runs the coordinator. Baseten calls request reasoning off,
+except GLM-5.3 variants, which require low reasoning. This supports managed
+Model APIs; custom Baseten deployment URLs are not accepted.
 
 Use `smithtune dataset triage --help` for filters, concurrency, and other options.
 For coding agents, `smithtune skill export --output ./skills` exports the triage
