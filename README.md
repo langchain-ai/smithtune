@@ -25,6 +25,14 @@ Install these companion tools for the operations you use:
 | [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) | Dataset creation, contract capture, and fetching data during preparation |
 | [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) | Fireworks deployment and undeployment |
 
+Install the LangSmith CLI with the official installer, then start a new shell
+or refresh your PATH so `langsmith` is available:
+
+```bash
+curl -fsSL https://cli.langsmith.com/install.sh | sh
+langsmith --help
+```
+
 Follow each tool's installation and authentication instructions, then run
 `smithtune doctor` to check local setup. It does not validate credentials.
 
@@ -63,14 +71,17 @@ smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
   --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
+  --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
 
-Each example contains a whole conversation, including turns outside the filter
-window. Use the returned dataset ID in `prepare`.
+Each matching root selects its whole thread when it has a thread ID, otherwise
+its single trace. Thread examples include turns outside the filter window. Use
+the returned dataset ID in `prepare`.
 
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
-- All matching threads are included; use `--limit 100` to sample up to 100
+- `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
+- Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
 - Choose a new dataset name. If an import fails, inspect its receipt in `data/selections/` before retrying
 
 ## Prepare data
@@ -81,7 +92,8 @@ Optional top-level arguments are combined when the rest of the tool definition
 matches; the expanded schema applies to the whole conversation. Provider built-ins
 (such as tool search) and incompatible tool definitions remain unsupported.
 
-Existing datasets need source thread/trace and project IDs; CLI-created datasets
+Existing datasets need `source_scope` (thread or trace), `source_scope_id`, and
+`source_project_id` in each example's metadata; CLI-created datasets
 include these automatically. Recorded system messages are preserved; the default
 Qwen renderer requires them at the start.
 
@@ -135,7 +147,7 @@ If source traces live in another workspace, add
 still identifies the dataset workspace. Per-example `metadata.source_workspace_id`
 takes precedence over this flag, which defaults to the dataset workspace. Your
 LangSmith API key must have access to both. `dataset create` saves the source
-workspace automatically; existing examples still need valid source thread/trace
+workspace automatically; existing examples still need valid source scope
 and project IDs.
 
 Description changes are reported in `prepared/tool_description_replacements.json`

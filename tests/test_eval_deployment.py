@@ -140,7 +140,7 @@ def replay_data(tmp_path, monkeypatch):
     data = tmp_path / "data"
     write_manifest(data)
     rows = [{"messages": [{"role": "user", "content": f"question-{i}"}, {"role": "assistant", "content": f"answer-{i}"}],
-             "_source": {"example_id": f"example-{i}", "source_thread_id": f"thread-{i}", "source_trace_id": None}} for i in range(2)]
+             "_source": {"example_id": f"example-{i}", "source_scope": "thread", "source_scope_id": f"thread-{i}"}} for i in range(2)]
     (data / "prepared/test.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *_: ([{**case, "prompt_tokens": 4} for case in cases], []))
     return data

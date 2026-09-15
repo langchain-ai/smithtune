@@ -113,8 +113,8 @@ def build_replay_cases(
                 {
                     "id": case_id,
                     "example_id": example_id,
-                    "source_thread_id": source["source_thread_id"],
-                    "source_trace_id": source.get("source_trace_id"),
+                    "source_scope": source["source_scope"],
+                    "source_scope_id": source["source_scope_id"],
                     "message_index": position,
                     "case_type": case_type,
                     "messages": copy.deepcopy(messages[:position]),

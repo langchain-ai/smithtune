@@ -447,32 +447,20 @@ def _has_message_content(message: dict[str, Any]) -> bool:
     return bool(has_text or message.get("tool_calls") or message.get("reasoning_content"))
 
 
-def _source_identity(example: dict[str, Any]) -> dict[str, str | None]:
-    """Resolve native and legacy LangSmith source identities."""
+SOURCE_SCOPES = ("thread", "trace")
+
+
+def _source_identity(example: dict[str, Any]) -> dict[str, str]:
+    """Read the conversation scope and its ID from example metadata."""
     metadata = example.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
-    native_thread_id = example.get("source_thread_id")
-    legacy_thread_id = metadata.get("source_thread_id")
-    native_trace_id = example.get("source_trace_id")
-    legacy_trace_id = metadata.get("source_trace_id")
-    for label, value in (
-        ("source_thread_id", native_thread_id),
-        ("metadata.source_thread_id", legacy_thread_id),
-        ("source_trace_id", native_trace_id),
-        ("metadata.source_trace_id", legacy_trace_id),
-    ):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise PipelineError(f"example source identity {label} must be a non-empty string")
-    if native_thread_id and legacy_thread_id and native_thread_id != legacy_thread_id:
-        raise PipelineError("example has conflicting source_thread_id values")
-    if native_trace_id and legacy_trace_id and native_trace_id != legacy_trace_id:
-        raise PipelineError("example has conflicting source_trace_id values")
-    thread_id = native_thread_id or legacy_thread_id
-    trace_id = legacy_trace_id or native_trace_id
-    if not thread_id and not trace_id:
-        raise PipelineError("example has no source thread or trace identity")
-    return {"source_thread_id": thread_id, "source_trace_id": trace_id}
+    scope, scope_id = metadata.get("source_scope"), metadata.get("source_scope_id")
+    if scope not in SOURCE_SCOPES:
+        raise PipelineError("example metadata source_scope must be thread or trace")
+    if not isinstance(scope_id, str) or not scope_id:
+        raise PipelineError("example metadata source_scope_id must be a non-empty string")
+    return {"source_scope": scope, "source_scope_id": scope_id}
 
 
 def validate_trajectories(
@@ -593,7 +581,7 @@ def capture_example_contracts(
             if not set(contracts).issubset(example["id"] for example in examples):
                 raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
             print(f"Resuming tool capture: {len(contracts)}/{len(examples)} examples already saved", file=sys.stderr)
-    sources: dict[tuple[str, str, str | None, str | None], dict[str, Any]] = {}
+    sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for example in examples:
         example_id = example["id"]
         if example_id in contracts:
@@ -601,30 +589,32 @@ def capture_example_contracts(
         try:
             source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
             identity = _source_identity(example)
-            thread_id, trace_id = identity["source_thread_id"], identity["source_trace_id"]
+            scope, scope_id = identity["source_scope"], identity["source_scope_id"]
             metadata = example.get("metadata") or {}
             project_id = example.get("source_session_id") or metadata.get("source_project_id")
             if example.get("source_session_id") and metadata.get("source_project_id") and example["source_session_id"] != metadata["source_project_id"]:
                 raise PipelineError("conflicting source project IDs")
-            if project_id is None and trace_id:
-                roots = _query_contract_runs(source_workspace, {"id": [trace_id], "limit": 1}, runner=runner)
-                if len(roots) != 1 or roots[0]["id"] != trace_id:
-                    raise PipelineError(f"source trace root {trace_id} was not found")
+            if project_id is None and scope == "trace":
+                roots = _query_contract_runs(source_workspace, {"id": [scope_id], "limit": 1}, runner=runner)
+                if len(roots) != 1 or roots[0]["id"] != scope_id:
+                    raise PipelineError(f"source trace root {scope_id} was not found")
                 project_id = roots[0].get("session_id")
             if not isinstance(project_id, str) or not project_id:
                 raise PipelineError("missing source project ID; use source_session_id or metadata.source_project_id, or supply --inference-contract")
-            key = (source_workspace, project_id, thread_id, None if thread_id else trace_id)
+            key = (source_workspace, project_id, scope, scope_id)
             if key not in sources:
-                if thread_id:
-                    runs = _query_thread_llm_runs(source_workspace, project_id, thread_id, runner=runner)
+                if scope == "thread":
+                    runs = _query_thread_llm_runs(source_workspace, project_id, scope_id, runner=runner)
                 else:
                     runs = _query_contract_runs(source_workspace, {
                         "session": [project_id], "run_type": "llm",
-                        "filter": f"eq(trace_id,{json.dumps(trace_id)})",
+                        "filter": f"eq(trace_id,{json.dumps(scope_id)})",
                     }, runner=runner)
-                    if any(run.get("trace_id") != trace_id for run in runs):
+                    if any(run.get("trace_id") != scope_id for run in runs):
                         raise PipelineError("LangSmith returned a run from a different trace")
-                sources[key] = contract_from_runs(runs, workspace_id=source_workspace, thread_id=thread_id)
+                sources[key] = contract_from_runs(
+                    runs, workspace_id=source_workspace, thread_id=scope_id if scope == "thread" else None,
+                )
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
@@ -738,11 +728,8 @@ def prepare_sft_rows(
     return rows
 
 
-def _source_group(row: dict[str, Any]) -> tuple[str, str]:
-    source = row["_source"]
-    if source.get("source_thread_id"):
-        return ("thread", source["source_thread_id"])
-    return ("trace", source["source_trace_id"])
+def _split_rank(row: dict[str, Any]) -> str:
+    return hashlib.sha256(f"{SPLIT_SEED}:{row['_source']['source_scope_id']}".encode()).hexdigest()
 
 
 def split_rows(
@@ -750,53 +737,44 @@ def split_rows(
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Assign each conversation to a partition by hashing its source scope ID.
+
+    Every example is one whole conversation, so rows are split independently;
+    the hash keeps assignments stable across runs and row order.
+    """
     if not 0 <= validation_fraction <= 1 or not 0 <= test_fraction <= 1:
         raise PipelineError("validation and test fractions must be between zero and one")
     if validation_fraction + test_fraction > 1:
         raise PipelineError("validation and test fractions cannot total more than one")
 
-    ranked_groups = sorted(
-        {_source_group(row) for row in rows},
-        key=lambda group: hashlib.sha256(
-            (
-                f"{SPLIT_SEED}:{group[1]}"
-                if group[0] == "thread"
-                else f"{SPLIT_SEED}:trace:{group[1]}"
-            ).encode()
-        ).hexdigest(),
-    )
+    ranked = sorted(rows, key=_split_rank)
     train_fraction = 1 - validation_fraction - test_fraction
     if math.isclose(train_fraction, 0, abs_tol=1e-9):
         # Fractions that sum to one can leave a floating-point remainder that
-        # would otherwise force a one-group training partition.
+        # would otherwise force a one-row training partition.
         train_fraction = 0.0
     required_partitions = sum(
         fraction > 0
         for fraction in (train_fraction, validation_fraction, test_fraction)
     )
-    if len(ranked_groups) < required_partitions:
-        raise PipelineError("not enough source thread or trace groups for the requested non-zero fractions")
+    if len(ranked) < required_partitions:
+        raise PipelineError("not enough conversations for the requested non-zero fractions")
 
     validation_count = 0
     if validation_fraction > 0:
-        validation_count = max(1, round(len(ranked_groups) * validation_fraction))
+        validation_count = max(1, round(len(ranked) * validation_fraction))
         validation_count = min(
             validation_count,
-            len(ranked_groups) - int(train_fraction > 0) - int(test_fraction > 0),
+            len(ranked) - int(train_fraction > 0) - int(test_fraction > 0),
         )
     test_count = 0
     if test_fraction > 0:
-        test_count = max(1, round(len(ranked_groups) * test_fraction))
-        test_count = min(
-            test_count,
-            len(ranked_groups) - validation_count - int(train_fraction > 0),
-        )
-    validation_groups = set(ranked_groups[:validation_count])
-    test_groups = set(ranked_groups[validation_count : validation_count + test_count])
-    held_out_groups = validation_groups | test_groups
-    train = [row for row in rows if _source_group(row) not in held_out_groups]
-    validation = [row for row in rows if _source_group(row) in validation_groups]
-    test = [row for row in rows if _source_group(row) in test_groups]
+        test_count = max(1, round(len(ranked) * test_fraction))
+        test_count = min(test_count, len(ranked) - validation_count - int(train_fraction > 0))
+    validation = ranked[:validation_count]
+    test = ranked[validation_count : validation_count + test_count]
+    held_out = {id(row) for row in validation + test}
+    train = [row for row in rows if id(row) not in held_out]
     return train, validation, test
 
 
@@ -837,16 +815,11 @@ def _validate_split_isolation(
     validation: list[dict[str, Any]],
     test: list[dict[str, Any]],
 ) -> None:
+    """Reject identical conversations recorded under different IDs across partitions."""
     partitions = {"train": train, "validation": validation, "test": test}
     for left_index, (left_name, left_rows) in enumerate(partitions.items()):
-        left_groups = {_source_group(row) for row in left_rows}
         left_content = {_trajectory_content_hash(row) for row in left_rows}
         for right_name, right_rows in list(partitions.items())[left_index + 1 :]:
-            right_groups = {_source_group(row) for row in right_rows}
-            if overlap := left_groups & right_groups:
-                raise PipelineError(
-                    f"source group overlap between {left_name} and {right_name}: {sorted(overlap)[0]}"
-                )
             right_content = {_trajectory_content_hash(row) for row in right_rows}
             if left_content & right_content:
                 raise PipelineError(f"content hash overlap between {left_name} and {right_name}")
@@ -943,11 +916,7 @@ def prepare_dataset(
             "examples": expected_count,
         },
         "split": {
-            "method": (
-                "sha256(seed:source_thread_id)"
-                if all(row["_source"].get("source_thread_id") for row in rows)
-                else "sha256(seed:source_thread_id; seed:trace:source_trace_id fallback)"
-            ),
+            "method": "sha256(seed:source_scope_id)",
             "seed": SPLIT_SEED,
             "validation_fraction": validation_fraction,
             "test_fraction": test_fraction,

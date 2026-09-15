@@ -49,8 +49,8 @@ def test_contract_failure_keeps_example_context(monkeypatch, retry_sleeps):
         raise subprocess.CalledProcessError(1, argv, stderr="Error: HTTP 429")
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
-    example = {"id": "example-123", "source_thread_id": "thread-123",
-               "metadata": {"source_project_id": "project-123"}}
+    example = {"id": "example-123", "metadata": {"source_scope": "thread", "source_scope_id": "thread-123",
+                                                 "source_project_id": "project-123"}}
     with pytest.raises(PipelineError) as error:
         dataset.capture_example_contracts("workspace-123", [example])
     assert str(error.value) == "example example-123: cannot collect tools: Error: HTTP 429"
@@ -63,8 +63,7 @@ def test_curation_retains_existing_error_handling(monkeypatch):
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
     with pytest.raises(PipelineError) as error:
         curation._api("workspace-123", "POST", "/api/v1/datasets", {"name": "test"})
-    assert "outcome may be unknown" in str(error.value)
-    assert "private" not in str(error.value)
+    assert str(error.value) == "LangSmith POST /api/v1/datasets: request failed"
 
 
 @pytest.mark.parametrize(("diagnostic", "reason"), [

@@ -1584,7 +1584,7 @@ def _row() -> dict:
     return {
         "messages": [{"role": "user", "content": "Hello"}],
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
-        "_source": {"example_id": "example-1", "source_thread_id": "thread-1"},
+        "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
     }
 
 
@@ -1612,7 +1612,7 @@ def _write_raw_dataset(root: Path, *, count: int) -> None:
             ]},
             "outputs": None,
             "metadata": {
-                "source_thread_id": f"thread-{index}",
+                "source_scope": "thread", "source_scope_id": f"thread-{index}",
                 "trajectory_format": "messages",
                 "conversation_scope": "root",
             },
@@ -1658,7 +1658,7 @@ def _write_prepared_dataset(root: Path, *, model: ModelSpec | None = None, max_c
         row = _row()
         row["_source"] = {
             "example_id": f"example-{index}",
-            "source_thread_id": f"thread-{index}",
+            "source_scope": "thread", "source_scope_id": f"thread-{index}",
         }
         rows.append(json.dumps(row))
     (prepared / "train.jsonl").write_text("\n".join(rows[:90]) + "\n", encoding="utf-8")

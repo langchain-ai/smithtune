@@ -100,7 +100,7 @@ def test_default_selection_is_written_in_working_directory(tmp_path, monkeypatch
     result = curation.create_dataset(
         workspace_id=uid(100), project_id=uid(101), name="local-output",
         start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z",
-        runner=api,
+        limit=1, runner=api,
     )
     assert Path(result["selection"]).resolve().is_relative_to(tmp_path / "data/selections")
     assert Path(result["selection"]).is_file()

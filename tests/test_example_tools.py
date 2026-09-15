@@ -18,11 +18,12 @@ from test_tool_capture import llm, tool, page
 
 def example(index, *, thread=None, project="project-1"):
     return {
-        "id": f"example-{index}", "source_thread_id": thread or f"thread-{index}",
+        "id": f"example-{index}",
         "inputs": {"messages": [{"role": "system", "content": f"policy {index}"},
                                 {"role": "human", "content": f"question {index}"},
                                 {"role": "ai", "content": f"answer {index}"}]},
-        "outputs": None, "metadata": {"source_project_id": project,
+        "outputs": None, "metadata": {"source_scope": "thread", "source_scope_id": thread or f"thread-{index}",
+                                      "source_project_id": project,
                                       "trajectory_format": "messages", "conversation_scope": "root"},
     }
 
@@ -91,9 +92,8 @@ def test_same_thread_name_in_different_projects_stays_separate():
 @pytest.mark.parametrize("native", [False, True])
 def test_trace_only_example_queries_every_llm_in_that_trace(native):
     ex = example(1)
-    del ex["source_thread_id"]
     del ex["metadata"]["source_project_id"]
-    (ex if native else ex["metadata"])["source_trace_id"] = "trace-1"
+    ex["metadata"].update(source_scope="trace", source_scope_id="trace-1")
     if native:
         ex["source_session_id"] = "project-1"
     queries = []
@@ -404,9 +404,8 @@ def test_mixed_workspaces_route_and_cache_sources_separately():
 
 def test_trace_project_discovery_uses_source_workspace():
     ex = example(1)
-    del ex["source_thread_id"]
     del ex["metadata"]["source_project_id"]
-    ex["metadata"]["source_trace_id"] = "trace-1"
+    ex["metadata"].update(source_scope="trace", source_scope_id="trace-1")
     queries = []
 
     def runner(command, capture=False):

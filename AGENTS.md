@@ -12,7 +12,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 ## Choose the starting point
 
 - Tracing project: use `dataset create` with the intended workspace, project, time window, and root-run filters, then pass the returned dataset ID to `prepare`.
-- Existing dataset: start at `prepare`; source thread/trace and project information is needed for automatic tool capture.
+- Existing dataset: start at `prepare`; each example's metadata needs `source_scope`, `source_scope_id`, and `source_project_id` for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
 - Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.
 - Use LangSmith API filter expressions from the README and linked syntax reference.
@@ -32,7 +32,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 
 ## Preserve the data behavior
 
-- Dataset creation imports whole conversations, including earlier turns and turns outside the selection window.
+- Dataset creation imports whole conversations: a root's thread when it has one, otherwise its single trace. Thread examples include earlier turns and turns outside the selection window.
 - Preparation preserves recorded messages and gathers each example's tool union from all its source LLM runs. Automatic capture is the normal path; a global inference contract is an explicit override.
 - Preparation combines tools by name, keeps the latest description by source run timestamp (run ID breaks ties), and combines optional top-level arguments when shared arguments and other schema fields match. Description replacements are reported in `prepared/tool_description_replacements.json`. The combined definition applies to the whole example. Provider built-ins and incompatible definitions still fail, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.
