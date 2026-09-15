@@ -82,13 +82,36 @@ the returned dataset ID in `prepare`.
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
 - `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
 - Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
-- Choose a new dataset name. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
+- Use `--name` for a new dataset or `--dataset-id` for an existing dataset in the same workspace. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
 
 Both dataset paths save complete examples under `conversations/` in a local run
 directory, defaulting to `data/datasets/<generated-id>/`. Creation saves each
 conversation before uploading it, alongside the selection and import receipt.
 Use `dataset create --run-dir <directory>` to choose a location. The returned
 `run_dir` identifies the saved files; they remain on disk after upload or failure.
+
+To add conversations to an existing dataset, use the same source flags with
+`--dataset-id` instead of `--name`:
+
+```bash
+smithtune dataset create \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --dataset-id '<dataset-id>' \
+  --start-time 2026-09-08T00:00:00Z --end-time 2026-09-15T00:00:00Z \
+  --limit 100
+```
+
+Sources match by workspace, project, scope and scope ID. New conversations are
+added; unchanged ones are skipped. Longer snapshots update the existing example
+only when its saved messages are an exact prefix, preserving its ID and unrelated
+metadata. Shorter or conflicting snapshots, or duplicate sources already in the
+destination, stop the import. Extending a triaged example requires fresh passing
+triage. Run only one import into a dataset at a time.
+
+Existing-dataset imports download with bounded concurrency and write sequentially.
+The receipt records created, updated and skipped counts, an action log, and any
+pending write whose outcome needs checking. Earlier successful writes remain if a
+later conversation fails.
 
 ## Label full trajectories with an agent council
 
@@ -217,6 +240,15 @@ triage does not write feedback to LangSmith.
 smithtune dataset create --triage-dir data/datasets/my-sft --name selected-sft --confirm
 ```
 
+To import into an existing dataset in the saved source workspace:
+
+```bash
+smithtune dataset create --triage-dir data/datasets/my-sft --dataset-id '<dataset-id>' --confirm
+```
+
+Fresh passing triage updates the conversation, triage metadata and tool contract
+together. For an extended conversation, triage again in a new run directory.
+
 A conversation is selected when all council members finish and the majority
 votes `1` for that full trajectory. Unsupported content and tool contracts
 are excluded and counted in the summary. Import uses the saved messages and
@@ -331,6 +363,7 @@ automatically and select the appropriate tokenizer and formatting.
 
 Preparation uses these defaults:
 
+- One complete trajectory per source conversation; repeated source identities fail validation before tool capture, including with `--no-fetch`
 - LoRA training on text and tool conversations; images are unsupported
 - Tool definitions are combined by name across each conversation, using the latest recorded description and compatible optional arguments; earlier turns see the combined definitions
 - 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split

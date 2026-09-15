@@ -62,7 +62,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     create.add_argument("--workspace-id")
     create.add_argument("--project-id")
-    create.add_argument("--name", required=True, help="name for the new LangSmith dataset")
+    destination = create.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--name", help="name for a new LangSmith dataset")
+    destination.add_argument("--dataset-id", help="add or extend conversations in an existing dataset in this workspace")
     create.add_argument("--start-time", help="inclusive root start time, with timezone")
     create.add_argument("--end-time", help="exclusive root start time, with timezone")
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
@@ -72,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--output", type=Path, help="selection file path; its parent becomes the run directory; cannot combine with --run-dir")
 
     create.add_argument("--triage-dir", type=Path, help="import frozen conversations kept by the council from a completed triage run")
-    create.add_argument("--confirm", action="store_true", help="confirm dataset creation from triage labels")
+    create.add_argument("--confirm", action="store_true", help="confirm dataset import from triage labels")
 
     triage_cmd = curate_sub.add_parser(
         "triage", help="label full trajectories with an agent council",
@@ -362,14 +364,14 @@ def main(argv: list[str] | None = None) -> None:
             elif args.triage_dir is not None:
                 if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output, args.run_dir)):
                     raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")
-                value = triage.create_triaged_dataset(args.triage_dir, args.name, confirm=args.confirm)
+                value = triage.create_triaged_dataset(args.triage_dir, args.name, dataset_id=args.dataset_id, confirm=args.confirm)
             else:
                 if not all((args.workspace_id, args.project_id, args.start_time, args.end_time, args.limit)):
                     raise PipelineError("dataset create requires workspace, project, start time, end time, and --limit, or --triage-dir")
-                print("Selecting conversations and creating dataset...", file=sys.stderr)
+                print("Selecting conversations and " + ("updating dataset..." if args.dataset_id else "creating dataset..."), file=sys.stderr)
                 value = curation.create_dataset(
                     workspace_id=args.workspace_id, project_id=args.project_id,
-                    start_time=args.start_time, end_time=args.end_time, name=args.name,
+                    start_time=args.start_time, end_time=args.end_time, name=args.name, dataset_id=args.dataset_id,
                     filter=args.filter, limit=args.limit, output=args.output, run_dir=args.run_dir, concurrency=args.concurrency,
                 )
         elif args.command == "capture-contract":

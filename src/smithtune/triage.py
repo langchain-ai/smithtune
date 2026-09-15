@@ -15,8 +15,8 @@ from threading import Lock
 from uuid import NAMESPACE_URL, uuid5
 
 from smithtune.artifacts import _atomic_text, _json_dump, _jsonl_dump, _load_json, _load_jsonl, _run, exclusive_output
-from smithtune.curation import _api, _uuid, _write_new
-from smithtune.dataset import validate_trajectories
+from smithtune.curation import _api, _destination, _uuid, _write_new
+from smithtune.dataset import _source_key, validate_trajectories
 from smithtune.dataset_artifacts import load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
@@ -362,15 +362,19 @@ def selected_examples(triage_dir: Path) -> list[dict]:
 
 
 @exclusive_output("triage_dir")
-def create_triaged_dataset(triage_dir: Path, name: str, *, confirm: bool, runner=_run) -> dict:
+def create_triaged_dataset(triage_dir: Path, name: str | None = None, *, dataset_id: str | None = None, confirm: bool, runner=_run) -> dict:
     if not confirm:
-        raise PipelineError("creating a LangSmith dataset requires --confirm")
-    if not name or not name.strip():
-        raise PipelineError("dataset name must be nonempty")
+        raise PipelineError("importing into a LangSmith dataset requires --confirm")
+    name, dataset_id = _destination(name, dataset_id)
     examples = selected_examples(triage_dir)
     frozen = load_snapshot(triage_dir)
     workspace = frozen["source"]["workspace_id"]
     receipt_path = triage_dir / "dataset-import.json"
+    if dataset_id is not None:
+        from smithtune.dataset_import import update_dataset
+
+        keys = {_source_key(example, workspace, None) for example in examples}
+        return update_dataset(workspace, dataset_id, examples, keys, triage_dir, receipt_path, runner=runner, triaged=True)
     receipt = {"dataset_name": name, "dataset_id": None, "status": "creating", "confirmed_example_ids": [],
                "examples_sha256": json_sha256(examples), "pending_write": "dataset"}
     _write_new(receipt_path, receipt)
