@@ -16,6 +16,7 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
+    ToolDefinitionConflict,
     contract_from_runs,
     load_inference_contract,
     parse_inference_contract,
@@ -549,10 +550,11 @@ def _source_workspace(
 def capture_example_contracts(
     workspace_id: str, examples: list[dict[str, Any]], *,
     source_workspace_id: str | None = None, runner: Callable[..., Any] = _run,
+    skipped_tool_conflicts: list[dict[str, Any]] | None = None,
 ) -> dict[str, InferenceContract]:
-    """Collect a separate union of function tools for each source trajectory."""
+    """Collect tools per trajectory; an optional collector opts into skipping conflicts."""
     contracts: dict[str, InferenceContract] = {}
-    sources: dict[tuple[str, str, str | None, str | None], dict[str, Any]] = {}
+    sources: dict[tuple[str, str, str | None, str | None], dict[str, Any] | ToolDefinitionConflict] = {}
     for example in examples:
         example_id = example["id"]
         try:
@@ -581,10 +583,23 @@ def capture_example_contracts(
                     }, runner=runner)
                     if any(run.get("trace_id") != trace_id for run in runs):
                         raise PipelineError("LangSmith returned a run from a different trace")
-                sources[key] = contract_from_runs(runs, workspace_id=source_workspace, thread_id=thread_id)
+                try:
+                    sources[key] = contract_from_runs(runs, workspace_id=source_workspace, thread_id=thread_id)
+                except ToolDefinitionConflict as exc:
+                    sources[key] = exc
+            if isinstance(sources[key], ToolDefinitionConflict):
+                raise sources[key]
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
+        except ToolDefinitionConflict as exc:
+            if skipped_tool_conflicts is None:
+                raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
+            skipped_tool_conflicts.append({
+                "example_id": example_id, **identity,
+                "source_workspace_id": source_workspace, "source_project_id": project_id,
+                "code": "tool_definition_conflict", "reason": str(exc),
+            })
         except (ContractError, PipelineError) as exc:
             raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
     return contracts
@@ -606,33 +621,62 @@ def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
 def _example_contract_snapshot(
     workspace_id: str, dataset_id: str, examples: list[dict[str, Any]],
     source_sha: str, raw_dir: Path, *, fetch: bool, source_workspace_id: str | None = None,
-) -> dict[str, InferenceContract]:
+    skip_tool_conflicts: bool = False,
+) -> tuple[dict[str, InferenceContract], list[dict[str, Any]]]:
     path = raw_dir / "example_contracts.json"
     identity = {"schema_version": 1, "workspace_id": workspace_id,
                 "dataset_id": dataset_id, "source_examples_sha256": source_sha}
     if fetch:
-        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id)
+        skipped: list[dict[str, Any]] = []
+        options = {"skipped_tool_conflicts": skipped} if skip_tool_conflicts else {}
+        contracts = capture_example_contracts(
+            workspace_id, examples, source_workspace_id=source_workspace_id, **options,
+        )
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
-        _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
+        _json_dump(path, {
+            **identity, "contracts": payload, "contracts_sha256": json_sha256(payload),
+            "skip_tool_conflicts": skip_tool_conflicts,
+            "skipped_tool_conflicts": skipped, "skipped_tool_conflicts_sha256": json_sha256(skipped),
+        })
     if not path.exists():
         raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
     snapshot = _load_json(path)
     if not isinstance(snapshot, dict) or any(snapshot.get(key) != value for key, value in identity.items()):
         raise PipelineError("cached example inference contracts do not match this dataset export; prepare again without --no-fetch")
+    if snapshot.get("skip_tool_conflicts", False) != skip_tool_conflicts:
+        raise PipelineError("cached tool-conflict policy differs; prepare again without --no-fetch")
     payload = snapshot.get("contracts")
     if snapshot.get("contracts_sha256") != json_sha256(payload):
         raise PipelineError("cached example inference contracts hash mismatch; prepare again without --no-fetch")
-    contracts = _parse_example_contracts(payload)
-    if set(contracts) != {example["id"] for example in examples}:
-        raise PipelineError("cached inference contracts do not cover every example")
+    skipped = snapshot.get("skipped_tool_conflicts", [])
+    if not isinstance(skipped, list) or (
+        skipped and (not skip_tool_conflicts or snapshot.get("skipped_tool_conflicts_sha256") != json_sha256(skipped))
+    ):
+        raise PipelineError("cached skipped tool conflicts are invalid; prepare again without --no-fetch")
+    skipped_by_id: dict[str, dict[str, Any]] = {}
+    for item in skipped:
+        if (not isinstance(item, dict) or not isinstance(item.get("example_id"), str)
+            or item["example_id"] in skipped_by_id or item.get("code") != "tool_definition_conflict"
+            or not isinstance(item.get("reason"), str) or not item["reason"]):
+            raise PipelineError("cached skipped tool conflicts are invalid; prepare again without --no-fetch")
+        skipped_by_id[item["example_id"]] = item
+    contracts = {} if payload == {} and skipped else _parse_example_contracts(payload)
+    if set(contracts) & set(skipped_by_id) or set(contracts) | set(skipped_by_id) != {example["id"] for example in examples}:
+        raise PipelineError("cached inference contracts and skipped conflicts do not cover every example exactly once")
     for example in examples:
         expected_workspace = _source_workspace(example, workspace_id, source_workspace_id)
-        if contracts[example["id"]].provenance.get("source_workspace_id") != expected_workspace:
+        if example["id"] in skipped_by_id:
+            provenance = skipped_by_id[example["id"]]
+            if any(provenance.get(key) != value for key, value in _source_identity(example).items()):
+                raise PipelineError("cached skipped tool conflict has different source provenance")
+        else:
+            provenance = contracts[example["id"]].provenance
+        if provenance.get("source_workspace_id") != expected_workspace:
             raise PipelineError(
                 f"cached inference contract for example {example['id']} has a different source workspace; "
                 "prepare again without --no-fetch"
             )
-    return contracts
+    return contracts, skipped
 
 
 def prepare_sft_rows(
@@ -834,6 +878,7 @@ def prepare_dataset(
     *,
     inference_contract: InferenceContract | None = None,
     source_workspace_id: str | None = None,
+    skip_tool_conflicts: bool = False,
     reasoning_policy: ReasoningPolicy = "omit",
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
@@ -843,6 +888,8 @@ def prepare_dataset(
     """Prepare one trajectory dataset with a deterministic thread-level split."""
     model.validate()
     _validate_reasoning_policy(reasoning_policy)
+    if skip_tool_conflicts and inference_contract is not None:
+        raise PipelineError("--skip-tool-conflicts applies only to automatic capture; omit --inference-contract")
     dataset, examples, source_sha = _load_dataset_source(
         workspace_id,
         dataset_id,
@@ -852,23 +899,35 @@ def prepare_dataset(
     expected_count = len(examples)
     audit = validate_trajectories(examples, expected_count)
     example_contracts = None
+    skipped: list[dict[str, Any]] = []
     if inference_contract is None:
-        example_contracts = _example_contract_snapshot(
+        example_contracts, skipped = _example_contract_snapshot(
             workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
-            source_workspace_id=source_workspace_id,
+            source_workspace_id=source_workspace_id, skip_tool_conflicts=skip_tool_conflicts,
         )
-    rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
+    if skip_tool_conflicts:
+        _json_dump(data_dir / "raw" / "skipped_tool_conflicts.json", skipped)
+    skipped_ids = {item["example_id"] for item in skipped}
+    retained_examples = [example for example in examples if example["id"] not in skipped_ids]
+    if not retained_examples:
+        raise PipelineError("all examples were skipped for tool conflicts; see raw/skipped_tool_conflicts.json")
+    retained_audit = validate_trajectories(retained_examples, len(retained_examples)) if skipped else audit
+    rows = prepare_sft_rows(retained_examples, inference_contract, example_contracts=example_contracts,
                             reasoning_policy=reasoning_policy, model=model)
-    messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
-    reasoning_preserved = audit.readable_reasoning_blocks if reasoning_policy == "preserve" else 0
-    rejected: list[dict[str, Any]] = []
+    messages_removed = retained_audit.messages - sum(len(row["messages"]) for row in rows)
+    reasoning_preserved = retained_audit.readable_reasoning_blocks if reasoning_policy == "preserve" else 0
+    rejected = list(skipped)
     if check_render:
-        rows, rejected, rendered = validate_model_context(rows, model)
+        rows, context_rejected, rendered = validate_model_context(rows, model)
+        rejected.extend(context_rejected)
     else:
         rendered = {}
     train, validation, test = split_rows(rows, validation_fraction, test_fraction)
     _validate_split_isolation(train, validation, test)
     audit_value = {**asdict(audit), **rendered}
+    if skip_tool_conflicts:
+        audit_value["skipped_tool_conflicts"] = len(skipped)
+        audit_value["rejected_examples"] = len(rejected)
     manifest = {
         "schema_version": 1,
         "created_at_utc": _utc_now(),
@@ -901,9 +960,9 @@ def prepare_dataset(
             "messages_removed": messages_removed,
             "reasoning_policy": reasoning_policy,
             "reasoning_blocks": {
-                "source": audit.reasoning_blocks,
+                "source": retained_audit.reasoning_blocks,
                 "preserved": reasoning_preserved,
-                "omitted": audit.reasoning_blocks - reasoning_preserved,
+                "omitted": retained_audit.reasoning_blocks - reasoning_preserved,
             },
         },
         "model": asdict(model),

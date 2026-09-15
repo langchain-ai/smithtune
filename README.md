@@ -138,6 +138,10 @@ LangSmith API key must have access to both. `dataset create` saves the source
 workspace automatically; existing examples still need valid source thread/trace
 and project IDs.
 
+Add `--skip-tool-conflicts` to skip examples with incompatible tool definitions.
+Skipped IDs and reasons are saved in `prepared/rejected.json`; API errors still
+stop preparation. Repeat the flag when reusing that preparation with `--no-fetch`.
+
 Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
 tokenizer loading still run. To supply the same tools for every example, use
 `--inference-contract path/to/contract.json` instead of automatic tool capture.

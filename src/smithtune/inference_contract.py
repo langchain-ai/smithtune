@@ -19,6 +19,10 @@ class ContractError(ValueError):
     """The inference contract or a request built from it is invalid."""
 
 
+class ToolDefinitionConflict(ContractError):
+    """A source conversation contains incompatible definitions of one tool."""
+
+
 ALLOWED_INFERENCE_SETTINGS = {
     "frequency_penalty",
     "parallel_tool_calls",
@@ -467,6 +471,7 @@ def contract_from_runs(
         raise ContractError("no LLM runs were returned for the source trajectory")
     tools: dict[str, dict[str, Any]] = {}
     tool_sources: dict[str, str] = {}
+    conflict: ToolDefinitionConflict | None = None
     source_run = None
     for run in sorted(runs, key=lambda item: (item.get("start_time") or "", item["id"])):
         run_id = run["id"]
@@ -494,12 +499,18 @@ def contract_from_runs(
             if name in tools and json_sha256(tools[name]) != json_sha256(tool):
                 merged = _merge_tool_definitions(tools[name], tool)
                 if merged is None:
-                    raise ContractError(
-                        f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
-                    )
+                    if conflict is None:
+                        conflict = ToolDefinitionConflict(
+                            f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
+                        )
+                    # Validate the remaining calls before treating this example
+                    # as skippable; malformed or unsupported tools remain fatal.
+                    continue
                 tool = merged
             tools[name] = tool
             tool_sources[name] = run_id
+    if conflict is not None:
+        raise conflict
     if source_run_id is None:
         # Automatic example capture carries schemas only; no one call's replay
         # settings should become authoritative for the whole conversation.

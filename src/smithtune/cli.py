@@ -82,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
     prep.add_argument("--source-workspace-id", help="default workspace for automatic source tool capture; example metadata.source_workspace_id takes precedence (default: dataset workspace)")
+    prep.add_argument("--skip-tool-conflicts", action="store_true", help="skip examples with conflicting tool definitions and report them in prepared/rejected.json")
     prep.add_argument("--inference-contract", type=Path, help="optional global tool-schema override; by default collect tools from each example's source LLM runs")
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
@@ -316,6 +317,7 @@ def main(argv: list[str] | None = None) -> None:
                 reasoning_policy=args.reasoning_policy,
                 inference_contract=contract,
                 source_workspace_id=args.source_workspace_id,
+                skip_tool_conflicts=args.skip_tool_conflicts,
                 validation_fraction=args.validation_fraction,
                 test_fraction=args.test_fraction,
                 fetch=not args.no_fetch,

@@ -457,3 +457,162 @@ def test_offline_capture_rejects_changed_source_workspace(tmp_path, monkeypatch)
         prepare(tmp_path, fetch=False, source_workspace_id="different")
     # Explicitly choosing the original workspace keeps existing caches usable.
     prepare(tmp_path, fetch=False, source_workspace_id="workspace-id")
+
+
+def setup_conflicting_preparation(tmp_path, monkeypatch, *, all_conflict=False):
+    collect = dataset.capture_example_contracts
+    examples = setup_preparation(tmp_path, monkeypatch)
+    before = tool("lookup")
+    after = copy.deepcopy(before)
+    after["function"]["description"] = "A different definition."
+    groups = {
+        ("project-1", "thread-1"): [llm("r1", [])],
+        ("project-1", "thread-2"): [llm("r2", [before]), llm("r3", [after])],
+    }
+    if all_conflict:
+        groups[("project-1", "thread-1")] = [llm("r4", [before]), llm("r5", [after])]
+    runner, queries = source_runner(groups)
+    monkeypatch.setattr(dataset, "capture_example_contracts",
+                        lambda workspace, examples, **kwargs: collect(workspace, examples, runner=runner, **kwargs))
+    return examples, queries
+
+
+def test_conflicts_remain_fatal_without_opt_in(tmp_path, monkeypatch):
+    setup_conflicting_preparation(tmp_path, monkeypatch)
+    with pytest.raises(PipelineError, match="example example-2.*conflicting definitions"):
+        prepare(tmp_path)
+    assert not (tmp_path / "prepared" / "manifest.json").exists()
+
+
+def test_opt_in_skips_complete_conflicting_examples_and_roundtrips_offline(tmp_path, monkeypatch):
+    examples, _ = setup_conflicting_preparation(tmp_path, monkeypatch)
+    original_raw = (tmp_path / "raw" / "examples.json").read_bytes()
+    manifest = prepare(tmp_path, skip_tool_conflicts=True)
+    assert manifest["langsmith"]["examples"] == 2
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert manifest["split"]["test"] == 1
+    assert manifest["audit"]["skipped_tool_conflicts"] == 1
+    assert manifest["conversion"]["messages_removed"] == 0
+    assert manifest["conversion"]["messages_filtered"] is False
+    assert (tmp_path / "raw" / "examples.json").read_bytes() == original_raw
+    assert examples[1]["id"] == "example-2"
+    skipped = json.loads((tmp_path / "prepared" / "rejected.json").read_text())
+    assert skipped == json.loads((tmp_path / "raw" / "skipped_tool_conflicts.json").read_text())
+    assert skipped[0]["example_id"] == "example-2"
+    assert skipped[0]["source_thread_id"] == "thread-2"
+    assert skipped[0]["code"] == "tool_definition_conflict"
+    assert "r2" in skipped[0]["reason"] and "r3" in skipped[0]["reason"]
+    assert set(dataset._prepared_example_contracts(tmp_path, manifest)) == {"example-1"}
+    assert len(_load_jsonl(tmp_path / "prepared" / "test.jsonl")) == 1
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("offline preparation attempted source capture")
+    monkeypatch.setattr(dataset, "capture_example_contracts", unexpected)
+    monkeypatch.setattr(dataset, "download_dataset", unexpected)
+    offline = prepare(tmp_path, skip_tool_conflicts=True, fetch=False)
+    assert offline["prepared"] == manifest["prepared"]
+    assert offline["example_contracts"] == manifest["example_contracts"]
+    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == skipped
+    with pytest.raises(PipelineError, match="tool-conflict policy differs"):
+        prepare(tmp_path, fetch=False)
+
+
+def test_all_conflicting_examples_write_report_and_fail(tmp_path, monkeypatch):
+    setup_conflicting_preparation(tmp_path, monkeypatch, all_conflict=True)
+    for fetch in (True, False):
+        with pytest.raises(PipelineError, match="all examples were skipped"):
+            prepare(tmp_path, skip_tool_conflicts=True, fetch=fetch)
+    assert len(json.loads((tmp_path / "raw" / "skipped_tool_conflicts.json").read_text())) == 2
+    assert not (tmp_path / "prepared" / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("kind", ["builtin", "missing_source", "api"])
+def test_skip_does_not_hide_other_capture_failures(kind):
+    ex = example(1)
+    groups = {("project-1", "thread-1"): [llm("r1", [{"type": "web_search"}])]}
+    runner, _ = source_runner(groups)
+    if kind == "missing_source":
+        del ex["metadata"]["source_project_id"]
+    elif kind == "api":
+        def runner(*args, **kwargs):
+            raise PipelineError("API unavailable")
+    skipped = []
+    with pytest.raises(PipelineError):
+        dataset.capture_example_contracts("workspace-id", [ex], runner=runner, skipped_tool_conflicts=skipped)
+    assert skipped == []
+
+
+def test_repeated_conflicting_conversation_is_cached_and_every_example_skipped():
+    before = tool("lookup")
+    after = copy.deepcopy(before)
+    after["function"]["description"] = "Changed."
+    runner, queries = source_runner({("project-1", "thread-1"): [llm("r1", [before]), llm("r2", [after])]})
+    skipped = []
+    contracts = dataset.capture_example_contracts(
+        "workspace-id", [example(1), example(2, thread="thread-1")],
+        runner=runner, skipped_tool_conflicts=skipped,
+    )
+    assert contracts == {}
+    assert [item["example_id"] for item in skipped] == ["example-1", "example-2"]
+    assert len(queries) == 3
+
+
+@pytest.mark.parametrize("corruption", ["hash", "overlap", "missing", "workspace", "identity"])
+def test_offline_skips_require_valid_complete_snapshot(tmp_path, monkeypatch, corruption):
+    setup_conflicting_preparation(tmp_path, monkeypatch)
+    prepare(tmp_path, skip_tool_conflicts=True)
+    path = tmp_path / "raw" / "example_contracts.json"
+    value = json.loads(path.read_text())
+    skipped = value["skipped_tool_conflicts"]
+    if corruption == "hash":
+        skipped[0]["reason"] = "tampered"
+    elif corruption == "overlap":
+        skipped[0]["example_id"] = "example-1"
+    elif corruption == "missing":
+        skipped.clear()
+    elif corruption == "workspace":
+        skipped[0]["source_workspace_id"] = "different"
+    else:
+        skipped[0]["source_thread_id"] = "different"
+    if corruption != "hash":
+        value["skipped_tool_conflicts_sha256"] = json_sha256(skipped)
+    _json_dump(path, value)
+    with pytest.raises(PipelineError, match="cached"):
+        prepare(tmp_path, skip_tool_conflicts=True, fetch=False)
+
+
+def test_skips_and_context_rejections_share_report(tmp_path, monkeypatch):
+    examples, _ = setup_conflicting_preparation(tmp_path, monkeypatch)
+    examples.append(example(3, thread="thread-1"))
+    _json_dump(tmp_path / "raw" / "examples.json", examples)
+    _json_dump(tmp_path / "raw" / "dataset-export.json", [{"inputs": ex["inputs"]} for ex in examples])
+    _json_dump(tmp_path / "raw" / "dataset.json", {"id": "dataset-id", "example_count": 3})
+    context_rejection = {"example_id": "example-3", "reason": "rendered example exceeds model context limit"}
+    monkeypatch.setattr(dataset, "validate_model_context", lambda rows, model: (
+        rows[:1], [context_rejection], {"rejected_examples": 1},
+    ))
+    manifest = dataset.prepare_dataset(
+        "workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path, skip_tool_conflicts=True,
+        validation_fraction=0, test_fraction=1,
+    )
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 2}
+    assert manifest["audit"]["rejected_examples"] == 2
+    rejected = json.loads((tmp_path / "prepared" / "rejected.json").read_text())
+    assert len(rejected) == 2 and context_rejection in rejected
+
+
+@pytest.mark.parametrize("later_tool,error", [
+    ({"type": "web_search"}, "provider built-in"),
+    ({"type": "function", "function": {"name": "broken", "parameters": {"type": "invalid-type"}}}, "invalid JSON Schema"),
+])
+def test_conflict_does_not_hide_invalid_tools_in_later_runs(later_tool, error):
+    before = tool("lookup")
+    after = copy.deepcopy(before)
+    after["function"]["description"] = "Changed."
+    runner, _ = source_runner({
+        ("project-1", "thread-1"): [llm("r1", [before]), llm("r2", [after]), llm("r3", [later_tool])],
+    })
+    skipped = []
+    with pytest.raises(PipelineError, match=error):
+        dataset.capture_example_contracts("workspace-id", [example(1)], runner=runner, skipped_tool_conflicts=skipped)
+    assert skipped == []
