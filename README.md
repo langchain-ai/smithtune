@@ -124,6 +124,7 @@ automatically and select the appropriate tokenizer and formatting.
 Preparation uses these defaults:
 
 - LoRA training on text and tool conversations; images are unsupported
+- Tool definitions are combined across each conversation, including optional argument additions and growing `Available tools` lists; earlier turns see the expanded definitions
 - 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it

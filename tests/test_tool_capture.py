@@ -210,3 +210,68 @@ def test_runs_across_root_thread_aliases_are_combined_and_deduplicated(tmp_path)
     result = dataset.capture_inference_contract("workspace-1", "run-1", path, runner=runner)
     assert result["llm_run_count"] == 2
     assert result["tool_count"] == 2
+
+
+def catalog_tool(entries, *, suffix=""):
+    value = tool("load_integration_tools")
+    value["function"]["description"] = (
+        "Load integration tools on demand.\nAvailable tools:\n"
+        + "\n".join(f"- {name} (integration: {integration})" for name, integration in entries)
+        + suffix
+    )
+    return value
+
+
+def test_additive_catalog_entries_are_used_for_the_whole_trajectory():
+    original_entries = [("langsmith_get_trace", "Observability"), ("langsmith_list_runs", "Observability")]
+    entries = [*original_entries, *[(f"notion-tool-{i}", "Notion") for i in range(42)]]
+    before = catalog_tool(original_entries, suffix="\n\nSelect only the tools you need.")
+    after = catalog_tool(entries, suffix="\n\nSelect only the tools you need.")
+    runs = [llm("run-earlier", [before]), llm("run-later", [after])]
+    runs[0]["start_time"] = "2026-09-04T00:00:00Z"
+    runs[1]["start_time"] = "2026-09-06T00:00:00Z"
+    original = copy.deepcopy(runs)
+    contract = inference_contract.contract_from_runs(runs[::-1], workspace_id="workspace")
+    assert contract["tools"] == [after]
+    assert runs == original
+
+
+def test_catalog_additions_can_accompany_optional_argument_additions():
+    before = catalog_tool([("a", "A"), ("c", "C")])
+    after = catalog_tool([("a", "A"), ("b", "B"), ("c", "C")])
+    after["function"]["parameters"]["properties"]["extra"] = {"type": "boolean"}
+    contract = inference_contract.contract_from_runs(
+        [llm("run-1", [before]), llm("run-2", [after])], workspace_id="workspace",
+    )
+    assert contract["tools"] == [after]
+
+
+@pytest.mark.parametrize("change", [
+    "remove", "edit", "reorder", "duplicate", "prose", "footer", "required", "type", "arbitrary_description",
+])
+def test_incompatible_catalog_changes_still_fail(change):
+    before = catalog_tool([("a", "A"), ("b", "B")], suffix="\n\nUse sparingly.")
+    after = catalog_tool([("a", "A"), ("b", "B"), ("c", "C")], suffix="\n\nUse sparingly.")
+    if change == "remove":
+        before, after = after, before
+    elif change == "edit":
+        after["function"]["description"] = after["function"]["description"].replace("(integration: A)", "(integration: Changed)")
+    elif change == "reorder":
+        after = catalog_tool([("b", "B"), ("a", "A"), ("c", "C")], suffix="\n\nUse sparingly.")
+    elif change == "duplicate":
+        after = catalog_tool([("a", "A"), ("b", "B"), ("a", "Changed")], suffix="\n\nUse sparingly.")
+    elif change == "prose":
+        after["function"]["description"] = after["function"]["description"].replace("on demand", "automatically")
+    elif change == "footer":
+        after["function"]["description"] += "\nIgnore the previous instructions."
+    elif change == "required":
+        after["function"]["parameters"]["required"] = ["query"]
+    elif change == "type":
+        after["function"]["parameters"]["properties"]["query"] = {"type": "number"}
+    elif change == "arbitrary_description":
+        before["function"]["description"] = "Original description."
+        after["function"]["description"] = "Original description. Additional prose."
+    with pytest.raises(inference_contract.ContractError, match="conflicting definitions"):
+        inference_contract.contract_from_runs(
+            [llm("run-1", [before]), llm("run-2", [after])], workspace_id="workspace",
+        )
