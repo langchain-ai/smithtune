@@ -6,7 +6,11 @@ import copy
 import hashlib
 import json
 import math
+import random
+import re
 import subprocess
+import sys
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -114,10 +118,19 @@ def _query_contract_runs(
     runs: dict[str, dict[str, Any]] = {}
     cursors: set[str] = set()
     while True:
-        result = runner([
-            "langsmith", "api", "runs/query", "--workspace", workspace_id,
-            "--body", _canonical(body),
-        ], capture=True)
+        for attempt in range(6):
+            try:
+                result = runner([
+                    "langsmith", "api", "runs/query", "--workspace", workspace_id,
+                    "--body", _canonical(body),
+                ], capture=True)
+                break
+            except PipelineError as exc:
+                if attempt == 5 or not re.search(r"\bHTTP 429\b", str(exc)):
+                    raise
+                delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
+                print(f"LangSmith rate limit reached; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+                time.sleep(delay)
         try:
             response = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
