@@ -67,7 +67,7 @@ def _run_langsmith(command: list[str], *, capture: bool = False) -> subprocess.C
     try:
         return _run(command, capture=capture)
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or "").strip() or f"langsmith exited with status {exc.returncode}"
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
         raise PipelineError(detail) from None
 
 
