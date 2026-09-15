@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import math
 import random
 import re
 import subprocess
@@ -19,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_now
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl, _run, _utc_now, exclusive_output
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
@@ -34,6 +33,8 @@ from smithtune.rendering import validate_model_context, validate_reasoning_suppo
 
 
 SPLIT_SEED = 42
+SPLIT_METHOD = "persistent-source-hash-v1"
+SPLIT_NAMES = ("train", "validation", "test")
 
 
 DEFAULT_VALIDATION_FRACTION = 0.1
@@ -784,6 +785,8 @@ def prepare_sft_rows(
     example_contracts: dict[str, InferenceContract] | None = None,
     reasoning_policy: ReasoningPolicy = "omit",
     model: ModelSpec | None = None,
+    workspace_id: str | None = None,
+    source_workspace_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Convert validated LangSmith trajectories to provider-neutral SFT rows."""
     _validate_reasoning_policy(reasoning_policy)
@@ -818,6 +821,8 @@ def prepare_sft_rows(
                 "metadata": copy.deepcopy(example["metadata"]),
             },
         }
+        if workspace_id is not None:
+            row["_source"]["source_key"] = list(_source_key(example, workspace_id, source_workspace_id))
         if contract is not None:
             try:
                 contract.validate_messages(messages)
@@ -829,54 +834,110 @@ def prepare_sft_rows(
     return rows
 
 
-def _split_rank(row: dict[str, Any]) -> str:
-    return hashlib.sha256(f"{SPLIT_SEED}:{row['_source']['source_scope_id']}".encode()).hexdigest()
+def _split_key(row: dict[str, Any]) -> str:
+    key = row["_source"].get("source_key")
+    if (not isinstance(key, list) or len(key) != 4
+            or not all(isinstance(value, str) and value for value in key)
+            or key[2] not in SOURCE_SCOPES):
+        raise PipelineError("split assignment requires a complete source workspace, project, scope and scope ID")
+    return json.dumps(key, separators=(",", ":"))
+
+
+def _split_settings(validation_fraction: float, test_fraction: float) -> dict:
+    if not 0 <= validation_fraction <= 1 or not 0 <= test_fraction <= 1:
+        raise PipelineError("validation and test fractions must be between zero and one")
+    if validation_fraction + test_fraction > 1:
+        raise PipelineError("validation and test fractions cannot total more than one")
+    return {"method": SPLIT_METHOD, "seed": SPLIT_SEED,
+            "validation_fraction": validation_fraction, "test_fraction": test_fraction}
+
+
+def _load_split_assignments(data_dir: Path, settings: dict, *, required: bool = False) -> dict[str, str]:
+    prepared = data_dir / "prepared"
+    path = prepared / "split_assignments.json"
+    if path.exists():
+        saved = _load_json(path)
+        if not isinstance(saved, dict) or saved.get("schema_version") != 1:
+            raise PipelineError(f"invalid split assignments in {path}")
+        if any(saved.get(key) != value for key, value in settings.items()):
+            raise PipelineError("saved split settings differ; reuse the original fractions and algorithm")
+        assignments = saved.get("assignments")
+        if not isinstance(assignments, dict) or saved.get("assignments_sha256") != json_sha256(assignments):
+            raise PipelineError(f"invalid split assignments or checksum in {path}")
+        for key, partition in assignments.items():
+            try:
+                canonical = _split_key({"_source": {"source_key": json.loads(key)}})
+            except (ValueError, TypeError, PipelineError):
+                raise PipelineError(f"invalid source identity in {path}") from None
+            if canonical != key or partition not in SPLIT_NAMES:
+                raise PipelineError(f"invalid split assignment in {path}")
+        return assignments
+
+    manifest_path = prepared / "manifest.json"
+    if not manifest_path.exists():
+        if required or any((prepared / f"{name}.jsonl").exists() for name in SPLIT_NAMES):
+            raise PipelineError(f"no complete previous preparation in {data_dir}")
+        return {}
+    manifest = _load_json(manifest_path)
+    split = manifest.get("split") if isinstance(manifest, dict) else None
+    if not isinstance(split, dict) or split.get("method") != "sha256(seed:source_scope_id)":
+        raise PipelineError(f"missing split_assignments.json in {prepared}; restore it before preparing again")
+    if any(split.get(key) != settings[key] for key in ("seed", "validation_fraction", "test_fraction")):
+        raise PipelineError("saved split settings differ; reuse the original fractions and algorithm")
+    contracts = _prepared_example_contracts(data_dir, manifest) or {}
+    assignments = {}
+    counts = _prepared_split(manifest)
+    for partition in SPLIT_NAMES:
+        rows = _load_jsonl(prepared / f"{partition}.jsonl")
+        if len(rows) != counts[partition]:
+            raise PipelineError("previous split files do not match the manifest; restore them before preparing again")
+        for row in rows:
+            source = row.get("_source") if isinstance(row, dict) else None
+            if not isinstance(source, dict) or not isinstance(source.get("metadata"), dict):
+                raise PipelineError("previous split rows have no valid source metadata")
+            metadata = copy.deepcopy(source["metadata"])
+            contract = contracts.get(source.get("example_id"))
+            provenance = contract.provenance if contract else {}
+            # The old manifest did not record --source-workspace-id. Recover it
+            # from the actual capture, never from this preparation's flags.
+            for field in ("source_workspace_id", "source_project_id"):
+                if not metadata.get(field):
+                    metadata[field] = provenance.get(field)
+            if not metadata.get("source_workspace_id"):
+                raise PipelineError("cannot recover previous source workspace for split assignments; saved source metadata or capture provenance is required")
+            example = {"id": source.get("example_id"), "metadata": metadata}
+            key = json.dumps(_source_key(example, metadata["source_workspace_id"], None), separators=(",", ":"))
+            if key in assignments:
+                raise PipelineError("duplicate source identity in previous split files")
+            assignments[key] = partition
+    return assignments
 
 
 def split_rows(
     rows: list[dict[str, Any]],
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
+    *, assignments: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Assign each conversation to a partition by hashing its source scope ID.
-
-    Every example is one whole conversation, so rows are split independently;
-    the hash keeps assignments stable across runs and row order.
-    """
-    if not 0 <= validation_fraction <= 1 or not 0 <= test_fraction <= 1:
-        raise PipelineError("validation and test fractions must be between zero and one")
-    if validation_fraction + test_fraction > 1:
-        raise PipelineError("validation and test fractions cannot total more than one")
-
-    ranked = sorted(rows, key=_split_rank)
-    train_fraction = 1 - validation_fraction - test_fraction
-    if math.isclose(train_fraction, 0, abs_tol=1e-9):
-        # Fractions that sum to one can leave a floating-point remainder that
-        # would otherwise force a one-row training partition.
-        train_fraction = 0.0
-    required_partitions = sum(
-        fraction > 0
-        for fraction in (train_fraction, validation_fraction, test_fraction)
-    )
-    if len(ranked) < required_partitions:
-        raise PipelineError("not enough conversations for the requested non-zero fractions")
-
-    validation_count = 0
-    if validation_fraction > 0:
-        validation_count = max(1, round(len(ranked) * validation_fraction))
-        validation_count = min(
-            validation_count,
-            len(ranked) - int(train_fraction > 0) - int(test_fraction > 0),
-        )
-    test_count = 0
-    if test_fraction > 0:
-        test_count = max(1, round(len(ranked) * test_fraction))
-        test_count = min(test_count, len(ranked) - validation_count - int(train_fraction > 0))
-    validation = ranked[:validation_count]
-    test = ranked[validation_count : validation_count + test_count]
-    held_out = {id(row) for row in validation + test}
-    train = [row for row in rows if id(row) not in held_out]
-    return train, validation, test
+    """Keep saved assignments; use fixed hash ranges for unseen conversations."""
+    _split_settings(validation_fraction, test_fraction)
+    assignments = assignments if assignments is not None else {}
+    partitions: dict[str, list] = {name: [] for name in SPLIT_NAMES}
+    for row in rows:
+        key = _split_key(row)
+        if key not in assignments:
+            rank = int(hashlib.sha256(f"{SPLIT_SEED}:{key}".encode()).hexdigest(), 16)
+            if rank < int(validation_fraction * 2**256):
+                assignments[key] = "validation"
+            elif rank < int((validation_fraction + test_fraction) * 2**256):
+                assignments[key] = "test"
+            else:
+                assignments[key] = "train"
+        partitions[assignments[key]].append(row)
+    for name, fraction in zip(SPLIT_NAMES, (1 - validation_fraction - test_fraction, validation_fraction, test_fraction), strict=True):
+        if fraction > 1e-9 and not partitions[name]:
+            print(f"No conversations in the {name} split; add more data. Existing assignments remain fixed.", file=sys.stderr)
+    return partitions["train"], partitions["validation"], partitions["test"]
 
 
 def _trajectory_content_hash(row: dict[str, Any]) -> str:
@@ -951,6 +1012,7 @@ def _load_dataset_source(
     return dataset, examples, source_sha
 
 
+@exclusive_output("data_dir")
 def prepare_dataset(
     workspace_id: str,
     dataset_id: str,
@@ -959,6 +1021,7 @@ def prepare_dataset(
     *,
     inference_contract: InferenceContract | None = None,
     source_workspace_id: str | None = None,
+    split_from: Path | None = None,
     reasoning_policy: ReasoningPolicy = "omit",
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
     test_fraction: float = DEFAULT_TEST_FRACTION,
@@ -968,6 +1031,13 @@ def prepare_dataset(
     """Prepare one trajectory dataset with a deterministic thread-level split."""
     model.validate()
     _validate_reasoning_policy(reasoning_policy)
+    split_settings = _split_settings(validation_fraction, test_fraction)
+    assignments = _load_split_assignments(data_dir, split_settings)
+    if split_from is not None:
+        previous = _load_split_assignments(split_from, split_settings, required=True)
+        if any(key in assignments and assignments[key] != value for key, value in previous.items()):
+            raise PipelineError("--split-from conflicts with this directory's saved split assignments")
+        assignments.update(previous)
     dataset, examples, source_sha = _load_dataset_source(
         workspace_id,
         dataset_id,
@@ -994,7 +1064,8 @@ def prepare_dataset(
                 "source_thread_id": contract.provenance.get("source_thread_id"),
             })
     rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
-                            reasoning_policy=reasoning_policy, model=model)
+                            reasoning_policy=reasoning_policy, model=model, workspace_id=workspace_id,
+                            source_workspace_id=source_workspace_id)
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
     reasoning_preserved = audit.readable_reasoning_blocks if reasoning_policy == "preserve" else 0
     rejected: list[dict[str, Any]] = []
@@ -1002,7 +1073,7 @@ def prepare_dataset(
         rows, rejected, rendered = validate_model_context(rows, model)
     else:
         rendered = {}
-    train, validation, test = split_rows(rows, validation_fraction, test_fraction)
+    train, validation, test = split_rows(rows, validation_fraction, test_fraction, assignments=assignments)
     _validate_split_isolation(train, validation, test)
     audit_value = {
         **asdict(audit), **rendered,
@@ -1018,10 +1089,8 @@ def prepare_dataset(
             "examples": expected_count,
         },
         "split": {
-            "method": "sha256(seed:source_scope_id)",
-            "seed": SPLIT_SEED,
-            "validation_fraction": validation_fraction,
-            "test_fraction": test_fraction,
+            **split_settings,
+            "assignments_sha256": json_sha256(assignments),
             "train": len(train),
             "validation": len(validation),
             "test": len(test),
@@ -1050,6 +1119,12 @@ def prepare_dataset(
         "source_examples_sha256": source_sha,
         "audit": audit_value,
     }
+    # Persist the ledger before replacing split rows so an interrupted write
+    # cannot erase historical assignments during the next preparation.
+    _json_dump(data_dir / "prepared" / "split_assignments.json", {
+        "schema_version": 1, **split_settings, "assignments": assignments,
+        "assignments_sha256": json_sha256(assignments),
+    })
     if inference_contract is not None:
         manifest["inference_contract"] = inference_contract.manifest_summary()
     if example_contracts is not None:

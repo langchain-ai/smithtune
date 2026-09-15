@@ -145,6 +145,7 @@ class TrainingProvider(Protocol):
         model_options: ModelOptions,
         inference_contract: InferenceContract | None = None,
         source_workspace_id: str | None = None,
+        split_from: Path | None = None,
         reasoning_policy: ReasoningPolicy = "omit",
         validation_fraction: float | None = None,
         test_fraction: float | None = None,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import io
 import json
 import subprocess
@@ -325,11 +324,11 @@ def test_validation_requires_an_assistant_training_target():
 def test_split_is_stable_and_disjoint_across_row_order():
     examples = [example(i) for i in range(100)]
     dataset_ops.validate_trajectories(examples, 100)
-    rows = dataset_ops.prepare_sft_rows(examples)
+    rows = dataset_ops.prepare_sft_rows(examples, workspace_id="workspace-id")
     first = dataset_ops.split_rows(rows)
     second = dataset_ops.split_rows(list(reversed(rows)))
     ids = [{row["_source"]["source_scope_id"] for row in part} for part in first]
-    assert [len(part) for part in first] == [80, 10, 10]
+    assert sum(map(len, first)) == 100
     assert ids == [{row["_source"]["source_scope_id"] for row in part} for part in second]
     assert ids[0].isdisjoint(ids[1] | ids[2]) and ids[1].isdisjoint(ids[2])
 
@@ -379,71 +378,49 @@ def test_message_errors_identify_the_example_and_message_position():
         dataset_ops.prepare_sft_rows([extra_keys])
 
 
-def test_split_ranks_conversations_by_hashed_scope_id():
-    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)])
-    first = dataset_ops.split_rows(rows)
-    second = dataset_ops.split_rows(list(reversed(rows)))
-    ranked = sorted(
-        (f"thread-{index}" for index in range(10)),
-        key=lambda value: hashlib.sha256(f"{dataset_ops.SPLIT_SEED}:{value}".encode()).hexdigest(),
-    )
-
-    assert [row["_source"]["source_scope_id"] for row in first[1]] == [ranked[0]]
-    assert [row["_source"]["source_scope_id"] for row in first[2]] == [ranked[1]]
-    assert [row["_source"]["example_id"] for row in first[0]] != [row["_source"]["example_id"] for row in second[0]]
-    assert [{row["_source"]["source_scope_id"] for row in part} for part in first] == [
-        {row["_source"]["source_scope_id"] for row in part} for part in second
-    ]
+def test_split_assignments_survive_growth_and_reordering():
+    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(100)], workspace_id="workspace-id")
+    assignments = {}
+    dataset_ops.split_rows(rows[:10], assignments=assignments)
+    previous = assignments.copy()
+    dataset_ops.split_rows(list(reversed(rows)), assignments=assignments)
+    assert all(assignments[key] == value for key, value in previous.items())
+    fresh = {}
+    dataset_ops.split_rows(rows, assignments=fresh)
+    assert fresh == assignments
 
 
 def test_trace_scoped_conversations_split_like_threads():
     examples = [example(index) for index in range(10)]
     for index, item in enumerate(examples):
         item["metadata"].update(source_scope="trace", source_scope_id=f"trace-{index}")
-    rows = dataset_ops.prepare_sft_rows(examples)
+    rows = dataset_ops.prepare_sft_rows(examples, workspace_id="workspace-id")
     splits = dataset_ops.split_rows(rows)
-
-    assert [len(part) for part in splits] == [8, 1, 1]
+    assert sum(map(len, splits)) == 10
     assert all(row["_source"]["source_scope"] == "trace" for part in splits for row in part)
 
 
 def test_split_supports_test_only_and_validation_only_holdouts():
-    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)])
-
+    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)], workspace_id="workspace-id")
     test_only = dataset_ops.split_rows(rows, validation_fraction=0.0, test_fraction=1.0)
     validation_only = dataset_ops.split_rows(rows, validation_fraction=0.1, test_fraction=0.0)
-
     assert [len(partition) for partition in test_only] == [0, 0, 10]
-    assert [len(partition) for partition in validation_only] == [9, 1, 0]
+    assert len(validation_only[0]) + len(validation_only[1]) == 10
+    assert not validation_only[2]
 
 
-@pytest.mark.parametrize(
-    ("validation_fraction", "test_fraction"),
-    [(-0.1, 0.1), (0.1, -0.1), (0.6, 0.5)],
-)
-def test_split_rejects_invalid_fraction_ranges(validation_fraction: float, test_fraction: float):
-    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)])
-
+@pytest.mark.parametrize("validation_fraction,test_fraction", [(-0.1, 0.1), (0.1, -0.1), (0.6, 0.5), (float("nan"), 0.1)])
+def test_split_rejects_invalid_fraction_ranges(validation_fraction, test_fraction):
     with pytest.raises(PipelineError, match="fractions"):
-        dataset_ops.split_rows(rows, validation_fraction, test_fraction)
+        dataset_ops.split_rows([], validation_fraction, test_fraction)
 
 
-@pytest.mark.parametrize(
-    ("validation_fraction", "test_fraction"),
-    [(0.7, 0.3), (0.3, 0.7), (0.55, 0.45)],
-)
-def test_split_treats_fractions_summing_to_one_as_no_training_partition(
-    validation_fraction: float, test_fraction: float,
-):
-    # 1 - 0.7 - 0.3 leaves a floating-point remainder; it must not force a
-    # one-group training partition that the operator did not ask for.
-    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)])
-
+@pytest.mark.parametrize("validation_fraction,test_fraction", [(0.7, 0.3), (0.3, 0.7), (0.55, 0.45)])
+def test_split_treats_fractions_summing_to_one_as_no_training_partition(validation_fraction, test_fraction):
+    rows = dataset_ops.prepare_sft_rows([example(index) for index in range(10)], workspace_id="workspace-id")
     train, validation, test = dataset_ops.split_rows(rows, validation_fraction, test_fraction)
-
     assert train == []
     assert len(validation) + len(test) == 10
-    assert len(validation) == round(10 * validation_fraction)
 
 
 def test_split_isolation_rejects_duplicate_content_across_conversations():
@@ -516,9 +493,8 @@ def test_prepare_keeps_all_rows_and_metadata(tmp_path: Path, monkeypatch: pytest
     train = (tmp_path / "prepared" / "train.jsonl").read_text(encoding="utf-8").splitlines()
     validation = (tmp_path / "prepared" / "validation.jsonl").read_text(encoding="utf-8").splitlines()
     test = (tmp_path / "prepared" / "test.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(train) == 8
-    assert len(validation) == 1
-    assert len(test) == 1
+    assert len(train) + len(validation) + len(test) == 10
+    assert [len(train), len(validation), len(test)] == [manifest["split"][name] for name in dataset_ops.SPLIT_NAMES]
     assert manifest["model"]["name"] == "qwen3p8-27b"
     assert manifest["conversion"]["messages_filtered"] is False
     assert manifest["prepared"] == {"accepted": 10, "rejected": 0}
@@ -641,7 +617,8 @@ def test_prepare_accepts_a_test_only_dataset(tmp_path: Path):
     )
 
     assert manifest["split"] == {
-        "method": "sha256(seed:source_scope_id)",
+        "method": dataset_ops.SPLIT_METHOD,
+        "assignments_sha256": manifest["split"]["assignments_sha256"],
         "seed": dataset_ops.SPLIT_SEED,
         "validation_fraction": 0.0,
         "test_fraction": 1.0,
@@ -678,9 +655,11 @@ def test_prepare_cli_accepts_one_dataset_and_fraction_controls(monkeypatch):
             "1",
             "--inference-contract",
             "contract.json",
+            "--split-from", "previous-data",
         ]
     )
 
+    assert args.split_from == Path("previous-data")
     assert args.dataset_id == "source-dataset"
     assert args.validation_fraction == 0.0
     assert args.test_fraction == 1.0

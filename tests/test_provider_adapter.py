@@ -116,9 +116,9 @@ def test_provider_specific_training_options_are_rejected(monkeypatch):
 
 
 @pytest.mark.parametrize("provider", ["fireworks", "baseten"])
-@pytest.mark.parametrize("test_fraction,train_rows,test_rows", [(None, 80, 10), (0.0, 90, 0)])
+@pytest.mark.parametrize("test_fraction", [None, 0.0])
 def test_cli_preparation_can_be_planned_by_standalone_provider(
-    tmp_path, monkeypatch, capsys, provider, test_fraction, train_rows, test_rows
+    tmp_path, monkeypatch, capsys, provider, test_fraction
 ):
     _write_raw_dataset(tmp_path)
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
@@ -169,9 +169,11 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
         "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
     }
     assert capability_calls == [(adapter_module.DEFAULT_MODEL.base_model, adapter_module.DEFAULT_MODEL.training_context_limit)]
-    assert manifest["split"]["train"] == train_rows
-    assert manifest["split"]["validation"] == 10
-    assert manifest["split"]["test"] == test_rows
+    for name in dataset.SPLIT_NAMES:
+        assert manifest["split"][name] == len((tmp_path / "prepared" / f"{name}.jsonl").read_text().splitlines())
+    assert sum(manifest["split"][name] for name in dataset.SPLIT_NAMES) == 100
+    if test_fraction == 0:
+        assert manifest["split"]["test"] == 0
     stored = json.loads((tmp_path / "prepared" / "manifest.json").read_text())
     assert stored == manifest
 
@@ -205,7 +207,7 @@ print(json.dumps(plan))
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
     assert plan["base_model"] == manifest["model"]["base_model"]
-    assert plan["dataset"]["train_rows"] == train_rows
+    assert plan["dataset"]["train_rows"] == manifest["split"]["train"]
 
 
 def test_training_provider_registry_returns_adapters():
