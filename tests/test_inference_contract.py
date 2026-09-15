@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -224,6 +225,44 @@ def test_contract_validates_recorded_tool_names_and_arguments(tmp_path: Path):
     }
     with pytest.raises(inference_contract.ContractError, match="do not match its JSON Schema"):
         contract.validate_messages(invalid_arguments)
+
+
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef"])
+@pytest.mark.parametrize("reference", ["https://schemas.example.invalid/query.json", "query.json", "file:///schema.json"])
+def test_tool_schema_never_fetches_external_references(tmp_path, monkeypatch, keyword, reference):
+    fetch = Mock(side_effect=AssertionError("external schema retrieval attempted"))
+    monkeypatch.setattr("urllib.request.urlopen", fetch)
+    payload = contract_payload()
+    payload["tools"][0]["function"]["parameters"] = {
+        "$id": "https://schemas.example.invalid/tool.json",
+        "properties": {"query": {keyword: reference}},
+    }
+    payload["tools_sha256"] = inference_contract.json_sha256(payload["tools"])
+    path = tmp_path / "contract.json"
+    write_contract(path, payload)
+    contract = inference_contract.load_inference_contract(path)
+    with pytest.raises(inference_contract.ContractError, match="tool lookup.*external retrieval is disabled"):
+        contract.validate_tool_arguments("lookup", {"query": "x"})
+    fetch.assert_not_called()
+
+
+def test_tool_schema_resolves_saved_definitions_offline(tmp_path, monkeypatch):
+    fetch = Mock(side_effect=AssertionError("external schema retrieval attempted"))
+    monkeypatch.setattr("urllib.request.urlopen", fetch)
+    payload = contract_payload()
+    payload["tools"][0]["function"]["parameters"] = {
+        "$id": "https://schemas.example.invalid/tool.json",
+        "$defs": {"query": {"type": "string"}},
+        "properties": {"query": {"$ref": "#/$defs/query"}},
+    }
+    payload["tools_sha256"] = inference_contract.json_sha256(payload["tools"])
+    path = tmp_path / "contract.json"
+    write_contract(path, payload)
+    contract = inference_contract.load_inference_contract(path)
+    contract.validate_tool_arguments("lookup", {"query": "x"})
+    with pytest.raises(inference_contract.ContractError, match="do not match its JSON Schema"):
+        contract.validate_tool_arguments("lookup", {"query": 1})
+    fetch.assert_not_called()
 
 
 @pytest.mark.parametrize("inputs", [None,

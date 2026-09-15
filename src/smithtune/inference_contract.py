@@ -13,6 +13,8 @@ from typing import Any
 
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import Draft3Validator, validator_for
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 
 class ContractError(ValueError):
@@ -162,12 +164,17 @@ class InferenceContract:
         if tool is None:
             raise ContractError(f"unknown tool {name}")
         schema = tool["function"]["parameters"]
-        validator = validator_for(schema)(schema)
+        validator = validator_for(schema)(schema, registry=Registry())
         try:
             errors = sorted(
                 validator.iter_errors(arguments),
                 key=lambda error: tuple(str(part) for part in error.path),
             )
+        except Unresolvable as exc:
+            raise ContractError(
+                f"cannot resolve schema reference {exc.ref!r} for tool {name}; "
+                "external retrieval is disabled; include the definition in the saved tool schema"
+            ) from exc
         except Exception as exc:
             raise ContractError(f"cannot validate arguments for tool {name}: {exc}") from exc
         if errors:
