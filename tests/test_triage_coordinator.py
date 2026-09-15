@@ -142,10 +142,11 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
     assert len(seen) == 1
     # One judge gets the whole conversation.
     evidence = json.loads(next(m.content for m in seen[0] if isinstance(m, HumanMessage)))["untrusted_trajectory"]
-    assert len(evidence) == 4
+    assert len(evidence) == 5
+    assert evidence[0]["role"] == "system"
     imported = triage.create_triaged_dataset(work, "accepted", confirm=True, runner=args["runner"])
     assert imported["example_count"] == 1
-    assert len(args["runner"].imported[0]["inputs"]["messages"]) == 4
+    assert args["runner"].imported[0]["inputs"]["messages"] == evidence
     previous = (work / "judgments.jsonl").read_bytes()
     monkeypatch.setattr(triage_coordinator, "_model", lambda *_: pytest.fail("completed coordinator repeated"))
     monkeypatch.setattr(triage_agent, "_model", lambda *_: pytest.fail("completed judge repeated"))

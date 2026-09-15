@@ -19,39 +19,42 @@ def uid(n):
     return str(UUID(int=n))
 
 
+SYSTEM = [{"role": "system", "content": "Answer each request accurately."}]
+
+
 def messages(n):
     return [{"role": "human", "content": f"question-{n}", "id": f"user-{n}"},
             {"role": "ai", "content": f"answer-{n}", "id": f"ai-{n}"}]
 
 
 class API:
-    """Documented LangSmith CLI/API shapes, including backwards pagination."""
+    """LangSmith trajectory pages and complete source-run evidence."""
     def __init__(self):
         self.calls = []
         self.imported = []
         self.failure = None
         self.root_pages = [[{"trace_id": uid(2), "thread_id": "conversation-a", "start_time": "2026-09-02T00:00:00Z", "feedback_stats": None}]]
-        self.thread_pages = {
-            None: {"thread_id": "conversation-a", "groups": self.turn(1, 2), "cursors": {"prev": "older", "next": None}},
-            "older": {"thread_id": "conversation-a", "groups": self.turn(0, 1), "cursors": {"prev": None, "next": "newer"}},
-            "newer": {"thread_id": "conversation-a", "groups": self.turn(1, 2), "cursors": {"prev": "older", "next": None}},
+        self.trajectory_pages = {
+            None: {"messages": SYSTEM + messages(1), "next_cursor": "next"},
+            "next": {"messages": messages(2), "next_cursor": None},
         }
-
-    def turn(self, index, n):
-        return [{"type": "turn_boundary", "turnBoundary": {"trace_id": uid(n), "turn_index": index}},
-                *[{"type": "message", "message": m} for m in messages(n)]]
+        self.thread_roots = [
+            {"id": uid(n), "trace_id": uid(n), "thread_id": "conversation-a",
+             "project_id": uid(101), "start_time": f"2026-09-0{n}T00:00:00Z"}
+            for n in (1, 2)
+        ]
 
     def __call__(self, command, *, capture=False, input=None):
         self.calls.append((command, input))
         if self.failure:
             self.failure(command)
         assert command[command.index("--workspace") + 1] == uid(100)
-        if command[1:3] == ["thread", "messages"]:
-            cursor = command[command.index("--cursor") + 1] if "--cursor" in command else None
-            return SimpleNamespace(stdout=json.dumps(self.thread_pages[cursor]))
         path = command[2]
-        body = json.loads(input) if input else None
+        body = json.loads(input) if input else json.loads(command[command.index("--body") + 1]) if "--body" in command else None
         if path == "/api/v2/runs/query":
+            if body.get("filter", "").startswith("eq(thread_id,"):
+                assert body["min_start_time"] == "2026-08-01T00:00:00+00:00"
+                return SimpleNamespace(stdout=json.dumps({"items": self.thread_roots, "next_cursor": None}))
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
         elif path.startswith("/api/v2/traces/") and "/runs?" in path:
@@ -63,8 +66,15 @@ class API:
                               {"id": uid(n + 1000), "trace_id": tid, "parent_run_ids": [tid], "is_root": False, "project_id": uid(101),
                                "run_type": "llm", "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)[1:]},
                                "extra": {"invocation_params": {"tools": []}}}], "cursors": {}}
-        elif path == "/api/v2/traces/messages":
-            value = {"items": [{"trace_id": body["ids"][0], "groups": [{"type": "message", "message": m} for m in messages(UUID(body["ids"][0]).int)]}], "next_cursor": None}
+        elif path == "/v1/trajectory":
+            assert body["include"] == {"system_messages": True}
+            assert body["format"] == "messages"
+            if "thread_id" in body:
+                value = self.trajectory_pages[body.get("cursor")]
+            else:
+                value = {"messages": SYSTEM + messages(UUID(body["trace_id"]).int), "next_cursor": None}
+        elif path.startswith("/api/v1/sessions/"):
+            value = {"id": uid(101), "start_time": "2026-08-01T00:00:00+00:00"}
         elif path == "/api/v1/datasets":
             value = {"id": uid(200)}
         elif path == "/api/v1/examples":
@@ -92,10 +102,8 @@ def test_snapshot_expands_to_earlier_turns_and_preserves_tree(tmp_path):
     frozen = triage_source.snapshot(source(), tmp_path, runner=api)
     assert frozen["selected_trace_ids"] == [uid(2)]
     assert [trace["trace_id"] for trace in frozen["traces"]] == [uid(1), uid(2)]
-    assert frozen["traces"][1]["turn_start"] == 2
-    assert frozen["traces"][1]["messages"] == messages(1) + messages(2)
     assert frozen["traces"][1]["runs"][1]["parent_run_id"] == uid(2)
-    assert frozen["units"][0]["example"]["inputs"]["messages"] == messages(1) + messages(2)
+    assert frozen["units"][0]["example"]["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
     conversation, = (tmp_path / "conversations").glob("*.json")
     assert load_conversation(conversation) == frozen["units"][0]["example"]
     api.calls.clear()
@@ -120,7 +128,12 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     assert delays == [30]
     # A retry after an interrupted download reuses completed reads.
     (tmp_path / "snapshot.json").unlink()
-    assert triage_source.snapshot(source(), tmp_path, runner=lambda *_a, **_k: pytest.fail("read repeated")) == frozen
+    def only_membership(command, **kwargs):
+        assert command[2] == "/api/v2/runs/query"
+        assert json.loads(command[command.index("--body") + 1])["filter"].startswith("eq(thread_id,")
+        return api(command, **kwargs)
+
+    assert triage_source.snapshot(source(), tmp_path, runner=only_membership) == frozen
 
 
 def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
@@ -146,9 +159,9 @@ def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
 def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
     api = API()
     image = {"type": "image", "url": "https://example.invalid/image.png"}
-    api.thread_pages["older"]["groups"][1]["message"]["content"] = [image]
+    api.trajectory_pages[None]["messages"][1]["content"] = [image]
     frozen = triage_source.snapshot(source(), tmp_path, runner=api)
-    assert frozen["traces"][0]["messages"][0]["content"] == [image]
+    assert frozen["units"][0]["example"]["inputs"]["messages"][1]["content"] == [image]
     assert frozen["units"][0]["training_error"]
     result = triage.run_triage(source(), tmp_path, runner=api, confirm=True,
                               judge_call=lambda *_: pytest.fail("multimodal trace reached a judge"))
@@ -166,9 +179,7 @@ def tool_conversation(name="lookup", args=None, result=True):
     ]
     if result:
         conversation.append({"role": "tool", "content": "done", "tool_call_id": "call-1"})
-    api.thread_pages["older"]["groups"][2:2] = [
-        {"type": "message", "message": message} for message in conversation
-    ]
+    api.trajectory_pages[None]["messages"][2:2] = conversation
     tool = {"type": "function", "function": {"name": "lookup", "description": "Look up a record.",
         "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}}}
 
@@ -334,12 +345,12 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     run(tmp_path / "triage", api)
     # The live source changes. Import must not read it again.
     api.calls.clear()
-    api.thread_pages[None]["groups"][1]["message"]["content"] = "different live message"
+    api.trajectory_pages["next"]["messages"][0]["content"] = "different live message"
     imported = triage.create_triaged_dataset(tmp_path / "triage", "selected", confirm=True, runner=api)
     assert imported["example_count"] == 1
     assert all(command[2] in {"/api/v1/datasets", "/api/v1/examples"} for command, _ in api.calls)
     example = api.imported[0]
-    assert example["inputs"]["messages"] == messages(1) + messages(2)
+    assert example["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
     contracts = dataset.capture_example_contracts(uid(100), [example], runner=lambda *_args, **_kw: pytest.fail("must not fetch changed tools"))
     assert list(contracts[example["id"]].tools) == []
     raw = tmp_path / "data/raw"
@@ -462,7 +473,7 @@ def test_resume_and_import_reject_mixed_or_tampered_artifacts(tmp_path, changed)
     elif changed == "snapshot":
         path = tmp_path / "snapshot.json"
         value = json.loads(path.read_text())
-        value["traces"][0]["messages"][0]["content"] = "edited"
+        value["units"][0]["example"]["inputs"]["messages"][0]["content"] = "edited"
         path.write_text(json.dumps(value))
         with pytest.raises(PipelineError, match="hash mismatch"):
             run(tmp_path)
@@ -481,7 +492,7 @@ def test_judge_output_is_a_score_and_reason(change):
 
 def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path):
     api = API()
-    api.thread_pages["older"]["groups"][1]["message"]["content"] = "x" * 20_000
+    api.trajectory_pages[None]["messages"][1]["content"] = "x" * 20_000
     calls = []
 
     class ContextError(Exception):
@@ -489,7 +500,7 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
         body: ClassVar[dict] = {"error": {"code": "context_length_exceeded"}}
 
     def reject(judge, prompt, tokens):
-        assert json.loads(prompt[-1]["content"])["untrusted_trajectory"][0]["content"] == "x" * 20_000
+        assert json.loads(prompt[-1]["content"])["untrusted_trajectory"][1]["content"] == "x" * 20_000
         calls.append(judge["name"])
         raise ContextError()
 
@@ -612,8 +623,10 @@ def test_source_window_compares_fractional_timestamps_as_times():
 
 def test_source_pagination_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(triage_source, "MAX_SOURCE_PAGES", 1)
+    api = API()
+    api.root_pages.append([])
     with pytest.raises(PipelineError, match="page limit"):
-        triage_source.snapshot(source(), tmp_path, runner=API())
+        triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()
 
 
@@ -646,10 +659,10 @@ def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch
         assert json.loads(requests[0].data)["reasoning_effort"] == "none"
 
 
-def test_missing_thread_pages_and_changed_turns_fail_closed(tmp_path):
+def test_missing_selected_thread_root_fails_closed(tmp_path):
     api = API()
-    api.thread_pages[None]["cursors"] = {"next": None, "prev": None}
-    with pytest.raises(PipelineError, match="incomplete"):
+    api.thread_roots = api.thread_roots[:1]
+    with pytest.raises(PipelineError, match="selected root was not found"):
         triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()
 
@@ -723,9 +736,10 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     def judge(slot, prompt, tokens):
         evidence = json.loads(prompt[-1]["content"])["untrusted_trajectory"]
         seen.append((slot["name"], evidence))
-        if len(evidence) == 4:
+        assert evidence[0] == SYSTEM[0]
+        if len(evidence) == 5:
             assert media_turn is None
-            assert [m["content"] for m in evidence] == ["question-1", "answer-1", "question-2", "answer-2"]
+            assert [m["content"] for m in evidence[1:]] == ["question-1", "answer-1", "question-2", "answer-2"]
         return judge_call(slot, prompt, tokens)
 
     summary = triage.run_triage(source(), tmp_path, runner=source_api, judge_call=judge, confirm=True)
@@ -768,3 +782,39 @@ def test_only_context_rejections_filter_trajectories(status, body, expected):
     error = RuntimeError("provider error")
     error.status_code, error.body = status, body
     assert triage_judges.context_window_exceeded(error) is expected
+
+
+def test_old_snapshot_requires_fresh_system_message_capture(tmp_path):
+    triage_source.snapshot(source(), tmp_path, runner=API())
+    path = tmp_path / "snapshot.json"
+    value = json.loads(path.read_text())
+    value["schema_version"] = 1
+    path.write_text(json.dumps(value))
+    with pytest.raises(PipelineError, match="predates system-message capture"):
+        triage_source.load_snapshot(tmp_path)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume):
+    api = API()
+    # Identical query timestamps must not let the final check reuse cached IDs.
+    monkeypatch.setattr(triage_source, "_utc_now", lambda: "2026-09-15T00:00:00+00:00")
+
+    def new_turn(command):
+        if command[2] == "/v1/trajectory" and len(api.thread_roots) == 2:
+            if resume:
+                raise KeyboardInterrupt()
+            api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+            api.trajectory_pages["next"]["messages"] += messages(3)
+
+    api.failure = new_turn
+    if resume:
+        with pytest.raises(KeyboardInterrupt):
+            triage_source.snapshot(source(), tmp_path, runner=api)
+        api.failure = None
+        api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+        api.trajectory_pages["next"]["messages"] += messages(3)
+    with pytest.raises(PipelineError, match="conversation-a changed during download"):
+        triage_source.snapshot(source(), tmp_path, runner=api)
+    assert not (tmp_path / "snapshot.json").exists()
+    assert not list((tmp_path / "conversations").glob("*.json"))

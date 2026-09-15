@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import random
 import re
 import subprocess
 import sys
 import time
-from collections import deque
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
-from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run
-from smithtune.curation import _api, _matches, _time, _uuid
-from smithtune.dataset import convert_message, validate_trajectories
+from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
+from smithtune.curation import _api, _fetch_trajectory, _matches, _time, _uuid
+from smithtune.dataset import _project_start_time, _query_contract_runs, convert_message, validate_trajectories
 from smithtune.dataset_artifacts import save_conversation
 from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
@@ -28,10 +26,10 @@ MAX_SOURCE_PAGES = 1000
 MAX_EXPANDED_TRACES = 10_000
 
 
-def _fetch(command, *, runner, cache_dir, **kwargs):
+def _fetch(command, *, runner, cache_dir, use_cache=True, **kwargs):
     """Retry idempotent source reads; never wrap dataset writes."""
     path = cache_dir / (json_sha256({"command": command, "input": kwargs.get("input")}) + ".json")
-    if path.exists():
+    if use_cache and path.exists():
         return subprocess.CompletedProcess(command, 0, stdout=path.read_text(encoding="utf-8"), stderr="")
     for attempt in range(3):
         try:
@@ -51,7 +49,8 @@ def _fetch(command, *, runner, cache_dir, **kwargs):
             json.loads(result.stdout)
         except (ValueError, TypeError):
             return result
-        _atomic_text(path, result.stdout)
+        if use_cache:
+            _atomic_text(path, result.stdout)
         return result
 
 
@@ -160,103 +159,19 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
     return sorted(random.Random(source["seed"]).sample(roots, min(source["limit"], len(roots))), key=lambda r: r["trace_id"]) if source["limit"] else roots
 
 
-def group_messages(groups: list[dict]) -> list[dict]:
-    """Read the API's normalized messages; never flatten child LLM runs."""
-    messages = []
-    if not isinstance(groups, list):
-        raise PipelineError("invalid conversation groups")
-    for group in groups:
-        if not isinstance(group, dict):
-            raise PipelineError("invalid conversation group")
-        if group.get("type") == "message":
-            messages.append(copy.deepcopy(group.get("message")))
-        elif group.get("type") == "tool_interaction":
-            ai = copy.deepcopy(group.get("aiMessage"))
-            if not isinstance(ai, dict) or ai.get("role") != "ai":
-                raise PipelineError("invalid tool interaction")
-            messages.append(ai)
-            calls = group.get("toolCalls")
-            if not isinstance(calls, list):
-                raise PipelineError("tool interaction has no call list")
-            for call in calls:
-                if not isinstance(call, dict):
-                    raise PipelineError("invalid tool call")
-                result = copy.deepcopy(call.get("result"))
-                if result is not None:
-                    if not isinstance(result, dict) or result.get("role") != "tool":
-                        raise PipelineError("invalid tool result")
-                    if result.get("tool_call_id", call.get("id")) != call.get("id"):
-                        raise PipelineError("tool result has a different call id")
-                    result["tool_call_id"] = call.get("id")
-                    messages.append(result)
-        else:
-            raise PipelineError("unsupported conversation group; cannot preserve training messages")
-    for message in messages:
-        if not isinstance(message, dict) or not isinstance(message.get("role"), str):
-            raise PipelineError("conversation message requires an object with a role")
-    return messages
-
-
-def thread_turns(workspace: str, project: str, thread: str, *, runner=_run) -> list[dict]:
-    # Follow both directions: the initial API page can start near the end of a
-    # conversation. Turn indexes prove that no earlier page was omitted.
-    queue, visited, turns = deque([None]), set(), {}
-    while queue:
-        cursor = queue.popleft()
-        if cursor in visited:
-            continue
-        if len(visited) >= MAX_SOURCE_PAGES:
-            raise PipelineError("thread exceeds the page limit")
-        visited.add(cursor)
-        command = ["langsmith", "thread", "messages", thread, "--project-id", project,
-                   "--workspace", workspace, "--format", "json", "--limit", "100"]
-        if cursor:
-            command += ["--cursor", cursor]
-        try:
-            page = json.loads(runner(command, capture=True).stdout)
-        except Exception:
-            raise PipelineError("cannot read complete thread messages; check LangSmith CLI access") from None
-        if not isinstance(page, dict) or page.get("thread_id") != thread or not isinstance(page.get("groups"), list):
-            raise PipelineError("invalid thread message page")
-        current = None
-        page_turns = []
-        for group in page["groups"]:
-            if not isinstance(group, dict):
-                raise PipelineError("invalid conversation group")
-            if group.get("type") == "turn_boundary":
-                boundary = group.get("turnBoundary") or {}
-                if not isinstance(boundary, dict):
-                    raise PipelineError("invalid thread boundary")
-                index = boundary.get("turn_index")
-                if type(index) is not int or index < 0:
-                    raise PipelineError("invalid thread turn index")
-                current = {"index": index, "trace_id": _uuid(boundary.get("trace_id"), "trace id"), "groups": []}
-                page_turns.append(current)
-            elif current is None:
-                raise PipelineError("thread page has messages without a trace boundary")
-            else:
-                current["groups"].append(group)
-        for turn in page_turns:
-            index = turn["index"]
-            if index in turns and turns[index] != turn:
-                raise PipelineError("thread messages changed during snapshot")
-            turns[index] = turn
-        cursors = page.get("cursors")
-        if not isinstance(cursors, dict):
-            raise PipelineError("thread page has no pagination metadata")
-        for direction in ("prev", "next"):
-            value = cursors.get(direction)
-            if value is not None and value != "":
-                if not isinstance(value, str):
-                    raise PipelineError("invalid thread cursor")
-                if value not in visited:
-                    queue.append(value)
-    ordered = [turns[index] for index in sorted(turns)]
-    if not ordered or sorted(turns) != list(range(len(turns))):
-        raise PipelineError("thread message snapshot is incomplete")
-    if len({turn["trace_id"] for turn in ordered}) != len(ordered):
-        raise PipelineError("thread contains repeated trace boundaries")
-    return ordered
+def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: str, end_time: str, runner) -> list[str]:
+    # Query metadata over the full project history, not the selected time window.
+    # Messages come only from /v1/trajectory; these IDs locate tools and media.
+    roots = _query_contract_runs(workspace, {
+        "project_ids": [project], "is_root": True,
+        "filter": f"eq(thread_id,{json.dumps(thread)})",
+        "min_start_time": start_time, "max_start_time": end_time,
+        "selects": ["ID", "TRACE_ID", "THREAD_ID", "PROJECT_ID", "START_TIME"],
+    }, runner=runner)
+    if any(root.get("thread_id") != thread for root in roots):
+        raise PipelineError("thread source query returned another thread")
+    return list(dict.fromkeys(_uuid(root.get("trace_id"), "trace id")
+                             for root in sorted(roots, key=lambda r: (r.get("start_time") or "", r["id"]))))
 
 
 def source_options(workspace_id, project_id, start_time, end_time, *, filter=None, limit=100, seed=42) -> dict:
@@ -297,54 +212,54 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
     if source_path.exists() and _load_json(source_path) != source:
         raise PipelineError("partial download uses a different source query; use a new output directory")
     _json_dump(source_path, source)
+    live_runner = partial(_fetch, runner=runner, cache_dir=cache_dir, use_cache=False)
     runner = partial(_fetch, runner=runner, cache_dir=cache_dir)
+    captured_path = cache_dir / "captured-at.json"
+    if not captured_path.exists():
+        _json_dump(captured_path, _utc_now())
+    captured_at = _load_json(captured_path)
     roots = _root_selection(source, runner=runner)
     if not roots:
         raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
     print(f"Downloading conversations for {len(roots)} selected traces...", file=sys.stderr)
     units, traces, visited = [], [], set()
+    project_start = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
     for root in roots:
         thread, tid = root["thread_id"], root["trace_id"]
         key = ("thread", thread) if thread else ("trace", tid)
         if key in visited:
             continue
         visited.add(key)
-        if thread:
-            turns = thread_turns(workspace, project, thread, runner=runner)
-        else:
-            page = _api(workspace, "POST", "/api/v2/traces/messages", {
-                "project_ids": [project], "ids": [tid], "min_start_time": root["start_time"], "page_size": 1,
-            }, runner=runner)
-            items = page.get("items") if isinstance(page, dict) else None
-            if not isinstance(items, list) or len(items) != 1 or items[0].get("trace_id") != tid or page.get("next_cursor"):
-                raise PipelineError("trace messages are missing or incomplete")
-            turns = [{"index": 0, "trace_id": tid, "groups": items[0].get("groups")}]
-        if tid not in {turn["trace_id"] for turn in turns}:
+        unit_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
+                                       end_time=captured_at, runner=runner) if thread else [tid]
+        if tid not in unit_traces:
             raise PipelineError("selected root was not found in its conversation")
-        all_messages, all_runs, unit_traces = [], [], []
-        for turn in turns:
+        all_messages = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
+        all_runs = []
+        for trace_id in unit_traces:
             if len(traces) >= MAX_EXPANDED_TRACES:
                 raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
-            trace_id = turn["trace_id"]
-            messages = group_messages(turn["groups"])
             runs = query_runs(workspace, project, {"trace": trace_id}, runner=runner)
             if not runs or any(run.get("trace_id") != trace_id for run in runs):
                 raise PipelineError("trace run evidence is missing or belongs to another trace")
             roots_for_trace = [run for run in runs if not run.get("parent_run_id")]
             if len(roots_for_trace) > 1:
                 raise PipelineError("trace has multiple root runs")
-            all_messages.extend(messages)
             all_runs.extend(runs)
             record = {"trace_id": trace_id, "root_run_id": roots_for_trace[0]["id"] if roots_for_trace else None, "thread_id": thread,
-                      "project_id": project, "messages": copy.deepcopy(all_messages),
-                      "turn_start": len(all_messages) - len(messages), "runs": runs}
+                      "project_id": project, "runs": runs}
             if not roots_for_trace:
                 record["source_warnings"] = ["Root run missing from the saved source; assess only the available evidence."]
             record["multimodal_types"] = multimodal_types(record)
             record["source_sha256"] = json_sha256(record)
             traces.append(record)
-            unit_traces.append(trace_id)
+        if thread:
+            # The trajectory is live; verify membership again without cached reads.
+            current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
+                                             end_time=_utc_now(), runner=live_runner)
+            if set(current_traces) != set(unit_traces):
+                raise PipelineError(f"conversation {thread} changed during download; start a new triage run in a new output directory")
         example_id = str(uuid5(NAMESPACE_URL, json_sha256({"workspace": workspace, "project": project, "key": key, "messages": all_messages})))
         example = {"id": example_id, "inputs": {"messages": all_messages}, "outputs": None,
                    "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
@@ -366,7 +281,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         units.append(unit)
         if len(units) % 10 == 0:
             print(f"Downloaded {len(units)} conversations, {len(traces)} traces.", file=sys.stderr)
-    value = {"schema_version": 1, "source": source, "selected_trace_ids": [root["trace_id"] for root in roots],
+    value = {"schema_version": 2, "source": source, "selected_trace_ids": [root["trace_id"] for root in roots],
              "traces": traces, "units": units}
     value["snapshot_sha256"] = json_sha256(value)
     _json_dump(path, value)
@@ -375,7 +290,9 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
 
 def load_snapshot(output_dir: Path) -> dict:
     value = _load_json(output_dir / "snapshot.json")
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
+    if isinstance(value, dict) and value.get("schema_version") == 1:
+        raise PipelineError("this triage snapshot predates system-message capture; use a new output directory to download and judge again")
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
         raise PipelineError("unsupported triage snapshot")
     expected = value.get("snapshot_sha256")
     if expected != json_sha256({key: item for key, item in value.items() if key != "snapshot_sha256"}):

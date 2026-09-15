@@ -139,9 +139,16 @@ smithtune dataset triage data/datasets/my-sft \
 ```
 
 This saves conversations and a judging plan locally, without calling judges.
+Messages come from `POST /v1/trajectory` with system messages included, for both
+threads and standalone traces. Source runs supply tool schemas and media checks;
+the judges receive the full saved message list.
 `--limit` samples root traces; roots in the same thread become one conversation,
 including history outside the time window. Repeat an interrupted download to
 reuse saved progress. Omit the directory to generate one under `data/datasets/`.
+Select runs that contain conversations. For example, use
+`--filter 'eq(run_type,"chain")'` for agent runs in a project that also records
+standalone prompt-rendering runs. A source with no messages stops the download
+and reports its ID.
 
 **2. Run the judges:**
 
@@ -170,6 +177,8 @@ is excluded. Pass the returned dataset ID to `prepare`. To add to an existing
 dataset, replace `--name` with `--dataset-id '<dataset-id>'`.
 
 Use a new triage directory when conversations or judging settings change.
+Older snapshots from the V2 message readers must be downloaded and judged again
+to include system messages.
 Extended conversations need fresh passing triage. After a partial import,
 inspect `dataset-import.json` before retrying; uploads do not resume automatically.
 
