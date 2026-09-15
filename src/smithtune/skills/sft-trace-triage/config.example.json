@@ -8,7 +8,7 @@
     {
       "name": "judge-2",
       "provider": "fireworks",
-      "model": "accounts/fireworks/models/muse-glimmer-30b"
+      "model": "accounts/fireworks/models/glm-5p3-flash"
     },
     {
       "name": "judge-3",

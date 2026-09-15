@@ -47,7 +47,7 @@ should explain the saved counts and remaining failures to the user.
 ## Agent helping a user
 
 Run `smithtune doctor` and `smithtune dataset triage --help` for setup and source
-options. The default council is DeepSeek V4.1 Flash and Muse Glimmer 30B on Fireworks,
+options. The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks,
 plus GPT-5.6 Terra on OpenAI. Use one `--judges` list to choose models; other
 models use `provider:model`. Use `--rule` for project selection rules.
 
