@@ -329,6 +329,7 @@ def test_preparation_delegates_with_baseten_policy(
             {
                 "inference_contract": contract,
                 "source_workspace_id": None,
+                "split_from": None,
                 "reasoning_policy": "omit",
                 "validation_fraction": expected_validation,
                 "test_fraction": expected_test,

@@ -136,6 +136,7 @@ def _parser() -> argparse.ArgumentParser:
         "--test-fraction", type=float,
         help=f"test fraction for either provider (default: {dataset.DEFAULT_TEST_FRACTION}; use 0 for no test split)",
     )
+    prep.add_argument("--split-from", type=Path, help="reuse split assignments from a previous data directory")
     prep.add_argument("--model", required=True, help="provider model ID or supported model alias")
     prep.add_argument("--max-seq-len", type=int, help="lower the selected model's preparation and training context limit")
     prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached per-example tool schemas without querying LangSmith")
@@ -397,6 +398,7 @@ def main(argv: list[str] | None = None) -> None:
                 reasoning_policy=args.reasoning_policy,
                 inference_contract=contract,
                 source_workspace_id=args.source_workspace_id,
+                split_from=args.split_from,
                 validation_fraction=args.validation_fraction,
                 test_fraction=args.test_fraction,
                 fetch=not args.no_fetch,

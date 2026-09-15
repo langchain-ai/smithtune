@@ -630,6 +630,7 @@ class BasetenProvider:
         model_options: ModelOptions,
         inference_contract: InferenceContract | None = None,
         source_workspace_id: str | None = None,
+        split_from: Path | None = None,
         reasoning_policy: ReasoningPolicy = "omit",
         validation_fraction: float | None = None,
         test_fraction: float | None = None,
@@ -650,6 +651,7 @@ class BasetenProvider:
             data_dir,
             inference_contract=inference_contract,
             source_workspace_id=source_workspace_id,
+            split_from=split_from,
             reasoning_policy=reasoning_policy,
             validation_fraction=(
                 DEFAULT_VALIDATION_FRACTION if validation_fraction is None else validation_fraction

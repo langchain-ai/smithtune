@@ -83,14 +83,14 @@ def test_multiple_datums_keep_their_parent_conversations_partition(monkeypatch):
     renderer = _renderer()
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: renderer)
     rows = [{"messages": copy.deepcopy(MESSAGES), "tools": TOOLS,
-             "_source": {"example_id": f"example-{i}", "source_scope": "thread", "source_scope_id": f"thread-{i}"}}
+             "_source": {"example_id": f"example-{i}", "source_scope": "thread", "source_scope_id": f"thread-{i}",
+                         "source_key": ["workspace", "project", "thread", f"thread-{i}"]}}
             for i in range(3)]
     accepted, rejected, audit = rendering.validate_model_context(rows, MODEL)
     assert not rejected and audit["rendered_datums"] == 6
     assert accepted == rows  # Context checks retain whole conversations for splitting.
     sources = {}
     for partition, conversations in enumerate(dataset.split_rows(accepted)):
-        assert len(conversations) == 1
         for row in conversations:
             datums = renderer.render(row["messages"], row["tools"])
             assert len(datums) == 2

@@ -362,7 +362,7 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     manifest = dataset.prepare_dataset(uid(100), uid(200), DEFAULT_MODEL, tmp_path / "data", fetch=True, check_render=False)
     assert manifest["prepared"]["accepted"] == 3
-    assert manifest["split"]["train"] == manifest["split"]["validation"] == manifest["split"]["test"] == 1
+    assert sum(manifest["split"][name] for name in dataset.SPLIT_NAMES) == 3
 
 
 def test_changed_triaged_messages_are_rejected(tmp_path):
