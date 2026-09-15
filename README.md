@@ -182,14 +182,14 @@ Deep Agent coordinator -> Python code -> independent judge subagents
                                      prepare -> plan -> train
 ```
 
-Judges receive the full conversation messages inline when they fit the input
-budget, plus a run index. Larger inputs use marked message previews with a
-`read_full` reference. Judges use read-only Python with `read_message(index)` and
-`read_run(id)` to inspect original messages and run inputs/outputs. Previews
-are marked as incomplete; the full saved content remains available through
-code. Media references are saved as JSON, not rendered for the judges. Judges
-cannot run recorded tools, access host files or secrets, or delegate further.
-The coordinator cannot write a verdict in place of a judge.
+Each judge receives the complete ordered conversation messages in one request,
+with the selection rubric. It returns only a 1/0 score and a reason. Recorded
+tool calls and results are part of the conversation; judges do not execute them.
+There is no message truncation, summary, paged reader, or local character cap.
+If a provider rejects the full request because it exceeds that model's context
+window, the CLI filters the whole trajectory with `0` and a reason. It does
+not retry that trajectory with shorter input. Other request failures remain
+incomplete and can be retried.
 
 The result is one line per full trajectory in `labels.jsonl`. `trajectory_id`
 is the example ID inside the saved `conversations/*.json` file:
@@ -201,7 +201,7 @@ is the example ID inside the saved `conversations/*.json` file:
 `1` means use for SFT; `0` means do not use. A majority of the council decides
 the label; a tie gives `0`. The reason combines the reasons from judges who
 voted for that label. The CLI ends with counts and the result path. `report.md`
-explains each label in plain text. Detailed votes and source quotes stay in
+explains each label in plain text. Detailed votes stay in
 `judgments.jsonl` for inspection. No extra model call is needed for the report.
 
 If a judge cannot finish, the reason says "Labeling incomplete" and the trajectory
@@ -253,18 +253,15 @@ adapter preserves reasoning fields between tool calls. Fireworks uses its offici
 uses `OPENAI_API_KEY`. Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`.
 `anthropic-gateway` uses the LangSmith Anthropic gateway credential.
 
-`--concurrency` sets the maximum active judge tasks (default 4). Advanced
-options remain supported: `--config` for a judge JSON file, `--runner api` for
-direct calls without agents, `--attempts` (default 3), `--max-input-chars`
-(default 200,000), and `--max-output-tokens` (default 4,096). Agent input limits
-apply to the conversation, run index, and rubric; direct calls include full
-run payloads. Oversize inputs remain incomplete. Each judge attempt has at most
-24 graph steps. Coordinator calls add to judge cost. `agent-state.json` records
-its status; votes include judge code-call counts and run IDs read.
+`--concurrency` sets the maximum active judge tasks (default 4). Each judge
+attempt makes one model request. Coordinator calls add to judge cost.
+`agent-state.json` records dispatch status, and `judgments.jsonl` records the
+individual results. Advanced options include `--config`, `--runner api`,
+`--attempts` (default 3), and `--max-output-tokens` (default 4,096).
 
 The source defaults to a seeded sample of 100 matching roots before thread
 expansion. `--filter` accepts LangSmith root-run filters. Once judging starts,
-changed evidence, rules, models, skill, or input/output limits require a new
+changed evidence, rules, models, skill, or output limit require a new
 run directory. One process can use a directory at a time.
 
 Any CLI-capable agent can load the same portable skill:

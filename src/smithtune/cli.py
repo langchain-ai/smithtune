@@ -99,7 +99,6 @@ def _parser() -> argparse.ArgumentParser:
     triage_cmd.add_argument("--config", type=Path, help=argparse.SUPPRESS)
     triage_cmd.add_argument("--runner", choices=("api", "deepagent"), help=argparse.SUPPRESS)
     triage_cmd.add_argument("--seed", type=int, help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--max-input-chars", type=int, help=argparse.SUPPRESS)
     triage_cmd.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
     triage_cmd.add_argument("--attempts", type=int, help=argparse.SUPPRESS)
 
@@ -354,11 +353,11 @@ def main(argv: list[str] | None = None) -> None:
                     directory, judges=args.judges.split(",") if args.judges is not None else args.judge,
                     rules=args.rule, config_path=args.config,
                     runner_mode=args.runner, concurrency=args.concurrency, attempts=args.attempts,
-                    max_input_chars=args.max_input_chars, max_output_tokens=args.max_output_tokens,
+                    max_output_tokens=args.max_output_tokens,
                 )
                 value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
                 if args.confirm:
-                    value = {key: value[key] for key in ("status", "trajectories", "filtered_multimodal", "kept", "dropped", "incomplete", "labels", "report")}
+                    value = {key: value[key] for key in ("status", "trajectories", "filtered_multimodal", "filtered_context", "kept", "dropped", "incomplete", "labels", "report")}
                 value["run_dir"] = str(directory)
             elif args.triage_dir is not None:
                 if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output, args.run_dir)):

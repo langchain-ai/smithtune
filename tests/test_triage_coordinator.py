@@ -32,7 +32,6 @@ def test_code_mode_runs_python_and_dispatches_each_slot_once():
     result = run_code("jobs = pending_tasks()\njudge_batch(jobs + jobs)\nlen(pending_tasks())", tasks)
     assert result == {"result": 0, "stdout": ""}
     assert len(saved) == 2
-    assert run_code("len(read_trajectory('0')['messages'])", tasks)["result"] == 1
 
 
 @pytest.mark.parametrize("code", [
@@ -131,10 +130,7 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
     class EvidenceJudge(JudgeModel):
         def _generate(self, messages, **kwargs):
             seen.append(messages)
-            evidence = json.loads(next(m.content for m in messages if isinstance(m, HumanMessage)))["untrusted_trajectory_evidence"]
-            index = len(evidence["messages"]) - 1
-            self.answers = [AIMessage(content=json.dumps({"trajectory_id": evidence["trajectory_id"], "keep": 1,
-                "reason": "The answer completes the request.", "evidence": [{"message_index": index, "quote": evidence["messages"][index]["content"]}]}))]
+            self.answers = [AIMessage(content=json.dumps({"keep": 1, "reason": "The answer completes the request."}))]
             return super()._generate(messages, **kwargs)
 
     monkeypatch.setattr(triage_agent, "_model", lambda *_: EvidenceJudge(answers=[]))
@@ -144,8 +140,8 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
     assert result["kept"] == 1 and result["status"] == "complete"
     assert len(seen) == 1
     # One judge gets the whole conversation and all source run trees.
-    evidence = json.loads(next(m.content for m in seen[0] if isinstance(m, HumanMessage)))["untrusted_trajectory_evidence"]
-    assert len(evidence["messages"]) == 4 and len(evidence["runs"]) == 4
+    evidence = json.loads(next(m.content for m in seen[0] if isinstance(m, HumanMessage)))["untrusted_trajectory"]
+    assert len(evidence) == 4
     imported = triage.create_triaged_dataset(work, "accepted", confirm=True, runner=args["runner"])
     assert imported["example_count"] == 1
     assert len(args["runner"].imported[0]["inputs"]["messages"]) == 4

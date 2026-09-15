@@ -3,6 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from uuid import UUID
 
 import pytest
@@ -79,10 +80,7 @@ def source():
 
 
 def judge_call(judge, messages_, max_tokens):
-    trace = json.loads(messages_[-1]["content"])["untrusted_trajectory_evidence"]
-    index = len(trace["messages"]) - 1
-    return {"trajectory_id": trace["trajectory_id"], "keep": 1, "reason": "The answer completes the request.",
-            "evidence": [{"message_index": index, "quote": trace["messages"][index]["content"]}]}
+    return {"keep": 1, "reason": "The answer completes the request."}
 
 
 def run(tmp_path, api=None, **kwargs):
@@ -284,17 +282,17 @@ def test_failed_judge_is_incomplete_then_retried(tmp_path):
     assert run(tmp_path)["kept"] == 1
     seen = {}
 
-    def fix_citation(judge, messages_, max_tokens):
+    def fix_result(judge, messages_, max_tokens):
         value = judge_call(judge, messages_, max_tokens)
-        key = (judge["name"], value["trajectory_id"])
+        key = judge["name"]
         seen[key] = seen.get(key, 0) + 1
         if seen[key] == 1:
-            value["evidence"][0]["message_index"] = 999
+            value["reason"] = ""
         else:
             assert "previous attempt failed validation" in messages_[0]["content"]
         return value
 
-    result = triage.run_triage(source(), tmp_path / "retry", runner=API(), judge_call=fix_citation,
+    result = triage.run_triage(source(), tmp_path / "retry", runner=API(), judge_call=fix_result,
                                confirm=True, attempts=2, sleeper=lambda _: None)
     assert result["kept"] == 1 and all(count == 2 for count in seen.values())
 
@@ -475,23 +473,35 @@ def test_resume_and_import_reject_mixed_or_tampered_artifacts(tmp_path, changed)
             run(tmp_path)
 
 
-@pytest.mark.parametrize("change", [{"keep": True}, {"keep": 2}, {"trajectory_id": "wrong"}, {"reason": ""},
-                                   {"evidence": []}, {"evidence": [{"message_index": 999, "quote": "answer"}]},
-                                   {"evidence": [{"message_index": 1, "quote": "not in evidence"}]}])
-def test_judge_output_must_be_typed_and_grounded(change):
-    trace = {"trajectory_id": uid(1), "messages": messages(1), "runs": []}
-    value = {"trajectory_id": uid(1), "keep": 1, "reason": "complete", "evidence": [{"message_index": 1, "quote": "answer-1"}], **change}
+@pytest.mark.parametrize("change", [{"keep": True}, {"keep": 2}, {"reason": ""}, {"extra": "wrong"}])
+def test_judge_output_is_a_score_and_reason(change):
     with pytest.raises(PipelineError):
-        triage_judges.validate_judgment(value, trace)
+        triage_judges.validate_judgment({"keep": 1, "reason": "complete", **change})
 
 
-def test_oversize_input_is_not_truncated_or_judged(tmp_path):
+def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path):
     api = API()
     api.thread_pages["older"]["groups"][1]["message"]["content"] = "x" * 20_000
     calls = []
-    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=lambda *args: calls.append(args), confirm=True, max_input_chars=5000)
-    assert result["incomplete"] == 1 and calls == []
-    assert len(json.loads((tmp_path / "snapshot.json").read_text())["traces"][0]["messages"][0]["content"]) == 20_000
+
+    class ContextError(Exception):
+        status_code = 400
+        body: ClassVar[dict] = {"error": {"code": "context_length_exceeded"}}
+
+    def reject(judge, prompt, tokens):
+        assert json.loads(prompt[-1]["content"])["untrusted_trajectory"][0]["content"] == "x" * 20_000
+        calls.append(judge["name"])
+        raise ContextError()
+
+    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True)
+    assert result["incomplete"] == 0 and result["filtered_context"] == 1
+    assert len(calls) == 3
+    label = json.loads((tmp_path / "labels.jsonl").read_text())
+    assert label["keep"] == 0 and "context window" in label["reason"]
+    assert triage.run_triage(source(), tmp_path, confirm=True,
+        judge_call=lambda *_: pytest.fail("filtered trajectory retried"))["filtered_context"] == 1
+    with pytest.raises(PipelineError, match="no complete, kept"):
+        triage.selected_examples(tmp_path)
 
 
 def test_skill_export_works_outside_checkout(tmp_path):
@@ -657,21 +667,12 @@ def test_paid_and_remote_writes_require_confirmation(tmp_path, monkeypatch):
     assert run(tmp_path, config_path=config(tmp_path, count=1))["status"] == "complete"
 
 
-def test_judge_missing_evidence_is_incomplete_not_a_drop(tmp_path):
-    calls = []
-
-    def incomplete(judge, messages_, tokens):
-        trace = json.loads(messages_[-1]["content"])["untrusted_trajectory_evidence"]
-        calls.append(trace["trajectory_id"])
-        return {"trajectory_id": trace["trajectory_id"], "status": "incomplete", "reason": "The relevant tool result is missing."}
-
-    result = triage.run_triage(source(), tmp_path, runner=API(), judge_call=incomplete, confirm=True)
-    assert result["incomplete"] == 1 and result["dropped"] == 0
-    assert len(calls) == 3
-    records = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
-    assert all(r["error_kind"] == "insufficient_evidence" for r in records)
-    labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
-    assert all(r["keep"] == 0 and "Labeling incomplete" in r["reason"] for r in labels)
+def test_judge_can_drop_a_trajectory_with_missing_evidence(tmp_path):
+    result = triage.run_triage(source(), tmp_path, runner=API(), confirm=True,
+        judge_call=lambda *_: {"keep": 0, "reason": "The recorded outcome is missing."})
+    assert result["incomplete"] == 0 and result["dropped"] == 1
+    label = json.loads((tmp_path / "labels.jsonl").read_text())
+    assert label["keep"] == 0 and "recorded outcome is missing" in label["reason"]
 
 
 def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, capsys):
@@ -718,13 +719,11 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     seen = []
 
     def judge(slot, prompt, tokens):
-        evidence = json.loads(prompt[-1]["content"])["untrusted_trajectory_evidence"]
+        evidence = json.loads(prompt[-1]["content"])["untrusted_trajectory"]
         seen.append((slot["name"], evidence))
-        assert "turn_start" not in evidence
-        if evidence["thread_id"]:
+        if len(evidence) == 4:
             assert media_turn is None
-            assert [m["content"] for m in evidence["messages"]] == ["question-1", "answer-1", "question-2", "answer-2"]
-            assert {r["id"] for r in evidence["runs"]} == {uid(1), uid(2), uid(1001), uid(1002)}
+            assert [m["content"] for m in evidence] == ["question-1", "answer-1", "question-2", "answer-2"]
         return judge_call(slot, prompt, tokens)
 
     summary = triage.run_triage(source(), tmp_path, runner=source_api, judge_call=judge, confirm=True)
@@ -738,10 +737,9 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     examples = triage.selected_examples(tmp_path)
     assert {e["id"] for e in examples} == {label["trajectory_id"] for label in labels if label["keep"]}
     for example in examples:
-        judged = [e for _, e in seen if e["trajectory_id"] == example["id"]]
+        judged = [e for _, e in seen if e == example["inputs"]["messages"]]
         assert len(judged) == 3
-        assert all([{k: v for k, v in m.items() if k != "message_index"} for m in e["messages"]]
-                   == example["inputs"]["messages"] for e in judged)
+        assert all(e == example["inputs"]["messages"] for e in judged)
 
 
 def test_old_trace_votes_cannot_be_reused_or_imported(tmp_path):
@@ -756,3 +754,15 @@ def test_old_trace_votes_cannot_be_reused_or_imported(tmp_path):
     with pytest.raises(PipelineError, match="per-trace votes"):
         triage.selected_examples(tmp_path)
     assert (tmp_path / "judgments.jsonl").read_bytes() == saved
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (400, {"code": "context_length_exceeded"}, True),
+    (400, {"error": {"message": "prompt is too long: 120000 tokens > 100000 maximum"}}, True),
+    (429, {"message": "Rate limit reached"}, False),
+    (400, {"message": "max_tokens exceeds the output limit"}, False),
+])
+def test_only_context_rejections_filter_trajectories(status, body, expected):
+    error = RuntimeError("provider error")
+    error.status_code, error.body = status, body
+    assert triage_judges.context_window_exceeded(error) is expected

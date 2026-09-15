@@ -19,14 +19,14 @@ uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage_coordinator
 ```
 
 Deep Agents, its OpenAI adapter, and Monty are pinned in the optional `deepagents` extra.
-Tests use the actual agent graph with a deterministic local model. They check
-coordinator skill loading, Python sandbox execution, subagent dispatch, bounded
-concurrency, fresh judge context, full evidence retention, and resume.
+Tests use the actual coordinator graph with a deterministic local model. They
+check skill loading, Python dispatch, bounded concurrency, one full-message
+request per judge, provider context rejection, and resume.
 Monty is the Pydantic project's MIT-licensed Python sandbox. Version 0.0.23
 was checked against its source, PyPI metadata, and OSV on 2026-09-14; no published
 advisories were returned. Code gets no host mounts or OS handlers. Only the
-reviewed trace/task functions cross the sandbox boundary. Judges can only
-read saved runs; the coordinator can dispatch bounded judge batches.
+reviewed trace/task functions cross the sandbox boundary. The coordinator can dispatch bounded judge batches. Judges receive full
+conversation messages and have no tools.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 

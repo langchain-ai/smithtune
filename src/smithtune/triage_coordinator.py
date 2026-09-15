@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import BoundedSemaphore, Lock
@@ -29,13 +28,6 @@ class JudgeTasks:
             raise ValueError("limit must be between 1 and 128")
         with self.lock:
             return [{"trajectory_id": tid, "judge": name} for tid, name in self.tasks if (tid, name) not in self.claimed][:limit]
-
-    def read_trajectory(self, trajectory_id: str) -> dict:
-        """Read frozen evidence. Each subagent can inspect all saved evidence."""
-        for (tid, _), (trajectory, _) in self.tasks.items():
-            if tid == trajectory_id:
-                return copy.deepcopy(trajectory)
-        raise ValueError("unknown trajectory ID")
 
     def _key(self, task):
         if not isinstance(task, dict) or set(task) != {"trajectory_id", "judge"} or not all(isinstance(v, str) for v in task.values()):
@@ -89,11 +81,10 @@ class JudgeTasks:
 
 
 def run_code(code: str, tasks: JudgeTasks) -> dict:
-    """Run Python with only trajectory reads and bounded judge dispatch as host calls."""
+    """Run Python with only pending task lookup and bounded judge dispatch."""
     from smithtune.triage_code import execute_code
 
-    return execute_code(code, {"pending_tasks": tasks.pending_tasks,
-                               "read_trajectory": tasks.read_trajectory, "judge_batch": tasks.judge_batch})
+    return execute_code(code, {"pending_tasks": tasks.pending_tasks, "judge_batch": tasks.judge_batch})
 
 
 def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_tokens, coordinator_judge, model=None):
@@ -113,8 +104,7 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
 
     @tool
     def code_mode(code: str) -> dict:
-        """Execute sandboxed Python. Use pending_tasks(limit=32), read_trajectory(trajectory_id),
-        and judge_batch(tasks). judge_batch launches isolated judge subagents in
+        """Execute sandboxed Python. Use pending_tasks(limit=32) and judge_batch(tasks). judge_batch launches isolated judge subagents in
         parallel and saves checked votes. No shell, network, or host files.
         Example: jobs = pending_tasks(); judge_batch(jobs) if jobs else []
         Each call has fresh Python state. Return counts or compact task status.
