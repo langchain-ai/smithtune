@@ -502,3 +502,95 @@ def test_previous_capture_policy_requires_fresh_capture(tmp_path, monkeypatch):
     _json_dump(path, snapshot)
     with pytest.raises(PipelineError, match="prepare again without --no-fetch"):
         prepare(tmp_path, fetch=False)
+
+
+def test_interrupted_capture_resumes_and_publishes_complete_snapshot(tmp_path, monkeypatch, capsys):
+    examples = [example(1), example(2)]
+    calls = []
+    fail_second = True
+
+    def query(workspace, project, thread, **kwargs):
+        calls.append(thread)
+        if thread == "thread-2" and fail_second:
+            raise PipelineError("context deadline exceeded")
+        return [llm(f"run-{thread}", [tool("weather")])]
+
+    monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
+
+    def capture(fetch=True):
+        return dataset._example_contract_snapshot("workspace-id", "dataset-id", examples,
+                                                  "source-sha", tmp_path, fetch=fetch)
+
+    with pytest.raises(PipelineError, match="example example-2.*deadline exceeded"):
+        capture()
+    partial = tmp_path / "example_contracts.partial.json"
+    checkpoint = json.loads(partial.read_text())
+    assert set(checkpoint["contracts"]) == {"example-1"}
+    assert not (tmp_path / "example_contracts.json").exists()
+    with pytest.raises(PipelineError, match="no cached example inference contracts"):
+        capture(fetch=False)
+
+    fail_second = False
+    contracts = capture()
+    assert calls == ["thread-1", "thread-2", "thread-2"]
+    assert set(contracts) == {"example-1", "example-2"}
+    assert "1/2 examples already saved" in capsys.readouterr().err
+    assert not partial.exists()
+    assert {key: value.to_dict() for key, value in capture(fetch=False).items()} == {
+        key: value.to_dict() for key, value in contracts.items()
+    }
+    assert calls == ["thread-1", "thread-2", "thread-2"]
+    capture()  # A completed checkpoint does not turn a fresh fetch into a stale-cache read.
+    assert calls[-2:] == ["thread-1", "thread-2"]
+
+
+@pytest.mark.parametrize("change", ["contents", "source_project", "source_workspace", "dataset_workspace", "policy"])
+def test_capture_checkpoint_invalidated_by_changed_inputs(tmp_path, monkeypatch, change):
+    examples = [example(1), example(2)]
+    path = tmp_path / "partial.json"
+    calls = []
+
+    def query(workspace, project, thread, **kwargs):
+        calls.append((workspace, project, thread))
+        if thread == "thread-2":
+            raise PipelineError("request failed")
+        return [llm("run-1", [])]
+
+    monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
+    with pytest.raises(PipelineError, match="request failed"):
+        dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
+    kwargs = {}
+    workspace = "workspace-id"
+    if change == "contents":
+        examples[0]["inputs"]["messages"][0]["content"] = "updated policy"
+    elif change == "source_project":
+        examples[0]["metadata"]["source_project_id"] = "other-project"
+    elif change == "source_workspace":
+        kwargs["source_workspace_id"] = "other-workspace"
+    elif change == "dataset_workspace":
+        workspace = "other-workspace"
+    else:
+        monkeypatch.setattr(dataset, "TOOL_MERGE_POLICY", "next-policy")
+    calls.clear()
+    with pytest.raises(PipelineError, match="request failed"):
+        dataset.capture_example_contracts(workspace, examples, checkpoint_path=path, **kwargs)
+    assert [call[2] for call in calls] == ["thread-1", "thread-2"]
+
+
+def test_capture_rejects_corrupted_checkpoint(tmp_path, monkeypatch):
+    examples = [example(1), example(2)]
+    path = tmp_path / "partial.json"
+
+    def query(workspace, project, thread, **kwargs):
+        if thread == "thread-2":
+            raise PipelineError("request failed")
+        return [llm("run-1", [])]
+
+    monkeypatch.setattr(dataset, "_query_thread_llm_runs", query)
+    with pytest.raises(PipelineError, match="request failed"):
+        dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)
+    checkpoint = json.loads(path.read_text())
+    checkpoint["contracts"]["example-1"]["provenance"]["source_workspace_id"] = "wrong-workspace"
+    path.write_text(json.dumps(checkpoint))
+    with pytest.raises(PipelineError, match="checkpoint hash mismatch"):
+        dataset.capture_example_contracts("workspace-id", examples, checkpoint_path=path)

@@ -141,7 +141,11 @@ and project IDs.
 Description changes are reported in `prepared/tool_description_replacements.json`
 without rejecting examples. Incompatible argument schemas still fail preparation.
 
-Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
+Interrupted tool capture resumes automatically when you rerun the same command with
+the same data directory. Completed examples are checkpointed in
+`raw/example_contracts.partial.json`; remove that file to restart capture from scratch.
+
+Use `--no-fetch` to reuse downloaded data and completed tool schemas. Provider checks and
 tokenizer loading still run. To supply the same tools for every example, use
 `--inference-contract path/to/contract.json` instead of automatic tool capture.
 
