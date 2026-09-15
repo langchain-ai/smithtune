@@ -1332,7 +1332,7 @@ def test_fireworks_inference_uses_recorded_messages_with_contract_tools(
     assert captured["body"]["max_tokens"] == 256
 
 
-def test_anthropic_judge_uses_langsmith_gateway(monkeypatch: pytest.MonkeyPatch):
+def test_anthropic_judge_calls_anthropic_directly(monkeypatch: pytest.MonkeyPatch):
     captured = {}
 
     class Response(io.BytesIO):
@@ -1357,14 +1357,14 @@ def test_anthropic_judge_uses_langsmith_gateway(monkeypatch: pytest.MonkeyPatch)
         True,
     )
 
-    assert captured["url"] == "https://gateway.smith.langchain.com/anthropic/v1/messages"
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["body"]["model"] == "claude-sonnet-5-model-id"
     assert captured["body"]["system"] == "judge"
     assert "output_config" not in captured["body"]
     assert result["content"].startswith("{")
 
 
-def test_anthropic_judge_prefers_gateway_custom_headers(monkeypatch: pytest.MonkeyPatch):
+def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.MonkeyPatch):
     captured = {}
 
     class Response(io.BytesIO):
@@ -1390,7 +1390,7 @@ def test_anthropic_judge_prefers_gateway_custom_headers(monkeypatch: pytest.Monk
         True,
     )
 
-    assert captured["key"] == "gateway-key"
+    assert captured["key"] == "direct-key"
 
 
 @pytest.mark.parametrize("model", ["accounts/fireworks/models/model", "anthropic/claude-sonnet-5"])
@@ -1849,7 +1849,8 @@ def test_source_uses_official_provider_urls_and_no_embedded_secret():
     assert "gateway.smith.langchain.com/fireworks" not in source
     assert "https://api.fireworks.ai/training/v1/serverless" in source
     assert "https://api.fireworks.ai/inference/v1" in source
-    assert "https://gateway.smith.langchain.com/anthropic/v1/messages" in source
+    assert "https://api.anthropic.com" in source
+    assert "https://gateway.smith.langchain.com/anthropic" in source
     assert "fw_" not in source
     assert "lsv2_pt_" not in source
 

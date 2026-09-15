@@ -419,7 +419,11 @@ def test_directory_docs_keep_saved_votes_but_coordinator_changes_do_not(tmp_path
     skill_path = resource_dir / "skills/sft-trace-triage/SKILL.md"
     skill_path.parent.mkdir(parents=True)
     current = triage.files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text()
-    skill_path.write_text(current.replace(
+    previous = current.replace(
+        "Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses\n`LANGSMITH_GATEWAY_API_KEY`.",
+        "Direct Anthropic uses `SMITHTUNE_ANTHROPIC_API_KEY`; `anthropic-gateway` uses the\nLangSmith gateway credential.",
+    )
+    skill_path.write_text(previous.replace(
         "flag is needed. Use the run directory printed by the preview command.",
         "flag is needed. The directory defaults to `data/triage` when omitted.",
     ))
@@ -613,8 +617,8 @@ def test_source_pagination_is_bounded(tmp_path, monkeypatch):
 @pytest.mark.parametrize("provider,url,key", [
     ("fireworks", "https://api.fireworks.ai/inference/v1/chat/completions", "FIREWORKS_API_KEY"),
     ("openai", "https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
-    ("anthropic", "https://api.anthropic.com/v1/messages", "SMITHTUNE_ANTHROPIC_API_KEY"),
-    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "ANTHROPIC_API_KEY"),
+    ("anthropic", "https://api.anthropic.com/v1/messages", "ANTHROPIC_API_KEY"),
+    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "LANGSMITH_GATEWAY_API_KEY"),
 ])
 def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch, provider, url, key):
     from smithtune import inference

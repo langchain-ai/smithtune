@@ -89,8 +89,8 @@ def test_large_evidence_is_never_summarized(monkeypatch):
 @pytest.mark.parametrize("provider,url,key", [
     ("fireworks", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
     ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
-    ("anthropic", "https://api.anthropic.com", "SMITHTUNE_ANTHROPIC_API_KEY"),
-    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic", "ANTHROPIC_API_KEY"),
+    ("anthropic", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic", "LANGSMITH_GATEWAY_API_KEY"),
 ])
 def test_deepagent_models_use_explicit_provider_urls(monkeypatch, provider, url, key):
     from smithtune.triage_agent import _model
