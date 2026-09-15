@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import random
-import re
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.artifacts import _json_dump, _langsmith_error, _load_json, _run, _utc_now
 from smithtune.providers.base import PipelineError
 
 
@@ -27,12 +26,7 @@ def _api(workspace_id, method, path, body=None, *, runner=_run):
     try:
         result = runner(command, capture=True, input=json.dumps(body) if body is not None else None)
     except subprocess.CalledProcessError as exc:
-        # API errors can echo message contents; only expose the HTTP status.
-        status = re.search(r"\bHTTP [45]\d\d\b", exc.stderr or "")
-        detail = status.group() if status else "request failed; outcome may be unknown"
-        if path == "/api/v1/datasets" and detail == "HTTP 409":
-            detail += "; dataset name already exists"
-        raise PipelineError(f"LangSmith {method} {path}: {detail}") from exc
+        raise _langsmith_error(command, exc) from None
     except OSError as exc:
         raise PipelineError("cannot run langsmith; check that the CLI is installed and on PATH") from exc
     try:
