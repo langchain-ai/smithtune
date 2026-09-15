@@ -136,6 +136,7 @@ automatically and select the appropriate tokenizer and formatting.
 Preparation uses these defaults:
 
 - LoRA training on text and tool conversations; images are unsupported
+- Tool definitions are combined by name across each conversation, using the latest recorded description and compatible optional arguments; earlier turns see the combined definitions
 - 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
@@ -149,7 +150,14 @@ LangSmith API key must have access to both. `dataset create` saves the source
 workspace automatically; existing examples still need valid source scope
 and project IDs.
 
-Use `--no-fetch` to reuse downloaded data and tool schemas. Provider checks and
+Description changes are reported in `prepared/tool_description_replacements.json`
+without rejecting examples. Incompatible argument schemas still fail preparation.
+
+Interrupted tool capture resumes automatically when you rerun the same command with
+the same data directory. Completed examples are checkpointed in
+`raw/example_contracts.partial.json`; remove that file to restart capture from scratch.
+
+Use `--no-fetch` to reuse downloaded data and completed tool schemas. Provider checks and
 tokenizer loading still run. To supply the same tools for every example, use
 `--inference-contract path/to/contract.json` instead of automatic tool capture.
 

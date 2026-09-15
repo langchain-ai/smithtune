@@ -1826,3 +1826,59 @@ def test_fireworks_settings_errors_use_the_cli_error_path():
     assert result.returncode == 2
     assert "max_epochs must be positive" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_omitted_tool_arguments_prepare_as_empty_object():
+    examples = [example(0, [
+        message("human", "List available integrations", "u"),
+        message("ai", [{"type": "tool_call", "id": "call-1", "name": "list_integrations"}], "a"),
+        message("tool", "Observability", "t", tool_call_id="call-1"),
+    ])]
+    original = copy.deepcopy(examples)
+    dataset_ops.validate_trajectories(examples, 1)
+    rows = dataset_ops.prepare_sft_rows(examples)
+    assert rows[0]["messages"][1]["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert examples == original
+
+
+@pytest.mark.parametrize("args", [None, [], 1, True, "{}"])
+def test_explicit_non_object_arguments_are_not_defaulted(args):
+    with pytest.raises(PipelineError, match="args must be an object"):
+        dataset_ops.convert_message(message("ai", [
+            {"type": "tool_call", "id": "call-1", "name": "lookup", "args": args},
+        ], "a"))
+
+
+def test_leading_text_and_multiple_tool_calls_preserve_order():
+    text = [{"type": "text", "text": "Looking up "}, {"type": "text", "text": "both."}]
+    calls = [{"type": "tool_call", "id": f"call-{i}", "name": "lookup", "args": {"query": str(i)}}
+             for i in (1, 2)]
+    examples = [example(0, [
+        message("human", "Compare both", "u"),
+        message("ai", [*text, *calls], "a"),
+        message("tool", "first", "t1", tool_call_id="call-1"),
+        message("tool", "second", "t2", tool_call_id="call-2"),
+    ])]
+    original = copy.deepcopy(examples)
+    dataset_ops.validate_trajectories(examples, 1)
+    row = dataset_ops.prepare_sft_rows(examples)[0]
+    assistant = row["messages"][1]
+    assert assistant["content"] == text
+    assert [call["id"] for call in assistant["tool_calls"]] == ["call-1", "call-2"]
+    assert [json.loads(call["function"]["arguments"]) for call in assistant["tool_calls"]] == [
+        {"query": "1"}, {"query": "2"},
+    ]
+    assert examples == original
+    with pytest.raises(PipelineError, match="cannot preserve visible assistant text"):
+        rendering._validate_renderer_messages(
+            [{"role": "system", "content": "policy"}, *row["messages"]],
+            fireworks.MODEL_SPECS["muse-glimmer-30b"],
+        )
+
+
+@pytest.mark.parametrize("order", ["ct", "tct", "ctc"])
+def test_text_after_tool_call_still_rejects_reordering(order):
+    parts = {"t": {"type": "text", "text": "text"},
+             "c": {"type": "tool_call", "id": "call", "name": "lookup", "args": {}}}
+    with pytest.raises(PipelineError, match="without reordering"):
+        dataset_ops.convert_message(message("ai", [parts[k] for k in order], "a"))

@@ -6,6 +6,11 @@ import copy
 import hashlib
 import json
 import math
+import random
+import re
+import subprocess
+import sys
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -16,6 +21,7 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _run, _utc_
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
+    TOOL_MERGE_POLICY,
     contract_from_runs,
     load_inference_contract,
     parse_inference_contract,
@@ -61,6 +67,14 @@ class Audit:
     readable_reasoning_blocks: int = 0
 
 
+def _run_langsmith(command: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    try:
+        return _run(command, capture=capture)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
+        raise PipelineError(detail) from None
+
+
 def _langsmith_dataset_command(workspace_id: str, dataset_id: str) -> list[str]:
     return [
         "langsmith", "dataset", "get", dataset_id,
@@ -104,10 +118,21 @@ def _query_contract_runs(
     runs: dict[str, dict[str, Any]] = {}
     cursors: set[str] = set()
     while True:
-        result = runner([
-            "langsmith", "api", "runs/query", "--workspace", workspace_id,
-            "--body", _canonical(body),
-        ], capture=True)
+        for attempt in range(6):
+            try:
+                result = runner([
+                    "langsmith", "api", "runs/query", "--workspace", workspace_id,
+                    "--body", _canonical(body),
+                ], capture=True)
+                break
+            except PipelineError as exc:
+                retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out)\b", str(exc), re.I)
+                if attempt == 5 or not retryable:
+                    raise
+                delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
+                reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
+                print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+                time.sleep(delay)
         try:
             response = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
@@ -156,7 +181,7 @@ def capture_inference_contract(
     run_id: str,
     output: Path,
     *,
-    runner: Callable[..., Any] = _run,
+    runner: Callable[..., Any] = _run_langsmith,
 ) -> dict[str, Any]:
     """Collect all function tools in the selected LLM run's conversation thread."""
     sources = _query_contract_runs(workspace_id, {"id": [run_id], "limit": 1}, runner=runner)
@@ -201,7 +226,7 @@ def download_dataset(
     workspace_id: str,
     dataset_id: str,
     raw_dir: Path,
-    runner: Callable[..., Any] = _run,
+    runner: Callable[..., Any] = _run_langsmith,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Download every example and preserve the raw LangSmith data."""
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -351,15 +376,20 @@ def convert_message(
         calls = [part for part in content if isinstance(part, dict) and part.get("type") == "tool_call"]
         if len(text) + len(calls) != len(content):
             raise PipelineError("only text and tool_call content blocks are supported")
-        if text and calls:
-            raise PipelineError("interleaved text and tool_call blocks cannot be converted without reordering")
+        seen_tool_call = False
+        for part in content:
+            if part["type"] == "tool_call":
+                seen_tool_call = True
+            elif seen_tool_call:
+                raise PipelineError("text after tool_call blocks cannot be converted without reordering")
         if calls:
             if role != "ai":
                 raise PipelineError("tool_call blocks are valid only in ai messages")
-            converted["content"] = ""
+            converted["content"] = _text_parts(text) if text else ""
             converted["tool_calls"] = []
             for call in calls:
-                if not isinstance(call.get("args"), dict):
+                args = call.get("args", {})
+                if not isinstance(args, dict):
                     raise PipelineError("tool_call args must be an object")
                 if not all(isinstance(call.get(key), str) and call[key] for key in ("id", "name")):
                     raise PipelineError("tool_call id and name must be non-empty strings")
@@ -369,7 +399,7 @@ def convert_message(
                         "type": "function",
                         "function": {
                             "name": call["name"],
-                            "arguments": json.dumps(call["args"], ensure_ascii=False, separators=(",", ":")),
+                            "arguments": json.dumps(args, ensure_ascii=False, separators=(",", ":")),
                         },
                     }
                 )
@@ -531,13 +561,31 @@ def _source_workspace(
 
 def capture_example_contracts(
     workspace_id: str, examples: list[dict[str, Any]], *,
-    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run,
+    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
+    checkpoint_path: Path | None = None,
 ) -> dict[str, InferenceContract]:
     """Collect a separate union of function tools for each source trajectory."""
     contracts: dict[str, InferenceContract] = {}
+    checkpoint_identity = json_sha256({
+        "schema_version": 1, "workspace_id": workspace_id,
+        "source_workspace_id": source_workspace_id, "examples": examples,
+        "tool_merge_policy": TOOL_MERGE_POLICY,
+    })
+    if checkpoint_path is not None and checkpoint_path.exists():
+        checkpoint = _load_json(checkpoint_path)
+        if isinstance(checkpoint, dict) and checkpoint.get("identity") == checkpoint_identity:
+            payload = checkpoint.get("contracts")
+            if checkpoint.get("contracts_sha256") != json_sha256(payload):
+                raise PipelineError(f"capture checkpoint hash mismatch; remove {checkpoint_path} and retry")
+            contracts = _parse_example_contracts(payload)
+            if not set(contracts).issubset(example["id"] for example in examples):
+                raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
+            print(f"Resuming tool capture: {len(contracts)}/{len(examples)} examples already saved", file=sys.stderr)
     sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for example in examples:
         example_id = example["id"]
+        if example_id in contracts:
+            continue
         try:
             source_workspace = _source_workspace(example, workspace_id, source_workspace_id)
             identity = _source_identity(example)
@@ -570,6 +618,10 @@ def capture_example_contracts(
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
+            if checkpoint_path is not None:
+                saved = {key: contract.to_dict() for key, contract in contracts.items()}
+                _json_dump(checkpoint_path, {"identity": checkpoint_identity, "contracts": saved,
+                                            "contracts_sha256": json_sha256(saved)})
         except (ContractError, PipelineError) as exc:
             raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
     return contracts
@@ -594,11 +646,15 @@ def _example_contract_snapshot(
 ) -> dict[str, InferenceContract]:
     path = raw_dir / "example_contracts.json"
     identity = {"schema_version": 1, "workspace_id": workspace_id,
-                "dataset_id": dataset_id, "source_examples_sha256": source_sha}
+                "dataset_id": dataset_id, "source_examples_sha256": source_sha,
+                "tool_merge_policy": TOOL_MERGE_POLICY}
     if fetch:
-        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id)
+        checkpoint_path = raw_dir / "example_contracts.partial.json"
+        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id,
+                                             checkpoint_path=checkpoint_path)
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
         _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
+        checkpoint_path.unlink(missing_ok=True)
     if not path.exists():
         raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
     snapshot = _load_json(path)
@@ -825,6 +881,16 @@ def prepare_dataset(
             workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
             source_workspace_id=source_workspace_id,
         )
+    description_replacements = []
+    captured_contracts = example_contracts or ({"global": inference_contract} if inference_contract else {})
+    for example_id, contract in captured_contracts.items():
+        for replacement in contract.provenance.get("tool_description_replacements", []):
+            description_replacements.append({
+                **replacement,
+                **({"example_id": example_id} if example_contracts is not None else {}),
+                "source_workspace_id": contract.provenance.get("source_workspace_id"),
+                "source_thread_id": contract.provenance.get("source_thread_id"),
+            })
     rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
                             reasoning_policy=reasoning_policy, model=model)
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
@@ -836,7 +902,10 @@ def prepare_dataset(
         rendered = {}
     train, validation, test = split_rows(rows, validation_fraction, test_fraction)
     _validate_split_isolation(train, validation, test)
-    audit_value = {**asdict(audit), **rendered}
+    audit_value = {
+        **asdict(audit), **rendered,
+        "tool_description_replacements": len(description_replacements),
+    }
     manifest = {
         "schema_version": 1,
         "created_at_utc": _utc_now(),
@@ -890,6 +959,7 @@ def prepare_dataset(
     _jsonl_dump(data_dir / "prepared" / "test.jsonl", test)
     _json_dump(data_dir / "prepared" / "manifest.json", manifest)
     _json_dump(data_dir / "prepared" / "warnings.json", audit.duplicate_message_warnings)
+    _json_dump(data_dir / "prepared" / "tool_description_replacements.json", description_replacements)
     _json_dump(data_dir / "prepared" / "rejected.json", rejected)
     if inference_contract is not None:
         _json_dump(

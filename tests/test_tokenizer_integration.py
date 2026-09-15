@@ -40,6 +40,8 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         "name": "weather", "description": "Look up weather.",
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
     }}]
+    if model.renderer != "muse_glimmer":
+        messages[2]["content"] = [{"type": "text", "text": "LEADING_TEXT_SENTINEL"}]
     original_messages = copy.deepcopy(messages)
     rows = render_row_tokens({"messages": messages, "tools": tools}, model, renderer=renderer, include_loss_mask=True)
     assert messages == original_messages
@@ -55,6 +57,9 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         assert expected in target
     for expected in ("REASONING_SENTINEL", "ASSISTANT_ONE_SENTINEL", "ASSISTANT_TWO_SENTINEL"):
         assert target.count(expected) == 1
+    if model.renderer != "muse_glimmer":
+        assert target.count("LEADING_TEXT_SENTINEL") == 1
+        assert target.index("LEADING_TEXT_SENTINEL") < target.index("weather")
     for context in ("SYSTEM_CONTEXT_SENTINEL", "USER_CONTEXT_SENTINEL", "TOOL_RESULT_SENTINEL", "USER_TWO_SENTINEL"):
         assert context not in target
     # Reloading the saved identities must accept the same assets and versions.
