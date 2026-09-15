@@ -38,12 +38,15 @@ not one set of votes for each source trace. Private source data and live test
 artifacts stay under ignored run directories. Live validation results are
 recorded in the pull request.
 
-The final live check used 15 saved full conversations and 16 concurrent judge
-requests with DeepSeek, Muse, and Terra. It kept 3, dropped 9, filtered 1 for
-media, and filtered 2 after Muse rejected their context length. No labels
-remained incomplete. Resume made no new judge calls. All 3 kept conversations
-were uploaded and read back with identical messages and saved tool contracts.
-The CLI requests reasoning off; Muse still returns reasoning on Fireworks.
+The final council uses DeepSeek, GLM-5.3-Flash, and Terra. A live check used 15
+saved full conversations and 16 concurrent requests. All 42 votes completed on
+the first attempt: 8 kept, 6 dropped, 1 media filter, no context filters, and no
+incomplete labels. GLM used low reasoning; DeepSeek and Terra used reasoning
+off. Resume made no new calls. Four kept conversations passed the training checks.
+
+An earlier Muse council check uploaded its 3 kept conversations and read them
+back with identical messages and saved tool contracts. Re-importing into the
+same dataset skipped all 3 without duplicates or updates.
 
 Label accuracy still needs comparison with a human-reviewed sample. A valid
 JSON score does not establish that the model's quality decision is correct.
