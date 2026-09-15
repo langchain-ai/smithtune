@@ -71,12 +71,12 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--run-dir", type=Path, help="local run directory (default: data/datasets/<generated-id>)")
     create.add_argument("--output", type=Path, help="selection file path; its parent becomes the run directory; cannot combine with --run-dir")
 
-    create.add_argument("--triage-dir", type=Path, help="import frozen all-pass conversations from a completed triage run")
+    create.add_argument("--triage-dir", type=Path, help="import frozen conversations kept by the council from a completed triage run")
     create.add_argument("--confirm", action="store_true", help="confirm dataset creation from triage labels")
 
     triage_cmd = curate_sub.add_parser(
-        "triage", help="label traces with an agent council",
-        description="Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, GLM-5.3-Flash, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
+        "triage", help="label full trajectories with an agent council",
+        description="Judge each full conversation once per council model. Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, GLM-5.3-Flash, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
     )
     triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default for a new run: data/datasets/<generated-id>)")
     source = triage_cmd.add_argument_group("Source (first run only)")
@@ -85,7 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--start-time")
     source.add_argument("--end-time")
     source.add_argument("--filter", help="optional root trace filter")
-    source.add_argument("--limit", type=int, help="roots to select before expanding whole threads (default: 100)")
+    source.add_argument("--limit", type=int, help="roots to select; each distinct full conversation is judged once (default: 100)")
     council = triage_cmd.add_mutually_exclusive_group()
     council.add_argument("--judges", help="comma-separated models (default: deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra); other models use provider:model")
     council.add_argument("--judge", action="append", help=argparse.SUPPRESS)
@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
                 if args.confirm:
-                    value = {key: value[key] for key in ("status", "traces", "filtered_multimodal", "kept", "dropped", "incomplete", "labels", "report")}
+                    value = {key: value[key] for key in ("status", "trajectories", "filtered_multimodal", "kept", "dropped", "incomplete", "labels", "report")}
                 value["run_dir"] = str(directory)
             elif args.triage_dir is not None:
                 if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output, args.run_dir)):

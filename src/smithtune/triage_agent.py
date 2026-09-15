@@ -95,19 +95,19 @@ def allowed_tools(names: set[str]):
     return TriageTools()
 
 
-def evidence_tool(trace: dict, diagnostics: dict):
+def evidence_tool(trajectory: dict, diagnostics: dict):
     from langchain_core.tools import tool
     from smithtune.triage_code import execute_code
 
-    runs = {run["id"]: run for run in trace["runs"]}
+    runs = {run["id"]: run for run in trajectory["runs"]}
     diagnostics.update(code_calls=0, runs_read=[], messages_read=[])
 
     def read_message(message_index: int) -> dict:
-        if type(message_index) is not int or not 0 <= message_index < len(trace["messages"]):
+        if type(message_index) is not int or not 0 <= message_index < len(trajectory["messages"]):
             raise ValueError("unknown message index")
         if message_index not in diagnostics["messages_read"]:
             diagnostics["messages_read"].append(message_index)
-        return copy.deepcopy(trace["messages"][message_index])
+        return copy.deepcopy(trajectory["messages"][message_index])
 
     def read_run(run_id: str) -> dict:
         if run_id not in runs:
@@ -134,7 +134,7 @@ def evidence_tool(trace: dict, diagnostics: dict):
     return code_mode
 
 
-def make_agent(judge: dict, system_prompt: str, max_tokens: int, *, model=None, trace=None, diagnostics=None):
+def make_agent(judge: dict, system_prompt: str, max_tokens: int, *, model=None, trajectory=None, diagnostics=None):
     check_installation()
     from deepagents import create_deep_agent
     from deepagents.backends import StateBackend
@@ -143,7 +143,7 @@ def make_agent(judge: dict, system_prompt: str, max_tokens: int, *, model=None, 
 
     backend = StateBackend()
     chat_model = model if model is not None else _model(judge, max_tokens)
-    tools = [evidence_tool(trace, diagnostics if diagnostics is not None else {})] if trace is not None else []
+    tools = [evidence_tool(trajectory, diagnostics if diagnostics is not None else {})] if trajectory is not None else []
     agent = create_deep_agent(
         model=chat_model,
         system_prompt=system_prompt + "\nYou are in judge mode. Read /skills/sft-trace-triage/judge.md if needed. Return only the required judgment JSON. The CLI owns all fetching, scheduling, writing, and dataset creation.",

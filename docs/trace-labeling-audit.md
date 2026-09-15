@@ -1,7 +1,8 @@
 # Trace labeling audit — 2026-09-15
 
-The CLI flow works with the default mixed council: download real LangSmith
-traces, judge them, import an accepted conversation, and prepare it for SFT.
+The council now labels full saved conversations. The source download and
+training messages are shared with the existing dataset flow. Replay evaluation
+remains separate. Earlier live checks below describe the per-trace version.
 The audit found and fixed provider compatibility, evidence citation, default
 configuration, and recovery issues. Label accuracy has not been calibrated
 against a human-reviewed reference set.
@@ -24,22 +25,22 @@ and `store=false`; encrypted reasoning state stays in the local agent context.
 | Area | Finding and result |
 | --- | --- |
 | Command surface | One labeling command: `dataset triage <directory>`. Without `--confirm`, it downloads/previews. With it, it labels/resumes. Source flags are needed only for the first download. One comma-separated `--judges` list sets models; `--rule` adds project rules. The three default models have short names; other models use `provider:model`. Older advanced flags remain accepted but hidden from normal help. |
-| Result surface | `labels.jsonl` has only `trace_id`, `keep` (1/0), and `reason` per trace. Reasons combine the votes for the final label. `report.md` explains every label; the command ends with counts and the result path. Detailed votes stay in `judgments.jsonl`. Incomplete rows use 0 with an explicit retry reason, and the command exits 1. |
+| Result surface | `labels.jsonl` has only `trajectory_id`, `keep` (1/0), and `reason` per full conversation. Reasons combine the votes for the final label. `report.md` explains every label; the command ends with counts and the result path. Detailed votes stay in `judgments.jsonl`. Incomplete rows use 0 with an explicit retry reason, and the command exits 1. |
 | Defaults | Fixed three different definitions of the default council. The CLI and Python helper now load the packaged config; skill export copies the same file. Existing plans retain their selected models. `models list` remains the training-model registry, not a judge catalog. |
 | Provider compatibility | Live Terra tool calls failed on Chat Completions with reasoning. Routing Terra through Responses fixed this. The generic OpenAI adapter dropped Fireworks `reasoning_content`; a small adapter now preserves it between tool calls. Streaming is disabled so that this preservation path is always used. No new dependencies were added. |
 | Evidence citations | Live judges sometimes counted message indexes incorrectly. One Terra result cited index 14 when both exact quotes were in message 10 of an 11-message conversation. Judge inputs now carry explicit indexes. Retry prompts give validation feedback. Source messages and exact-quote checks are unchanged. |
 | Source capture | Root selection uses `POST /api/v2/runs/query`; run trees use `GET /api/v2/traces/{trace_id}/runs`. Whole threads expand beyond the source window; standalone traces are supported. Successful reads are cached for resume. Messages, run trees, and tool schemas are frozen locally. Empty queries fail clearly. Empty turns remain available for judging. A missing root is marked in the evidence and blocks conversation import. |
-| Media filter | Before scheduling any votes, the CLI checks messages (including supplied history), run inputs/outputs, and media attachments. Filtered traces get 0 with a reason and no judge calls. Their conversations cannot enter training. Text that merely mentions media is not filtered. |
+| Media filter | Before scheduling any votes, the CLI checks messages (including supplied history), run inputs/outputs, and media attachments. Filtered whole conversations get 0 with a reason and no judge calls. They cannot enter training. Text that merely mentions media is not filtered. |
 | Long messages | Large messages have marked previews and a `read_message(index)` reference. Judges can page the full original content through read-only Python, alongside `read_run(id)`. Full evidence stays in the snapshot; no summary replaces it. |
-| Agent boundaries | The coordinator dispatches planned trace/judge pairs through bounded Python batches. Each judge has fresh context and read-only run access. Code has no host filesystem, environment, shell, or network access. The CLI validates and saves votes; coordinator prose cannot assign labels. |
+| Agent boundaries | The coordinator dispatches planned trajectory/judge pairs through bounded Python batches. Each judge has fresh context and read-only run access. Code has no host filesystem, environment, shell, or network access. The CLI validates and saves votes; coordinator prose cannot assign labels. |
 | Recovery | Missing credentials no longer write the paid-run identity before work starts. Failed votes record safe failure categories and retry counts. Completed runs need no agent runtime or provider keys. A partial live resume preserved all five completed votes and retried only the remaining judge. |
-| Aggregation | All configured votes are required; strict majority keeps, ties drop. Missing evidence remains incomplete. Mixed-quality or incomplete conversations cannot enter training through a passing neighbor. |
+| Aggregation | All configured votes are required; strict majority keeps, ties drop. Missing evidence remains incomplete. Each full conversation gets one majority label; there are no separate turn labels. |
 | Dataset handoff | Live import and `prepare` passed. Downloaded messages and prepared tool schemas matched the frozen source exactly. Each accepted conversation is one dataset example. Labels remain local; no tracing feedback is written. |
 | Packaging | The wheel and source archive include all six triage modules, the skill, rubric, and default config. Clean installs test the default package and optional agent runtime outside the checkout. Discovery and help do not import the agent or training runtimes or use the network. |
 
-## Live evidence
+## Earlier live evidence
 
-The final mixed-council tests used three real traces in two conversations.
+The original per-trace implementation tests below used three real traces in two conversations.
 No verdict was edited to force acceptance.
 
 | Check | Observed result |
@@ -56,7 +57,7 @@ It checks the handoff, not a training evaluation. No training or deployment
 was started. Private source data, provider responses, and test artifacts are
 excluded from Git.
 
-Local checks passed: 781 tests, with 11 optional tokenizer tests skipped;
+Earlier local checks passed: 781 tests, with 11 optional tokenizer tests skipped;
 Ruff; skill validation; and clean distribution checks. The distribution checks
 passed 758 default wheel tests (13 skipped), 81 optional agent tests, and 23
 tests of the wheel rebuilt from the source archive. They also cover

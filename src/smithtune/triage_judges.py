@@ -1,4 +1,4 @@
-"""One fresh model call (or constrained Deep Agent) per trace and judge slot."""
+"""One fresh model call (or constrained Deep Agent) per trajectory and judge slot."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL, _set_ski
 PROVIDERS = ("fireworks", "openai", "anthropic", "anthropic-gateway")
 RESULT_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["trace_id", "keep", "reason", "evidence"],
+    "required": ["trajectory_id", "keep", "reason", "evidence"],
     "properties": {
-        "trace_id": {"type": "string"}, "keep": {"type": "integer", "enum": [0, 1]},
+        "trajectory_id": {"type": "string"}, "keep": {"type": "integer", "enum": [0, 1]},
         "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
         "evidence": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
             "type": "object", "additionalProperties": False, "required": ["quote"],
@@ -31,8 +31,8 @@ RESULT_SCHEMA = {
 }
 INCOMPLETE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["trace_id", "status", "reason"],
-    "properties": {"trace_id": {"type": "string"}, "status": {"const": "incomplete"},
+    "required": ["trajectory_id", "status", "reason"],
+    "properties": {"trajectory_id": {"type": "string"}, "status": {"const": "incomplete"},
                    "reason": {"type": "string", "minLength": 1, "maxLength": 1000}},
 }
 
@@ -56,21 +56,21 @@ def _strings(value):
             yield from _strings(item)
 
 
-def validate_judgment(value: dict, trace: dict) -> dict:
-    if not list(Draft202012Validator(INCOMPLETE_SCHEMA).iter_errors(value)) and value["trace_id"] == trace["trace_id"]:
+def validate_judgment(value: dict, trajectory: dict) -> dict:
+    if not list(Draft202012Validator(INCOMPLETE_SCHEMA).iter_errors(value)) and value["trajectory_id"] == trajectory["trajectory_id"]:
         raise IncompleteJudgment(value["reason"])
     if list(Draft202012Validator(RESULT_SCHEMA).iter_errors(value)):
         raise PipelineError("judge response does not match the result schema")
-    if type(value["keep"]) is not int or value["trace_id"] != trace["trace_id"]:
-        raise PipelineError("judge response has an invalid decision or trace identity")
+    if type(value["keep"]) is not int or value["trajectory_id"] != trajectory["trajectory_id"]:
+        raise PipelineError("judge response has an invalid decision or trajectory identity")
     for evidence in value["evidence"]:
         if "message_index" in evidence:
             index = evidence["message_index"]
-            if type(index) is not int or index >= len(trace["messages"]):
+            if type(index) is not int or index >= len(trajectory["messages"]):
                 raise PipelineError("judge evidence references an unknown message")
-            source = trace["messages"][index]
+            source = trajectory["messages"][index]
         else:
-            source = next((run for run in trace["runs"] if run["id"] == evidence["run_id"]), None)
+            source = next((run for run in trajectory["runs"] if run["id"] == evidence["run_id"]), None)
             if source is None:
                 raise PipelineError("judge evidence references an unknown run")
         if not any(evidence["quote"] in text for text in [json.dumps(source, ensure_ascii=False), *_strings(source)]):
@@ -90,24 +90,24 @@ def check_credentials(judges: list[dict]) -> None:
             raise PipelineError(f"{name} is not set for judge {judge['name']}")
 
 
-def judge_messages(trace: dict, rubric: str, rules: list[str]) -> list[dict]:
-    evidence = {**trace, "messages": [{**message, "message_index": index}
-                                     for index, message in enumerate(trace["messages"])]}
+def judge_messages(trajectory: dict, rubric: str, rules: list[str]) -> list[dict]:
+    evidence = {**trajectory, "messages": [{**message, "message_index": index}
+                                     for index, message in enumerate(trajectory["messages"])]}
     return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps({"oneOf": [RESULT_SCHEMA, INCOMPLETE_SCHEMA]})
              + "\nAdditional reviewed selection rules:\n" + json.dumps(rules)},
-            {"role": "user", "content": json.dumps({"untrusted_trace_evidence": evidence}, ensure_ascii=False)}]
+            {"role": "user", "content": json.dumps({"untrusted_trajectory_evidence": evidence}, ensure_ascii=False)}]
 
 
 def indexed_messages(messages: list[dict]) -> list[dict]:
     """Expose large messages and run payloads through read-only code."""
-    trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
-    index = {**trace, "runs": [
+    trajectory = json.loads(messages[-1]["content"])["untrusted_trajectory_evidence"]
+    index = {**trajectory, "runs": [
         {key: run[key] for key in ("id", "parent_run_id", "run_type", "name", "start_time", "end_time", "error") if key in run}
-        for run in trace["runs"]
+        for run in trajectory["runs"]
     ]}
     for threshold in (4000, 1000, 0):
         indexed = []
-        for i, message in enumerate(trace["messages"]):
+        for i, message in enumerate(trajectory["messages"]):
             content = json.dumps(message, ensure_ascii=False)
             if len(content) <= threshold:
                 indexed.append(message)
@@ -119,7 +119,7 @@ def indexed_messages(messages: list[dict]) -> list[dict]:
         index["messages"] = indexed
         if len(json.dumps(index, ensure_ascii=False)) <= 100_000:
             break
-    return [*messages[:-1], {"role": "user", "content": json.dumps({"untrusted_trace_evidence": index}, ensure_ascii=False)}]
+    return [*messages[:-1], {"role": "user", "content": json.dumps({"untrusted_trajectory_evidence": index}, ensure_ascii=False)}]
 
 
 def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
@@ -158,9 +158,9 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
 
 def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagnostics=None) -> dict:
     from smithtune.triage_agent import make_agent
-    trace = json.loads(messages[-1]["content"])["untrusted_trace_evidence"]
+    trajectory = json.loads(messages[-1]["content"])["untrusted_trajectory_evidence"]
     messages = indexed_messages(messages)
-    agent, skill_files = make_agent(judge, messages[0]["content"], max_tokens, trace=trace, diagnostics=diagnostics)
+    agent, skill_files = make_agent(judge, messages[0]["content"], max_tokens, trajectory=trajectory, diagnostics=diagnostics)
     result = agent.invoke({"messages": messages[1:], "files": skill_files}, config={"recursion_limit": 24})
     try:
         content = result["messages"][-1].content

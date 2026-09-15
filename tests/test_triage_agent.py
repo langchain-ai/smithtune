@@ -50,7 +50,7 @@ def invoke(model, monkeypatch):
 def test_installed_skill_is_discovered_and_read_by_real_deepagent(monkeypatch):
     model = JudgeModel(answers=[
         AIMessage(content="", tool_calls=[{"id": "read-1", "name": "read_file", "args": {"file_path": "/skills/sft-trace-triage/judge.md"}}]),
-        AIMessage(content=json.dumps({"trace_id": "trace", "keep": 1, "reason": "complete", "evidence": []})),
+        AIMessage(content=json.dumps({"trajectory_id": "trace", "keep": 1, "reason": "complete", "evidence": []})),
     ])
     result = invoke(model, monkeypatch)
     assert json.loads(result["messages"][-1].content)["keep"] == 1
@@ -110,15 +110,15 @@ def test_judge_reads_indexed_evidence_with_code_without_changing_source(monkeypa
     from smithtune.triage_agent import evidence_tool
     from smithtune.triage_judges import indexed_messages, judge_messages
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
-    trace = {"trace_id": "trace", "messages": [{"role": "assistant", "content": "Done"},
+    trace = {"trajectory_id": "trace", "messages": [{"role": "assistant", "content": "Done"},
              {"role": "tool", "content": "x" * 200_000 + "original tail"}],
              "runs": [{"id": "run", "run_type": "tool", "inputs": {"repeated": "x" * 200_000},
                        "outputs": {"result": "saved"}}]}
     original = json.dumps(trace)
     prompt = indexed_messages(judge_messages(trace, "Judge the trace.", []))
     assert len(prompt[-1]["content"]) < 1000
-    assert json.loads(prompt[-1]["content"])["untrusted_trace_evidence"]["messages"][0]["message_index"] == 0
-    assert json.loads(prompt[-1]["content"])["untrusted_trace_evidence"]["messages"][1]["read_full"] == "read_message(1)"
+    assert json.loads(prompt[-1]["content"])["untrusted_trajectory_evidence"]["messages"][0]["message_index"] == 0
+    assert json.loads(prompt[-1]["content"])["untrusted_trajectory_evidence"]["messages"][1]["read_full"] == "read_message(1)"
     diagnostics = {}
     model = JudgeModel(answers=[
         AIMessage(content="", tool_calls=[{"id": "read", "name": "code_mode", "args": {
@@ -126,7 +126,7 @@ def test_judge_reads_indexed_evidence_with_code_without_changing_source(monkeypa
         AIMessage(content="{}"),
     ])
     agent, files = make_agent({"provider": "fireworks", "model": "test"}, "Judge.", 1024,
-                             model=model, trace=trace, diagnostics=diagnostics)
+                             model=model, trajectory=trace, diagnostics=diagnostics)
     result = agent.invoke({"messages": prompt[1:], "files": files})
     outputs = [m.content for m in result["messages"] if isinstance(m, ToolMessage)]
     assert any('saved' in output for output in outputs)

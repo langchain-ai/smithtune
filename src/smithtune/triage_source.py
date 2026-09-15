@@ -381,3 +381,24 @@ def load_snapshot(output_dir: Path) -> dict:
     if expected != json_sha256({key: item for key, item in value.items() if key != "snapshot_sha256"}):
         raise PipelineError("triage snapshot hash mismatch")
     return value
+
+
+def conversation_trajectories(frozen: dict) -> list[dict]:
+    """Use the exact training conversation as one judging unit, with all run evidence."""
+    traces = {trace["trace_id"]: trace for trace in frozen["traces"]}
+    trajectories = []
+    for unit in frozen["units"]:
+        example = unit["example"]
+        members = [traces[tid] for tid in unit["trace_ids"]]
+        trajectory = {"trajectory_id": example["id"], "trace_ids": unit["trace_ids"],
+                      "thread_id": example["metadata"]["source_thread_id"],
+                      "project_id": frozen["source"]["project_id"],
+                      "messages": example["inputs"]["messages"],
+                      "runs": [run for trace in members for run in trace["runs"]]}
+        warnings = [warning for trace in members for warning in trace.get("source_warnings", [])]
+        if warnings:
+            trajectory["source_warnings"] = list(dict.fromkeys(warnings))
+        trajectory["multimodal_types"] = multimodal_types(trajectory)
+        trajectory["source_sha256"] = json_sha256(trajectory)
+        trajectories.append(trajectory)
+    return trajectories

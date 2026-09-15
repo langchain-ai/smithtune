@@ -1,4 +1,4 @@
-"""Resumable trace labels and a frozen, all-pass conversation dataset handoff."""
+"""Resumable full-conversation labels and a frozen dataset handoff."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from smithtune.dataset_artifacts import load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import PROVIDERS, IncompleteJudgment, api_judge, check_credentials, deepagent_judge, indexed_messages, judge_messages, rubric_text, validate_judgment
-from smithtune.triage_source import load_snapshot, multimodal_types, snapshot, training_error
+from smithtune.triage_source import conversation_trajectories, load_snapshot, multimodal_types, snapshot, training_error
 
 
 JUDGE_ALIASES = {
@@ -94,18 +94,18 @@ def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=N
     return settings
 
 
-def _label(trace: dict, records: dict, judges: list[dict]) -> dict:
-    media = trace["multimodal_types"] if "multimodal_types" in trace else multimodal_types(trace)
+def _label(trajectory: dict, records: dict, judges: list[dict]) -> dict:
+    media = trajectory["multimodal_types"] if "multimodal_types" in trajectory else multimodal_types(trajectory)
     if media:
-        return {"trace_id": trace["trace_id"], "keep": 0, "status": "filtered", "votes": [],
+        return {"trajectory_id": trajectory["trajectory_id"], "keep": 0, "status": "filtered", "votes": [],
                 "disagreement": False, "reason": "Filtered before judging: multimodal content (" + ", ".join(media) + ")."}
-    votes = [records.get((trace["trace_id"], judge["name"])) for judge in judges]
+    votes = [records.get((trajectory["trajectory_id"], judge["name"])) for judge in judges]
     valid = [record for record in votes if record and record["status"] == "complete"]
     complete = len(valid) == len(judges)
     keeps = sum(record["judgment"]["keep"] for record in valid)
-    return {"schema_version": 1, "trace_id": trace["trace_id"], "root_run_id": trace["root_run_id"],
-            "thread_id": trace["thread_id"], "project_id": trace["project_id"],
-            "source_sha256": trace["source_sha256"], "keep": int(complete and keeps > len(judges) / 2),
+    return {"schema_version": 2, "trajectory_id": trajectory["trajectory_id"],
+            "thread_id": trajectory["thread_id"], "project_id": trajectory["project_id"],
+            "source_sha256": trajectory["source_sha256"], "keep": int(complete and keeps > len(judges) / 2),
             "status": "complete" if complete else "incomplete", "valid_judges": len(valid), "expected_judges": len(judges),
             "disagreement": len({record["judgment"]["keep"] for record in valid}) > 1,
             "votes": votes}
@@ -124,7 +124,7 @@ def _result(label: dict) -> dict:
         reasons = list(dict.fromkeys(" ".join(vote["reason"].split()) for vote in matching))
         tied = len(matching) * 2 == len(votes)
         reason = ("Tied vote; no majority for 1. " if tied else f"{len(matching)}/{len(votes)} judges voted {label['keep']}. ") + " ".join(reasons)
-    return {"trace_id": label["trace_id"], "keep": label["keep"], "reason": reason}
+    return {"trajectory_id": label["trajectory_id"], "keep": label["keep"], "reason": reason}
 
 
 @exclusive_output("output_dir")
@@ -137,30 +137,26 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     if not 1 <= concurrency <= 16 or not 1 <= attempts <= 5 or not 1000 <= max_input_chars <= 2_000_000 or not 128 <= max_output_tokens <= 16384:
         raise PipelineError("invalid triage concurrency, retry, or input/output limits")
     if not dry_run and not confirm:
-        raise PipelineError("trace judging incurs cost; review --dry-run, then use --confirm")
+        raise PipelineError("trajectory judging incurs cost; review --dry-run, then use --confirm")
     frozen = snapshot(source, output_dir, runner=runner)
-    filtered = {trace["trace_id"] for trace in frozen["traces"]
-                if (trace["multimodal_types"] if "multimodal_types" in trace else multimodal_types(trace))}
+    judging = conversation_trajectories(frozen)
+    filtered = {trajectory["trajectory_id"] for trajectory in judging
+                if (trajectory["multimodal_types"] if "multimodal_types" in trajectory else multimodal_types(trajectory))}
     rubric = rubric_text()
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
                 "runner": runner_mode, "max_input_chars": max_input_chars, "max_output_tokens": max_output_tokens,
-                "prefilter": "exclude-multimodal-v1"}
+                "prefilter": "exclude-multimodal-v1", "judging_unit": "conversation-v1"}
     if runner_mode == "deepagent":
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        skill_hash = json_sha256(skill)
-        # A CLI-directory documentation correction leaves coordinator instructions
-        # unchanged. Preserve its prior identity so saved votes remain reusable.
-        if skill_hash == "244f088d563cb64cfbd337b5f80e6fffa3f4d3a95dadb6e2c47f182f6e636e98":
-            skill_hash = "b7b79171217e4f4b22f488f9f8e1de9fc96c2b8744d3607adaa375131f91fcf5"
-        identity.update(agent_version=6, skill_sha256=skill_hash)
-    plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "traces": len(frozen["traces"]),
+        identity.update(agent_version=7, skill_sha256=json_sha256(skill))
+    plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(filtered),
-            "judge_tasks": (len(frozen["traces"]) - len(filtered)) * len(config["judges"]), "max_attempts_per_task": attempts,
+            "judge_tasks": (len(judging) - len(filtered)) * len(config["judges"]), "max_attempts_per_task": attempts,
             "concurrency": concurrency, "aggregation": "all slots required; strict majority; ties drop",
-            "training_selection": "whole frozen conversation only if every trace passes",
+            "training_selection": "whole frozen conversation with a complete majority keep vote",
             "cost": "provider input/output rates; deepagent adds coordinator calls and up to 24 judge graph steps per attempt"}
     if runner_mode == "deepagent":
         plan["coordinator"] = config["judges"][0]
@@ -170,33 +166,33 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         raise PipelineError("existing triage run uses different input, rubric, model, or limits; use a new output directory")
     _json_dump(output_dir / "plan.json", plan)
     if dry_run:
-        print(f"Preview: {plan['traces']} traces, {plan['judges']} judges, {plan['judge_tasks']} votes. No judge calls made.", file=sys.stderr)
-        print(f"Filtered {len(filtered)} traces with multimodal content before judging.", file=sys.stderr)
+        print(f"Preview: {plan['trajectories']} trajectories, {plan['judges']} judges, {plan['judge_tasks']} votes. No judge calls made.", file=sys.stderr)
+        print(f"Filtered {len(filtered)} trajectories with multimodal content before judging.", file=sys.stderr)
         print(f"Run: smithtune dataset triage {shlex.quote(str(output_dir))} --confirm", file=sys.stderr)
         return plan
     identity_hash = json_sha256(identity)
-    traces = {trace["trace_id"]: trace for trace in frozen["traces"]}
-    if len(traces) != len(frozen["traces"]):
-        raise PipelineError("snapshot contains duplicate trace identities")
+    trajectories = {trajectory["trajectory_id"]: trajectory for trajectory in judging}
+    if len(trajectories) != len(judging):
+        raise PipelineError("snapshot contains duplicate trajectory identities")
     records = {}
     results_path = output_dir / "judgments.jsonl"
     if results_path.exists():
         for record in _load_jsonl(results_path):
-            if not isinstance(record, dict) or not isinstance(record.get("trace_id"), str) or not isinstance(record.get("judge"), str):
+            if not isinstance(record, dict) or not isinstance(record.get("trajectory_id"), str) or not isinstance(record.get("judge"), str):
                 raise PipelineError("saved judgment has an invalid identity")
-            key = (record.get("trace_id"), record.get("judge"))
-            if key in records or key[0] not in traces or key[1] not in {judge["name"] for judge in config["judges"]}:
+            key = (record.get("trajectory_id"), record.get("judge"))
+            if key in records or key[0] not in trajectories or key[1] not in {judge["name"] for judge in config["judges"]}:
                 raise PipelineError("saved judgments contain duplicate or unknown identities")
             if record.get("identity_sha256") != identity_hash or record.get("status") not in {"complete", "error", "input_too_large"}:
                 raise PipelineError("saved judgment has different run identity or invalid status")
             if record["status"] == "complete":
-                validate_judgment(record.get("judgment"), traces[key[0]])
+                validate_judgment(record.get("judgment"), trajectories[key[0]])
             records[key] = record
     call = judge_call or (deepagent_judge if runner_mode == "deepagent" else api_judge)
 
-    def judge_one(trace, judge):
-        record = {"trace_id": trace["trace_id"], "judge": judge["name"], "identity_sha256": identity_hash}
-        messages = judge_messages(trace, rubric, config["rules"])
+    def judge_one(trajectory, judge):
+        record = {"trajectory_id": trajectory["trajectory_id"], "judge": judge["name"], "identity_sha256": identity_hash}
+        messages = judge_messages(trajectory, rubric, config["rules"])
         base_prompt = messages[0]["content"]
         feedback = ""
         for attempt in range(attempts):
@@ -214,7 +210,7 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                 else:
                     response = call(judge, messages, max_output_tokens)
                 error_kind = "invalid_result"
-                result = validate_judgment(response, trace)
+                result = validate_judgment(response, trajectory)
                 return {**record, "status": "complete", "judgment": result}
             except IncompleteJudgment as exc:
                 return {**record, "status": "error", "error_kind": "insufficient_evidence", "error": str(exc)}
@@ -231,12 +227,12 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                 if isinstance(status, int):
                     failure["http_status"] = status
                 if attempt + 1 < attempts:
-                    print(f"Retrying {judge['name']} for {trace['trace_id']}: {type(exc).__name__}.", file=sys.stderr)
+                    print(f"Retrying {judge['name']} for {trajectory['trajectory_id']}: {type(exc).__name__}.", file=sys.stderr)
                     sleeper(2 ** attempt)
         return {**record, **failure, "status": "error", "error_kind": error_kind, "error": "judge request or result validation failed; rerun to retry"}
 
-    pending = [(trace, judge) for trace in frozen["traces"] for judge in config["judges"]
-               if trace["trace_id"] not in filtered and records.get((trace["trace_id"], judge["name"]), {}).get("status") != "complete"]
+    pending = [(trajectory, judge) for trajectory in judging for judge in config["judges"]
+               if trajectory["trajectory_id"] not in filtered and records.get((trajectory["trajectory_id"], judge["name"]), {}).get("status") != "complete"]
     if pending and judge_call is None:
         check_credentials(config["judges"])
         if runner_mode == "deepagent":
@@ -246,13 +242,13 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     if not results_path.exists():
         _jsonl_dump(results_path, [])
     total = plan["judge_tasks"]
-    print(f"Filtered {len(filtered)} traces with multimodal content before judging.", file=sys.stderr)
+    print(f"Filtered {len(filtered)} trajectories with multimodal content before judging.", file=sys.stderr)
     print(f"Council: {len(config['judges'])} judges; {len(pending)}/{total} votes pending.", file=sys.stderr)
     record_lock = Lock()
 
     def save_record(record):
         with record_lock:
-            records[(record["trace_id"], record["judge"])] = record
+            records[(record["trajectory_id"], record["judge"])] = record
             _jsonl_dump(results_path, [records[key] for key in sorted(records)])
             completed = sum(r["status"] == "complete" for r in records.values())
             print(f"Saved vote: {record['status']}; {completed}/{total} complete.", file=sys.stderr)
@@ -265,10 +261,10 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         elif pending:
             _run_direct(pending, judge_one, save_record, concurrency)
     finally:
-        labels = [_label(trace, records, config["judges"]) for trace in frozen["traces"]]
+        labels = [_label(trajectory, records, config["judges"]) for trajectory in judging]
         results = [_result(label) for label in labels]
         _jsonl_dump(output_dir / "labels.jsonl", results)
-        summary = {"traces": len(labels), "kept": sum(label["keep"] for label in labels),
+        summary = {"trajectories": len(labels), "kept": sum(label["keep"] for label in labels),
                    "dropped": sum(label["status"] == "complete" and not label["keep"] for label in labels),
                    "incomplete": sum(label["status"] == "incomplete" for label in labels),
                    "filtered_multimodal": len(filtered),
@@ -276,23 +272,23 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                    "identity_sha256": identity_hash, "labels_sha256": json_sha256(results),
                    "labels": str(output_dir / "labels.jsonl"), "report": str(output_dir / "report.md")}
         summary["status"] = "complete" if summary["incomplete"] == 0 else "incomplete"
-        by_id = {label["trace_id"]: label for label in labels}
+        by_id = {label["trajectory_id"]: label for label in labels}
         # Recheck cached snapshots without changing their frozen evidence or hashes.
         training_errors = [training_error(unit) for unit in frozen["units"]]
         summary["eligible_conversations"] = sum(
-            not error and all(by_id[tid]["keep"] for tid in unit["trace_ids"])
+            not error and by_id[unit["example"]["id"]]["keep"]
             for unit, error in zip(frozen["units"], training_errors, strict=True)
         )
         summary["unsupported_training_conversations"] = sum(bool(error) for error in training_errors)
         summary["unsupported_tool_contracts"] = sum(error == "tool schemas cannot be represented by the current training contract" for error in training_errors)
         _json_dump(output_dir / "summary.json", summary)
-        eligible = summary["traces"] - len(filtered)
-        explanation = f"Labeled {eligible - summary['incomplete']}/{eligible} text traces: {summary['kept']} with 1, {summary['dropped']} with 0. Filtered {len(filtered)} multimodal traces before judging."
+        eligible = summary["trajectories"] - len(filtered)
+        explanation = f"Labeled {eligible - summary['incomplete']}/{eligible} text trajectories: {summary['kept']} with 1, {summary['dropped']} with 0. Filtered {len(filtered)} multimodal trajectories before judging."
         if summary["incomplete"]:
             explanation += f" {summary['incomplete']} still need labeling; rerun the command to retry."
-        report = ["# Trace labels", "", explanation, "", "1 = use for SFT. 0 = do not use for SFT.", ""]
+        report = ["# Trajectory labels", "", explanation, "", "1 = use for SFT. 0 = do not use for SFT.", ""]
         for result in results:
-            report.append(f"- {result['trace_id']}: {result['keep']} — {result['reason']}")
+            report.append(f"- {result['trajectory_id']}: {result['keep']} — {result['reason']}")
         _atomic_text(output_dir / "report.md", "\n".join(report) + "\n")
         print(explanation + f" Labels and reasons: {output_dir / 'labels.jsonl'}.", file=sys.stderr)
     return summary
@@ -302,8 +298,8 @@ def _run_direct(pending, judge_one, save_record, concurrency):
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = []
         try:
-            for trace, judge in pending:
-                futures.append(executor.submit(judge_one, trace, judge))
+            for trajectory, judge in pending:
+                futures.append(executor.submit(judge_one, trajectory, judge))
             for future in as_completed(futures):
                 save_record(future.result())
         finally:
@@ -313,39 +309,41 @@ def _run_direct(pending, judge_one, save_record, concurrency):
 
 def selected_examples(triage_dir: Path) -> list[dict]:
     frozen = load_snapshot(triage_dir)
+    judging = conversation_trajectories(frozen)
     identity = _load_json(triage_dir / "triage-config.json")
+    if not isinstance(identity, dict) or identity.get("judging_unit") != "conversation-v1":
+        raise PipelineError("this run has per-trace votes; judge whole conversations in a new run directory before import")
     summary = _load_json(triage_dir / "summary.json")
     labels = _load_jsonl(triage_dir / "labels.jsonl")
-    if not isinstance(identity, dict) or not isinstance(summary, dict) or any(not isinstance(label, dict) or not isinstance(label.get("trace_id"), str) for label in labels):
+    if not isinstance(identity, dict) or not isinstance(summary, dict) or any(not isinstance(label, dict) or not isinstance(label.get("trajectory_id"), str) for label in labels):
         raise PipelineError("invalid triage artifacts")
     if identity.get("snapshot_sha256") != frozen["snapshot_sha256"] or summary.get("identity_sha256") != json_sha256(identity) or summary.get("labels_sha256") != json_sha256(labels):
         raise PipelineError("triage labels or source snapshot have changed")
-    traces = {trace["trace_id"]: trace for trace in frozen["traces"]}
-    by_id = {label.get("trace_id"): label for label in labels}
-    if len(by_id) != len(labels) or set(by_id) != set(traces):
-        raise PipelineError("labels must cover every snapshot trace exactly once")
+    trajectories = {trajectory["trajectory_id"]: trajectory for trajectory in judging}
+    by_id = {label.get("trajectory_id"): label for label in labels}
+    if len(by_id) != len(labels) or set(by_id) != set(trajectories):
+        raise PipelineError("labels must cover every snapshot trajectory exactly once")
     records = {}
     for record in _load_jsonl(triage_dir / "judgments.jsonl"):
-        if not isinstance(record, dict) or not isinstance(record.get("trace_id"), str) or not isinstance(record.get("judge"), str):
+        if not isinstance(record, dict) or not isinstance(record.get("trajectory_id"), str) or not isinstance(record.get("judge"), str):
             raise PipelineError("saved judgment has an invalid identity")
-        key = (record.get("trace_id"), record.get("judge"))
-        if key in records or key[0] not in traces or key[1] not in {judge["name"] for judge in identity["config"]["judges"]}:
+        key = (record.get("trajectory_id"), record.get("judge"))
+        if key in records or key[0] not in trajectories or key[1] not in {judge["name"] for judge in identity["config"]["judges"]}:
             raise PipelineError("invalid or duplicate saved judge identity")
         if record.get("identity_sha256") != json_sha256(identity):
             raise PipelineError("judgment identity mismatch")
         if record.get("status") == "complete":
-            validate_judgment(record.get("judgment"), traces[key[0]])
+            validate_judgment(record.get("judgment"), trajectories[key[0]])
         records[key] = record
-    for tid, trace in traces.items():
-        calculated = _label(trace, records, identity["config"]["judges"])
-        calculated["identity_sha256"] = json_sha256(identity)
-        # Read older detailed label files as well as the compact public format.
-        if _result(calculated) != by_id[tid] and calculated != by_id[tid]:
+    for tid, trajectory in trajectories.items():
+        calculated = _label(trajectory, records, identity["config"]["judges"])
+        if _result(calculated) != by_id[tid]:
             raise PipelineError("labels do not match validated judge votes")
         by_id[tid] = calculated
     selected = []
     for unit in frozen["units"]:
-        if training_error(unit) or not all(by_id[tid]["keep"] == 1 and by_id[tid]["status"] == "complete" for tid in unit["trace_ids"]):
+        label = by_id[unit["example"]["id"]]
+        if training_error(unit) or label["keep"] != 1 or label["status"] != "complete":
             continue
         example = load_conversation(save_conversation(triage_dir, unit["example"]))
         contract = parse_inference_contract(unit["contract"])
@@ -353,7 +351,7 @@ def selected_examples(triage_dir: Path) -> list[dict]:
             "messages_sha256": json_sha256(example["inputs"]["messages"]), "contract": contract.to_dict()}
         selected.append(example)
     if not selected:
-        raise PipelineError("no complete, all-pass conversations are eligible for training")
+        raise PipelineError("no complete, kept conversations are eligible for training")
     validate_trajectories(selected, len(selected))
     return selected
 

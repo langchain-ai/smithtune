@@ -90,9 +90,12 @@ conversation before uploading it, alongside the selection and import receipt.
 Use `dataset create --run-dir <directory>` to choose a location. The returned
 `run_dir` identifies the saved files; they remain on disk after upload or failure.
 
-## Label traces with an agent council
+## Label full trajectories with an agent council
 
-`dataset triage` downloads traces locally and labels each one for SFT.
+`dataset triage` reuses the downloaded conversation messages to label whole
+trajectories for SFT. A trajectory is one full conversation: user messages,
+assistant messages, tool calls, and tool results. Each council member judges
+that same full trajectory once. The CLI saves one majority label and reason.
 It starts a Deep Agent coordinator, which uses Python code to launch judge
 subagents. The default council uses three different models:
 
@@ -103,7 +106,8 @@ subagents. The default council uses three different models:
 | GPT-5.6 Terra | OpenAI | `gpt-5.6-terra` |
 
 Each judge gets fresh context. DeepSeek also runs the coordinator.
-This selects training examples; `evaluate` tests a trained model.
+This selects training examples. It is separate from `evaluate`, which splits
+a trajectory into replay cases to test a trained model’s next response.
 
 Install the optional agent support and set `FIREWORKS_API_KEY`, `OPENAI_API_KEY`,
 and `LANGSMITH_API_KEY` in your environment:
@@ -125,7 +129,10 @@ smithtune dataset triage data/datasets/my-sft \
 This saves the messages and full run trees in `snapshot.json`, and the council
 settings and vote count in `plan.json`. It makes no judge calls. Selected
 threads expand to their full history, including turns outside the time window.
-Thus the number of traces to judge can exceed `--limit`.
+`--limit` selects root traces. Roots from the same thread become one trajectory;
+extra history does not add judging tasks. For example, 100 selected roots that
+belong to 95 conversations produce 95 trajectories and at most 285 votes with
+three judges. The media filter can reduce that count.
 Successful read responses are saved under `download/`. If downloading stops,
 repeat the command to reuse them. The CLI waits and retries when LangSmith
 returns a rate limit. Trace run data comes from the V2 endpoint,
@@ -134,12 +141,12 @@ training-format checks do not stop the download.
 If a root run is missing, the saved trace includes a warning for the judges.
 That conversation cannot enter training through this import flow.
 
-Before judging, the CLI filters traces with multimodal content in their
-messages, run inputs/outputs, or media attachments. Those traces get `0` with
-a filter reason and incur no judge calls. Every remaining trace is sent to
+Before judging, the CLI filters whole trajectories with multimodal content in
+any message, source run input/output, or media attachment. Those trajectories
+get `0` with a filter reason and incur no judge calls. Each remaining trajectory is sent to
 the three default judges, or to your chosen council.
 The check includes conversation history supplied to the judge. It does not
-remove media blocks and then judge an altered trace.
+remove media blocks and then judge an altered conversation.
 
 **2. Label, or resume an interrupted run:**
 
@@ -157,7 +164,7 @@ agent calls. Omitting the directory on a new run generates one under
 LangSmith traces
       | V2 download; save messages, runs, and tool schemas
       v
-Local snapshot
+Local snapshot: full conversations
       |
 Media filter ---- media found ----> 0 + reason; no judge calls
       | text only
@@ -165,12 +172,12 @@ Media filter ---- media found ----> 0 + reason; no judge calls
 Deep Agent coordinator -> Python code -> independent judge subagents
                                                | read saved evidence
                                                v
-                                  Validated votes -> majority label
+                                  3 votes per trajectory -> majority label
                                                |
                                    labels.jsonl: 1/0 + reason
                                                |
                                   dataset create --triage-dir
-                                               | upload all-pass conversations
+                                               | upload kept trajectories
                                                v
                                      prepare -> plan -> train
 ```
@@ -183,10 +190,11 @@ code. Media references are saved as JSON, not rendered for the judges. Judges
 cannot run recorded tools, access host files or secrets, or delegate further.
 The coordinator cannot write a verdict in place of a judge.
 
-The result is one line per trace in `labels.jsonl`:
+The result is one line per full trajectory in `labels.jsonl`. `trajectory_id`
+is the example ID inside the saved `conversations/*.json` file:
 
 ```json
-{"trace_id":"...","keep":1,"reason":"2/3 judges voted 1. The answer completes the request and the tool results support it."}
+{"trajectory_id":"...","keep":1,"reason":"2/3 judges voted 1. The answer completes the request and the tool results support it."}
 ```
 
 `1` means use for SFT; `0` means do not use. A majority of the council decides
@@ -195,7 +203,7 @@ voted for that label. The CLI ends with counts and the result path. `report.md`
 explains each label in plain text. Detailed votes and source quotes stay in
 `judgments.jsonl` for inspection. No extra model call is needed for the report.
 
-If a judge cannot finish, the reason says "Labeling incomplete" and the trace
+If a judge cannot finish, the reason says "Labeling incomplete" and the trajectory
 has `0` until a retry completes it. The command reports the unfinished count
 and exits with code 1. Repeat the same command to retry. Labels stay local;
 triage does not write feedback to LangSmith.
@@ -206,15 +214,20 @@ triage does not write feedback to LangSmith.
 smithtune dataset create --triage-dir data/datasets/my-sft --name selected-sft --confirm
 ```
 
-Every trace in a conversation must pass. This prevents a passing turn from
-bringing rejected earlier behavior into training. Unsupported content and tool contracts
+A conversation is selected when all council members finish and the majority
+votes `1` for that full trajectory. Unsupported content and tool contracts
 are excluded and counted in the summary. Import uses the saved messages and
 tool schemas without fetching the source again. Pass the returned dataset ID
 to `prepare` below. Keep a separate test set for model comparisons.
 
 After a partial import, inspect `dataset-import.json` before retrying. Dataset
 imports do not resume automatically. Other complete conversations can still
-be imported when some trace labels are incomplete.
+be imported when some trajectory labels are incomplete.
+
+Runs made with the old per-trace judging format need new council votes. To reuse
+a download, copy only `snapshot.json` into a new run directory, preview it, then
+confirm. Keep old votes in their original directory; they do not score whole
+conversations.
 
 ### Change the council or selection rules
 
