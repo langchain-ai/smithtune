@@ -351,15 +351,20 @@ def convert_message(
         calls = [part for part in content if isinstance(part, dict) and part.get("type") == "tool_call"]
         if len(text) + len(calls) != len(content):
             raise PipelineError("only text and tool_call content blocks are supported")
-        if text and calls:
-            raise PipelineError("interleaved text and tool_call blocks cannot be converted without reordering")
+        seen_tool_call = False
+        for part in content:
+            if part["type"] == "tool_call":
+                seen_tool_call = True
+            elif seen_tool_call:
+                raise PipelineError("text after tool_call blocks cannot be converted without reordering")
         if calls:
             if role != "ai":
                 raise PipelineError("tool_call blocks are valid only in ai messages")
-            converted["content"] = ""
+            converted["content"] = _text_parts(text) if text else ""
             converted["tool_calls"] = []
             for call in calls:
-                if not isinstance(call.get("args"), dict):
+                args = call.get("args", {})
+                if not isinstance(args, dict):
                     raise PipelineError("tool_call args must be an object")
                 if not all(isinstance(call.get(key), str) and call[key] for key in ("id", "name")):
                     raise PipelineError("tool_call id and name must be non-empty strings")
@@ -369,7 +374,7 @@ def convert_message(
                         "type": "function",
                         "function": {
                             "name": call["name"],
-                            "arguments": json.dumps(call["args"], ensure_ascii=False, separators=(",", ":")),
+                            "arguments": json.dumps(args, ensure_ascii=False, separators=(",", ":")),
                         },
                     }
                 )

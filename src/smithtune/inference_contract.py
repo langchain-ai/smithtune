@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -407,6 +408,56 @@ def _merge_optional_arguments(left: dict[str, Any], right: dict[str, Any]) -> di
     return merged
 
 
+def _tool_catalog(description: Any) -> tuple[str, list[tuple[str, str]], str] | None:
+    """Recognize a single Available tools list while retaining surrounding prose."""
+    if not isinstance(description, str):
+        return None
+    lines = description.splitlines(keepends=True)
+    headings = [index for index, line in enumerate(lines) if line.strip() == "Available tools:"]
+    if len(headings) != 1:
+        return None
+    start = headings[0] + 1
+    entries: list[tuple[str, str]] = []
+    names: set[str] = set()
+    end = start
+    for line in lines[start:]:
+        text = line.rstrip("\r\n")
+        match = re.fullmatch(r"[ \t]*- ([A-Za-z0-9_.:/-]+) \(integration: [^\r\n()]+\)[ \t]*", text)
+        if match is None:
+            break
+        name = match[1]
+        if name in names:
+            return None
+        entries.append((name, text))
+        names.add(name)
+        end += 1
+    if not entries:
+        return None
+    return "".join(lines[:start]), entries, "".join(lines[end:])
+
+
+def _merge_tool_definitions(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    """Allow catalog growth and compatible optional arguments, retaining all other fields."""
+    merged = copy.deepcopy(left)
+    old_description = left["function"].get("description")
+    new_description = right["function"].get("description")
+    if old_description != new_description:
+        first, second = _tool_catalog(old_description), _tool_catalog(new_description)
+        if first is None or second is None or first[0] != second[0] or first[2] != second[2]:
+            return None
+        old_entries, new_entries = first[1], second[1]
+        old_names = {name for name, _ in old_entries}
+        # Existing entries must survive byte-for-byte and in their original order.
+        if len(new_entries) <= len(old_entries) or [
+            entry for entry in new_entries if entry[0] in old_names
+        ] != old_entries:
+            return None
+        merged["function"]["description"] = new_description
+    if json_sha256(merged) == json_sha256(right):
+        return merged
+    return _merge_optional_arguments(merged, right)
+
+
 def contract_from_runs(
     runs: Sequence[Mapping[str, Any]], *, workspace_id: str,
     source_run_id: str | None = None, thread_id: str | None = None,
@@ -441,7 +492,7 @@ def contract_from_runs(
         for tool in captured:
             name = tool["function"]["name"]
             if name in tools and json_sha256(tools[name]) != json_sha256(tool):
-                merged = _merge_optional_arguments(tools[name], tool)
+                merged = _merge_tool_definitions(tools[name], tool)
                 if merged is None:
                     raise ContractError(
                         f"tool {name!r} has conflicting definitions in runs {tool_sources[name]} and {run_id}"
