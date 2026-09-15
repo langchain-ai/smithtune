@@ -603,9 +603,17 @@ class FireworksProvider:
             ]
         )
         model_route = f"{model}#{deployment}"
-        smoke = _inference_smoke_test(model_route)
-        endpoint = {"inference_url": INFERENCE_URL, "model": model_route, "deployment": deployment, "smoke_test": smoke}
-        _json_dump(run_dir / "endpoint.json", endpoint)
+        endpoint = {"inference_url": INFERENCE_URL, "model": model_route, "deployment": deployment,
+                    "smoke_test": {"status": "pending"}}
+        receipt = run_dir / "endpoint.json"
+        _json_dump(receipt, endpoint)
+        try:
+            endpoint["smoke_test"] = _inference_smoke_test(model_route)
+        except Exception:
+            endpoint["smoke_test"] = {"status": "failed"}
+            _json_dump(receipt, endpoint)
+            raise
+        _json_dump(receipt, endpoint)
         return endpoint
 
     def undeploy(self, account_id: str, deployment_id: str, *, confirm: bool) -> None:
