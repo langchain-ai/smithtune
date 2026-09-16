@@ -10,8 +10,6 @@ optimizer, and checkpoint helpers. `fireworks_sampling.py` uses the official
 Training API sampler and the same renderer for replay. When changing these
 adapters, check checkpoint selection, session cleanup, tool parsing, and replay
 recovery from saved generations.
-For validation replay between epochs, also check frozen validation cases,
-calibration reuse, replay-based selection and patience, and optimizer continuity.
 
 ```bash
 sfw uv sync --locked --extra test --python 3.12

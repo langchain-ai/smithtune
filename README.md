@@ -459,64 +459,9 @@ prefix and tool definitions. The reference is the next recorded assistant text
 or tool call. Each case starts from recorded history, including recorded tool
 results; generated tool calls are never executed.
 
-By default, validation loss selects the checkpoint. Final test replay does not
-affect that choice. The full-trajectory triage council is a separate step that
-decides which conversations enter the dataset.
-
-To use replay to select checkpoints during training, add `--validation-replay`:
-
-```bash
-smithtune plan --provider fireworks --data-dir data \
-  --validation-replay --evaluate --early-stopping-patience 2
-smithtune train --provider fireworks --data-dir data --run-dir runs/my-sft \
-  --validation-replay --evaluate --early-stopping-patience 2 --confirm
-```
-
-| Training flags | Checkpoint selection | Final test replay |
-| --- | --- | --- |
-| Neither | Lowest validation loss | No |
-| `--evaluate` | Lowest validation loss | Yes |
-| `--validation-replay` | Highest validation replay pass rate | No |
-| Both | Highest validation replay pass rate | Yes |
-
-```text
-train --validation-replay --evaluate
-  +-- freeze replay cases from validation.jsonl
-  +-- check the judge once for each requested split
-  +-- open one serverless session
-  +-- repeat for each epoch:
-  |     train -> validation loss -> save checkpoint
-  |     -> snapshot current weights -> sample validation cases -> judge
-  |     -> select best checkpoint -> continue or stop
-  +-- load the selected checkpoint
-  +-- compare base and tuned responses on test.jsonl
-  +-- save results and close clients
-```
-
-Validation replay uses the same cases, judge, and generation settings each epoch.
-It samples only the tuned model. Training then continues with the same optimizer
-state. The highest per-case pass rate wins; a tied score uses the lower validation
-loss. An exact tie keeps the earlier checkpoint.
-
-`--early-stopping-patience` counts epochs without enough replay improvement.
-With this mode, `--early-stopping-min-delta` is an absolute pass-rate increase:
-`0.01` means one percentage point. A lower loss on a tied replay score can select
-a different checkpoint, but does not reset patience. Validation loss is still
-recorded after every epoch. Test scores never select the checkpoint.
-
-This adds one model response and one judge call per validation replay case per
-epoch, plus one judge calibration for that split. A conversation can produce
-several cases. The plan reports the maximum call counts; early stopping can
-reduce them. Use the existing `--max-points-per-trajectory` cap to reduce cases.
-
-Validation cases and calibration go to `<run-dir>/validation-replay`. Each
-`epoch-1`, `epoch-2`, etc. subdirectory contains its responses, scores, and sampler
-receipt. `epochs.json` records loss and replay scores; `result.json` records the
-selected checkpoint and selection metric. Final test results go to `replay`.
-If validation sampling or judging fails, training stops and keeps saved
-checkpoints and completed responses. Missing scores are never treated as failed
-model behavior. Automatic continuation of an interrupted training loop is not
-provided; `--init-from-checkpoint` starts a new run from a saved checkpoint.
+Validation loss selects the checkpoint. Replay scores do not influence training
+or checkpoint selection. The full-trajectory triage council is a separate step
+that decides which conversations enter the dataset.
 
 For a completed Fireworks training run:
 
@@ -533,8 +478,7 @@ LoRA rank and alpha are used when restoring the checkpoint.
 
 Both paths support `--judge-model`, `--concurrency`, `--max-output-tokens`, and
 `--max-points-per-trajectory` (an optional cap; the default scores every assistant
-action). With `train`, these options require `--evaluate` or `--validation-replay`
-and apply to both when both are enabled. Test results go to
+action). With `train`, these options require `--evaluate`. Results go to
 `<run-dir>/replay`; standalone evaluation can use `--output-dir` to start another
 comparison with different settings.
 
