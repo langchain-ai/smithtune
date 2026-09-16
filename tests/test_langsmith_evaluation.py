@@ -413,6 +413,23 @@ def test_empty_trajectory_has_no_agreement_feedback():
     assert reporting._expected_feedback(str(uuid4()), []) == []
 
 
+@pytest.mark.parametrize("passes,total", [(4, 12), (8, 17), (9, 17), (0, 3), (3, 3)])
+def test_fractional_feedback_matches_sdk_storage_precision(passes, total):
+    root = str(uuid4())
+    steps = [{"run_id": str(uuid4()), "judgment": {"pass": index < passes, "reason": "judged"}}
+             for index in range(total)]
+    expected = reporting._expected_feedback(root, steps)
+    # The SDK's create_feedback serializes float scores with round(score, 4).
+    stored = SimpleNamespace(run_id=UUID(root), key="trajectory_teacher_agreement",
+                             score=round(passes / total, 4), comment=None)
+    client = SimpleNamespace(list_feedback=lambda **kwargs: iter([stored]))
+    assert reporting._saved_feedback(client, expected) == {(root, stored.key)}
+    assert expected[-1]["score"] == stored.score
+    stored.score = round(stored.score + .0001, 4)
+    with pytest.raises(PipelineError, match="conflicting LangSmith feedback"):
+        reporting._saved_feedback(client, expected)
+
+
 def test_changed_dataset_version_cannot_resume_an_existing_evaluation(prepared, tmp_path):
     data, manifest, client = prepared
     calls = []

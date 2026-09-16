@@ -160,6 +160,9 @@ def bind_evaluation_snapshot(output_dir: Path, config: dict, cases: list[dict], 
 
 
 def _feedback(run_id: str, key: str, score, comment=None) -> dict:
+    # Match the SDK's create_feedback precision for uploads and readback checks.
+    if isinstance(score, float):
+        score = round(score, 4)
     result = {"key": key, "score": score, "target_run_id": run_id}
     if comment is not None:
         result["comment"] = comment
