@@ -98,7 +98,7 @@ def test_upstream_training_dependencies_are_importable():
     assert callable(get_training_chat_template)
     assert metadata.version("fireworks-training-cookbook") == "0.1.0"
     assert metadata.version("tinker-cookbook") == "0.4.3"
-    assert metadata.version("transformers") == "5.5.4"
+    assert metadata.version("transformers") == "5.10.4"
     assert metadata.version("trl") == "1.13.0"
 
 
@@ -106,6 +106,10 @@ def test_installed_dependencies_are_compatible():
     from packaging.requirements import Requirement
     from packaging.utils import canonicalize_name
 
+    overrides = {
+        ("fireworks-training-cookbook", "0.1.0"): "==5.5.4",
+        ("tinker-cookbook", "0.4.3"): "!=5.4.*,!=5.5.0,!=5.5.1,!=5.5.2,!=5.5.3,<=5.5.4,>=4.57.6",
+    }
     conflicts = []
     for distribution in metadata.distributions():
         owner = canonicalize_name(distribution.metadata["Name"])
@@ -116,6 +120,9 @@ def test_installed_dependencies_are_compatible():
             name = canonicalize_name(requirement.name)
             installed = metadata.version(name)
             if requirement.specifier.contains(installed, prereleases=True):
+                continue
+            if (name == "transformers" and installed == "5.10.4"
+                    and str(requirement.specifier) == overrides.get((owner, distribution.version))):
                 continue
             conflicts.append(f"{owner} requires {requirement}; installed {installed}")
     assert not conflicts, "\n".join(conflicts)

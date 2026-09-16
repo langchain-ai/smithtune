@@ -10,14 +10,16 @@ Install directly from GitHub using [uv](https://docs.astral.sh/uv/getting-starte
 and Git:
 
 ```bash
-uv tool install --python 3.12 \
+printf 'transformers==5.10.4\n' > smithtune-overrides.txt
+uv tool install --python 3.12 --overrides smithtune-overrides.txt \
   'git+https://github.com/langchain-ai/smithtune.git'
 smithtune doctor
 smithtune --help
 ```
 
 No local GPU or repository checkout is required. To upgrade, repeat the install
-command with `--upgrade`.
+command with `--upgrade`. Keep `--overrides`: it selects patched Transformers despite
+the cookbooks' incompatible version pins. See [dependency compatibility](CONTRIBUTING.md#dependency-compatibility).
 
 Install these companion tools for the operations you use:
 
@@ -126,7 +128,8 @@ GPT-5.6 Terra on OpenAI. Set `LANGSMITH_API_KEY`, `FIREWORKS_API_KEY`, and
 `OPENAI_API_KEY`, then install the optional agent support:
 
 ```bash
-uv tool install --upgrade --python 3.12 \
+printf 'transformers==5.10.4\n' > smithtune-overrides.txt
+uv tool install --upgrade --python 3.12 --overrides smithtune-overrides.txt \
   'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
@@ -325,7 +328,8 @@ Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rat
 Install the optional deployment tools:
 
 ```bash
-uv tool install --upgrade --python 3.12 \
+printf 'transformers==5.10.4\n' > smithtune-overrides.txt
+uv tool install --upgrade --python 3.12 --overrides smithtune-overrides.txt \
   'smithtune[baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 

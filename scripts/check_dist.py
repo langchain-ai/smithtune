@@ -32,8 +32,9 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     venv = scratch / "venv"
     run("uv", "venv", "--python", "3.12", str(venv))
     python = str(venv / "bin/python")
-    run("sfw", "uv", "pip", "install", "--python", python, str(wheel), "pytest==9.1.1")
-    run("uv", "pip", "check", "--python", python)
+    overrides = scratch / "overrides.txt"
+    overrides.write_text("\n".join(tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"]["override-dependencies"]) + "\n")
+    run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(overrides), str(wheel), "pytest==9.1.1")
     work = scratch / "customer"
     work.mkdir()
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
@@ -54,11 +55,11 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     if full_tests:
         # Verify the opt-in runtime from the installed wheel, with real graphs
         # and deterministic local models. The default install is tested first.
-        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[deepagents]")
-        run("uv", "pip", "check", "--python", python)
+        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(overrides), str(wheel) + "[deepagents]")
+        run(python, "-I", "-m", "pytest", "tests/test_training_dependency.py::test_installed_dependencies_are_compatible", cwd=work, env=env)
         run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
-        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[baseten-deploy]")
-        run("uv", "pip", "check", "--python", python)
+        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(overrides), str(wheel) + "[baseten-deploy]")
+        run(python, "-I", "-m", "pytest", "tests/test_training_dependency.py::test_installed_dependencies_are_compatible", cwd=work, env=env)
         run(python, "-I", "-m", "pytest", "tests/test_baseten_truss.py", "tests/test_baseten_deployment.py", "tests/test_baseten_deploy_cli.py", cwd=work, env=env)
         # Commit a clean source snapshot in a disposable repository. This tests
         # Git installation of the current working tree without committing it to
@@ -73,7 +74,7 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
         run("git", "diff", "--cached", "--name-only", cwd=source)
         run("git", "-c", "user.name=Distribution test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Distribution test snapshot", cwd=source)
         tool_env = {**env, "UV_TOOL_DIR": str(scratch / "tools"), "UV_TOOL_BIN_DIR": str(scratch / "bin")}
-        run("sfw", "uv", "tool", "install", "--no-config", "--python", "3.12", "git+" + source.as_uri(), cwd=work, env=tool_env)
+        run("sfw", "uv", "tool", "install", "--no-config", "--python", "3.12", "--overrides", str(overrides), "git+" + source.as_uri(), cwd=work, env=tool_env)
         run(str(scratch / "bin/smithtune"), "--version", cwd=work, env=tool_env)
         run(str(scratch / "bin/smithtune"), "doctor", cwd=work, env=tool_env)
 

@@ -48,7 +48,8 @@ CI runs `ruff check` with the rules in `pyproject.toml`; it does not enforce
 To install your checkout as an isolated CLI:
 
 ```bash
-sfw uv tool install --python 3.12 .
+printf 'transformers==5.10.4\n' > smithtune-overrides.txt
+sfw uv tool install --python 3.12 --overrides smithtune-overrides.txt .
 ```
 
 For Baseten checkpoint deployment, install the optional `baseten-deploy` extra.
@@ -62,11 +63,16 @@ marking an endpoint ready.
 
 ## Dependency compatibility
 
-Transformers is pinned to `5.5.4`, matching the upstream Fireworks cookbook and
-satisfying its Tinker cookbook dependency. No overrides or source patches are needed.
-Distribution checks run `uv pip check`; tests verify the installed upstream Git
-revision and Transformers version, and compare renderer outputs to a pinned
-reference using a deterministic test tokenizer.
+Transformers is pinned to patched `5.10.4`. The project-level uv override replaces
+incompatible Transformers requirements in the pinned Fireworks and Tinker cookbooks.
+Wheel and `uv tool install` consumers must pass an explicit overrides file; project
+configuration is not included in wheel dependency metadata. Ordinary installs without
+the override cannot resolve these conflicting requirements.
+Distribution checks verify dependency compatibility except for these two reviewed
+Transformers constraints, and compare renderer outputs to a pinned reference using
+a deterministic test tokenizer. Plain `uv pip check` reports the expected conflicts.
+Re-prepare existing data after upgrading: the Transformers version is part of its
+prepared-data identity.
 
 Baseten uses Transformers' assistant-token masks and TRL `1.13.0` training
 templates. Keep TRL pinned: its template and mask conventions are part of the
@@ -90,13 +96,10 @@ SMITHTUNE_TOKENIZER_TESTS=1 uv run --no-sync pytest tests/test_tokenizer_integra
 
 The ordinary test suite uses synthetic tokenizers and requires no Hub access.
 
-Known security tradeoff: `5.5.4` is affected by
-[CVE-2026-9856](https://osv.dev/vulnerability/GHSA-xrqw-3rrv-vx5w), fixed in
-Transformers `5.10.0`. Malicious chat-template dictionary keys can cause arbitrary
-file writes when tokenizer/processor `save_pretrained()` is called. No explicit
-calls were found in smithtune or the installed Fireworks/Tinker cookbook code;
-this is not a proof of unreachability. Reassess this choice when upstream permits
-a fixed version or tokenizer loading/saving paths change.
+The override addresses [CVE-2026-9856](https://osv.dev/vulnerability/GHSA-xrqw-3rrv-vx5w),
+which permits arbitrary file writes through malicious chat-template dictionary keys
+when `save_pretrained()` is called. The fix starts at `5.10.0`; `5.10.4` is a
+non-yanked patched release. Remove the override when upstream permits a fixed version.
 
 To update the cookbook, change its commit in `pyproject.toml`, inspect the upstream
 diff, run `sfw uv lock`, and run the distribution checks below. Retain the renderer
@@ -110,7 +113,7 @@ python scripts/check_dist.py
 ```
 
 This builds smithtune's wheel and source distribution, installs dependencies from
-their declared sources in clean environments, and runs tests outside the checkout.
+their declared sources with the Transformers override in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
 The default wheel is tested first, then the optional Deep Agents extra. Both
 distributions must include the portable skill and support `skill export` outside
@@ -127,7 +130,8 @@ Merge the changes and let CI pass. Set the version in `pyproject.toml`, regenera
 tag directly:
 
 ```bash
-uv tool install --python 3.12 \
+printf 'transformers==5.10.4\n' > smithtune-overrides.txt
+uv tool install --python 3.12 --overrides smithtune-overrides.txt \
   'git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
 ```
 

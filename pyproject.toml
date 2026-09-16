@@ -15,7 +15,7 @@ dependencies = [
   "jsonschema==4.26.0",
   "referencing==0.37.0",
   "tinker==0.23.0",
-  "transformers==5.5.4",
+  "transformers==5.10.4",
   "trl==1.13.0",
   "pillow>=12.3,<13",
   "datasets>=5.0.1,<6",
@@ -32,6 +32,9 @@ Issues = "https://github.com/langchain-ai/smithtune/issues"
 baseten-deploy = ["truss==0.18.30"]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
 deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]
+
+[tool.uv]
+override-dependencies = ["transformers==5.10.4"]
 
 [tool.setuptools.package-data]
 smithtune = ["skills/*/*.md", "skills/*/*.json"]
