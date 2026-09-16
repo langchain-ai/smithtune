@@ -42,7 +42,7 @@ def deployment_adapter(monkeypatch):
         "truss.remote.baseten.remote": SimpleNamespace(BasetenRemote=remote),
         "truss_train.definitions": SimpleNamespace(
             CheckpointList=SimpleNamespace, Compute=SimpleNamespace,
-            DeployCheckpointsRuntime=SimpleNamespace, SecretReference=SimpleNamespace,
+            DeployCheckpointsRuntime=SimpleNamespace,
         ),
     }
     for name, module in modules.items():
@@ -55,7 +55,7 @@ def deployment_adapter(monkeypatch):
 def prepare():
     return baseten_truss.prepare_deployment(
         checkpoint_id="checkpoint-1", model_name="smithtune-example",
-        accelerator="H200:1", hf_token_secret="hf_access_token",
+        accelerator="H200:1",
     )
 
 
@@ -64,7 +64,7 @@ def test_prepare_does_not_create_and_returns_unparsed_resource_ids(deployment_ad
     assert [name for name, _ in deployment_adapter.calls] == ["prepare"]
     config = deployment_adapter.calls[0][1]
     assert config.checkpoint_details.loops_checkpoint_ids == ["checkpoint-1"]
-    assert config.runtime.environment_variables["HF_TOKEN"].name == "hf_access_token"
+    assert config.runtime.environment_variables == {}
     assert create() is deployment_adapter.result
     assert [name for name, _ in deployment_adapter.calls] == ["prepare", "create"]
     with pytest.raises(PipelineError, match="already been attempted"):
@@ -107,7 +107,7 @@ def test_invalid_accelerator_count_fails_before_provider_read(deployment_adapter
     with pytest.raises(PipelineError, match="optional positive count"):
         baseten_truss.prepare_deployment(
             checkpoint_id="checkpoint-1", model_name="smithtune-example",
-            accelerator="H200:1:8", hf_token_secret="hf_access_token",
+            accelerator="H200:1:8",
         )
     assert deployment_adapter.calls == []
 
@@ -167,7 +167,7 @@ def test_released_truss_builds_checkpoint_request_without_live_api(monkeypatch):
         }],
         "inference_stack": {
             "stack_type": "VLLM",
-            "environment_variables": [{"name": "HF_TOKEN", "value": "hf_access_token", "is_secret_reference": True}],
+            "environment_variables": [],
         },
         "instance_type_id": "instance-1",
         "dry_run": False,

@@ -343,9 +343,9 @@ uv tool install --upgrade --python 3.12 \
   'smithtune[baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
-Set `BASETEN_API_KEY`, `ANTHROPIC_API_KEY` for the default judge, and a Baseten
-secret named `hf_access_token` with access to the base model on Hugging Face
-(override its name with `--hf-token-secret`). Choose GPUs explicitly: `H200:1`
+Set `BASETEN_API_KEY` and, for replay judging, `ANTHROPIC_API_KEY`.
+Supported Baseten models are public and do not require a Hugging Face token.
+Choose GPUs explicitly: `H200:1`
 below is an example, not a verified allocation for every model.
 
 Preview cases and deployment settings, then run a temporary evaluation:
@@ -363,8 +363,8 @@ smithtune evaluate --provider baseten --serving-mode temporary \
 The plan makes no deployment or inference calls. Evaluation creates or activates
 an endpoint from Baseten's official generated Loops serving template, checks it,
 runs replay, and deactivates serving replicas on completion or failure. It preserves
-the model and checkpoint. Repeat with the same directories to resume; hardware,
-context, and secret flags can be omitted once the deployment receipt exists.
+the model and checkpoint. Repeat with the same directories to resume; hardware
+and context flags can be omitted once the deployment receipt exists.
 Temporary mode does not support `--base-model`. Use a separate output directory.
 
 For an endpoint that stays running, deploy and evaluate using its saved receipt:

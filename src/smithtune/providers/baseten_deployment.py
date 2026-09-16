@@ -83,16 +83,14 @@ def _checkpoint(identity: dict) -> dict:
     return {**identity, "checkpoint_id": checkpoint["id"]}
 
 
-def _settings(accelerator: str, max_seq_len: int, hf_token_secret: str, timeout: float) -> dict:
+def _settings(accelerator: str, max_seq_len: int, timeout: float) -> dict:
     if not isinstance(accelerator, str) or re.fullmatch(r"[A-Z][A-Z0-9_]*:[1-9][0-9]*", accelerator) is None:
         raise PipelineError("--accelerator must specify GPU type and count, for example H200:1")
     if type(max_seq_len) is not int or max_seq_len < 1024:
         raise PipelineError("--max-seq-len must be at least 1024 for deployment smoke tests")
-    if not isinstance(hf_token_secret, str) or re.fullmatch(r"[A-Za-z0-9_-]+", hf_token_secret) is None:
-        raise PipelineError("--hf-token-secret must be a Baseten workspace secret name")
     if not math.isfinite(timeout) or not 1 <= timeout <= 7200:
         raise PipelineError("deployment timeout must be between 1 and 7200 seconds")
-    return {"accelerator": accelerator, "max_seq_len": max_seq_len, "hf_token_secret": hf_token_secret}
+    return {"accelerator": accelerator, "max_seq_len": max_seq_len}
 
 
 def _receipt(run_dir: Path) -> dict:
@@ -110,7 +108,7 @@ def _matching_settings(receipt: dict, settings: dict) -> bool:
     # Before the first successful smoke test, let a user correct an excessive
     # replay cap without recreating already allocated serving resources.
     return ("advertised_max_seq_len" not in receipt and
-            all(receipt["settings"].get(key) == settings[key] for key in ("accelerator", "hf_token_secret")))
+            receipt["settings"].get("accelerator") == settings["accelerator"])
 
 
 def _endpoint(receipt: dict) -> BasetenEndpoint:
@@ -213,11 +211,11 @@ def _smoke(endpoint: BasetenEndpoint, checkpoint_name: str) -> int:
 
 
 @exclusive_output("run_dir")
-def deploy(run_dir: Path, *, accelerator: str, max_seq_len: int, hf_token_secret: str = "hf_access_token",
+def deploy(run_dir: Path, *, accelerator: str, max_seq_len: int,
            timeout: float = 1800, confirm: bool) -> dict:
     """Deploy or resume one owned endpoint; failed creates are never blindly retried."""
     _require_confirm(confirm, "Baseten dedicated deployment and smoke-test inference")
-    settings = _settings(accelerator, max_seq_len, hf_token_secret, timeout)
+    settings = _settings(accelerator, max_seq_len, timeout)
     identity = _training_identity(run_dir)
     path = run_dir / "endpoint.json"
     if path.exists():
@@ -233,7 +231,7 @@ def deploy(run_dir: Path, *, accelerator: str, max_seq_len: int, hf_token_secret
         checkpoint = _checkpoint(identity)
         model_name = "smithtune-" + uuid4().hex
         create = prepare_deployment(checkpoint_id=checkpoint["checkpoint_id"], model_name=model_name,
-                                    accelerator=accelerator, hf_token_secret=hf_token_secret)
+                                    accelerator=accelerator)
         receipt = {"schema_version": 1, "provider": "baseten", "owned": True,
                    "model_name": model_name, "checkpoint": checkpoint, "settings": settings,
                    "cleanup_command": f"smithtune undeploy --provider baseten --run-dir {shlex.quote(str(run_dir.resolve()))} --confirm"}
@@ -302,7 +300,7 @@ def undeploy(run_dir: Path, *, confirm: bool) -> dict:
 
 
 def plan(run_dir: Path, *, accelerator: str | None = None, max_seq_len: int | None = None,
-         hf_token_secret: str | None = None, timeout: float = 1800) -> dict:
+         timeout: float = 1800) -> dict:
     """Resolve dedicated serving settings locally, without allocating compute."""
     identity = _training_identity(run_dir)
     saved = _receipt(run_dir) if (run_dir / "endpoint.json").exists() else None
@@ -310,7 +308,6 @@ def plan(run_dir: Path, *, accelerator: str | None = None, max_seq_len: int | No
     settings = _settings(
         accelerator if accelerator is not None else defaults.get("accelerator"),
         max_seq_len if max_seq_len is not None else defaults.get("max_seq_len"),
-        hf_token_secret if hf_token_secret is not None else defaults.get("hf_token_secret", "hf_access_token"),
         timeout,
     )
     if saved and (not _matching_settings(saved, settings) or any(saved["checkpoint"].get(k) != v for k, v in identity.items())):
@@ -323,12 +320,12 @@ def plan(run_dir: Path, *, accelerator: str | None = None, max_seq_len: int | No
 
 @contextmanager
 def temporary(run_dir: Path, *, accelerator: str | None = None, max_seq_len: int | None = None,
-              hf_token_secret: str | None = None, timeout: float = 1800, confirm: bool):
+              timeout: float = 1800, confirm: bool):
     """Keep the same resource IDs on resume and release owned compute on exit."""
     _require_confirm(confirm, "temporary Baseten dedicated deployment and evaluation")
     with output_lock(run_dir):
         config = plan(run_dir, accelerator=accelerator, max_seq_len=max_seq_len,
-                      hf_token_secret=hf_token_secret, timeout=timeout)
+                      timeout=timeout)
         try:
             deploy.__wrapped__(run_dir, **config["settings"], timeout=timeout, confirm=True)
             yield load_endpoint(run_dir)

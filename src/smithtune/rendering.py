@@ -92,8 +92,7 @@ def resolve_rendering_model(model: ModelSpec) -> ModelSpec:
             revision = HfApi().model_info(model.tokenizer_model, revision=model.tokenizer_revision).sha
         except Exception as exc:
             raise PipelineError(
-                "could not resolve the tokenizer revision; check Hub access/cache and "
-                "HF_TOKEN for gated or private models"
+                "could not resolve the tokenizer revision; check Hub connectivity and the local cache"
             ) from exc
         if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
             raise PipelineError("Hugging Face returned no immutable tokenizer revision")

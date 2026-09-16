@@ -45,7 +45,7 @@ def load_tokenizer(model: ModelSpec) -> Any:
     except Exception as exc:
         raise PipelineError(
             f"could not load tokenizer {model.tokenizer_model} at {model.tokenizer_revision}; "
-            "check Hub access/cache and HF_TOKEN for gated or private models"
+            "check Hub connectivity and the local cache"
         ) from exc
 
 
