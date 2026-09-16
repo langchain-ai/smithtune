@@ -178,6 +178,13 @@ def _smoke(endpoint: BasetenEndpoint, checkpoint_name: str) -> int:
     if len(matches) != 1:
         raise PipelineError("Baseten does not advertise the saved checkpoint name on /v1/models")
     context = matches[0].get("max_model_len")
+    # vLLM LoRA entries can inherit their context limit from the named base model.
+    if context is None:
+        parent = matches[0].get("parent")
+        if isinstance(parent, str) and parent:
+            parents = [item for item in data if isinstance(item, dict) and item.get("id") == parent]
+            if len(parents) == 1:
+                context = parents[0].get("max_model_len")
     if type(context) is not int or context < endpoint.max_seq_len:
         raise PipelineError("Baseten does not advertise enough serving context for --max-seq-len; lower the cap or configure serving through Baseten")
     text = _baseten_chat_completion(checkpoint_name, [{"role": "user", "content": "Reply with the word hello."}], 256, endpoint=endpoint)
