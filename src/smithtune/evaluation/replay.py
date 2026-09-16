@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import sys
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -707,87 +708,6 @@ def run_replay_evaluation(
         if key in generated:
             raise PipelineError("saved generations contain duplicate candidates")
         generated[key] = generation
-    generation_lock = Lock()
-    pending = [case for case in cases if case["id"] not in completed]
-    if baseten_cleanup is not None and not pending:
-        baseten_cleanup()
-    if pending:
-        calibration = ensure_judge_calibration(cases, output_dir, judge_model, chat_fn)
-    else:
-        calibration = _load_jsonl(output_dir / "calibration.jsonl")
-    if not calibration or any(result["actual"] != result["expected"] for result in calibration):
-        raise PipelineError("judge failed positive or negative calibration controls")
-    case_order = {case["id"]: index for index, case in enumerate(cases)}
-
-    def score_case(case: dict[str, Any]) -> dict[str, Any]:
-        request_contract = _case_contract(case, global_contract, example_contracts)
-        contract_sha256 = request_contract.contract_sha256 if request_contract is not None else None
-        scored: dict[str, Any] = {
-            "case": case,
-            "reasoning_policy": plan["reasoning_policy"],
-            "judge_model": judge_model,
-            "contract_sha256": contract_sha256,
-        }
-        for label, model in models:
-            route = tuned_route if label == "tuned" else model
-            generation = generated.get((case["id"], label))
-            if generation is None:
-                started_at = _utc_now()
-                candidate = candidate_fn(route, case["messages"], max_output_tokens, False, request_contract)
-                generation = {"case": case, "label": label, "model": model, "candidate": candidate,
-                              "started_at": started_at, "ended_at": _utc_now()}
-                with generation_lock:
-                    generations.append(generation)
-                    _jsonl_dump(generations_path, generations)
-            candidate = generation["candidate"]
-            judgment = judge_replay_candidate(case, candidate, judge_model, chat_fn)
-            if candidate.get("sampling", {}).get("format_valid") is False:
-                judgment = {"pass": False, "reason": "Response was truncated or contained a malformed tool call."}
-            scored[label] = {
-                "model": model,
-                "serving_route": baseten_endpoint.url if baseten_endpoint else route,
-                "candidate": candidate,
-                **{key: generation[key] for key in ("started_at", "ended_at") if key in generation},
-                "deterministic_metrics": score_replay_candidate(
-                    case,
-                    candidate,
-                    request_contract,
-                ),
-                "judgment": judgment,
-            }
-        return scored
-
-    needs_samples = any((case["id"], label) not in generated for case in pending for label, _ in models)
-    lifecycle = replay_sampler if replay_sampler and needs_samples else nullcontext(tuned_model)
-    if baseten_lifecycle is not None and pending:
-        lifecycle = baseten_lifecycle
-    state_path = output_dir / "evaluation-state.json"
-    _json_dump(state_path, {"status": "running", "completed": len(results), "total": len(cases)})
-    try:
-        with lifecycle as tuned_route, ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = []
-            errors = []
-            try:
-                for case in pending:
-                    futures.append(executor.submit(score_case, case))
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        errors.append(exc)
-                        continue
-                    results.append(result)
-                    results.sort(key=lambda result: case_order[result["case"]["id"]])
-                    _jsonl_dump(results_path, results)
-            finally:
-                # Ctrl-C must not drain the entire queue of paid requests.
-                for future in futures:
-                    future.cancel()
-            if errors:
-                raise PipelineError(f"evaluation interrupted: {len(errors)} cases failed; {len(results)}/{len(cases)} saved; rerun to resume") from errors[0]
-    except BaseException:
-        _json_dump(state_path, {"status": "interrupted", "completed": len(results), "total": len(cases)})
-        raise
     for result in results:
         request_contract = _case_contract(result["case"], global_contract, example_contracts)
         for label, _ in models:
@@ -797,89 +717,183 @@ def run_replay_evaluation(
                 request_contract,
             )
     _jsonl_dump(results_path, results)
-    tuned_passes = sum(result["tuned"]["judgment"]["pass"] for result in results)
-    count = len(results)
-    by_case_type = {}
-    for case_type in sorted({result["case"]["case_type"] for result in results}):
-        group = [result for result in results if result["case"]["case_type"] == case_type]
-        group_tuned = sum(result["tuned"]["judgment"]["pass"] for result in group)
-        group_count = len(group)
-        by_case_type[case_type] = {
-            "cases": group_count,
-            "tuned_passes": group_tuned,
-            "tuned_pass_rate": group_tuned / group_count,
-        }
-    summary = {
-        **plan,
-        "tuned_model": tuned_model,
-        "judge_model": judge_model,
-        "evaluated_models": len(models),
-        "generation_calls": len(results) * len(models),
-        "judge_scoring_calls": len(results) * len(models),
-        "calibration_passed": True,
-        "calibration_checks": len(calibration),
-        "tuned_passes": tuned_passes,
-        "tuned_pass_rate": tuned_passes / count,
-        "by_case_type": by_case_type,
-        "deterministic_metrics": summarize_deterministic_metrics(
-            results,
-            [label for label, _ in models],
-        ),
-    }
-    if base_model:
-        base_passes = sum(result["base"]["judgment"]["pass"] for result in results)
-        wins = sum(
-            result["tuned"]["judgment"]["pass"] and not result["base"]["judgment"]["pass"]
-            for result in results
-        )
-        regressions = sum(
-            result["base"]["judgment"]["pass"] and not result["tuned"]["judgment"]["pass"]
-            for result in results
-        )
-        summary.update(
-            {
-                "base_model": base_model,
-                "base_passes": base_passes,
-                "base_pass_rate": base_passes / count,
-                "pass_rate_delta": (tuned_passes - base_passes) / count,
-                "paired_wins": wins,
-                "paired_regressions": regressions,
-                "paired_ties": count - wins - regressions,
+    generation_lock = Lock()
+    pending = [case for case in cases if case["id"] not in completed]
+    if baseten_cleanup is not None and not pending:
+        baseten_cleanup()
+    publisher = reporting.BackgroundPublisher(output_dir, config, cases, langsmith_context, results)
+    try:
+        if pending:
+            calibration = ensure_judge_calibration(cases, output_dir, judge_model, chat_fn)
+        else:
+            calibration = _load_jsonl(output_dir / "calibration.jsonl")
+        if not calibration or any(result["actual"] != result["expected"] for result in calibration):
+            raise PipelineError("judge failed positive or negative calibration controls")
+        case_order = {case["id"]: index for index, case in enumerate(cases)}
+
+        def score_case(case: dict[str, Any]) -> dict[str, Any]:
+            request_contract = _case_contract(case, global_contract, example_contracts)
+            contract_sha256 = request_contract.contract_sha256 if request_contract is not None else None
+            scored: dict[str, Any] = {
+                "case": case,
+                "reasoning_policy": plan["reasoning_policy"],
+                "judge_model": judge_model,
+                "contract_sha256": contract_sha256,
             }
-        )
-        for case_type, scores in by_case_type.items():
+            for label, model in models:
+                route = tuned_route if label == "tuned" else model
+                generation = generated.get((case["id"], label))
+                if generation is None:
+                    started_at = _utc_now()
+                    candidate = candidate_fn(route, case["messages"], max_output_tokens, False, request_contract)
+                    generation = {"case": case, "label": label, "model": model, "candidate": candidate,
+                                  "started_at": started_at, "ended_at": _utc_now()}
+                    with generation_lock:
+                        generations.append(generation)
+                        _jsonl_dump(generations_path, generations)
+                candidate = generation["candidate"]
+                judgment = judge_replay_candidate(case, candidate, judge_model, chat_fn)
+                if candidate.get("sampling", {}).get("format_valid") is False:
+                    judgment = {"pass": False, "reason": "Response was truncated or contained a malformed tool call."}
+                scored[label] = {
+                    "model": model,
+                    "serving_route": baseten_endpoint.url if baseten_endpoint else route,
+                    "candidate": candidate,
+                    **{key: generation[key] for key in ("started_at", "ended_at") if key in generation},
+                    "deterministic_metrics": score_replay_candidate(
+                        case,
+                        candidate,
+                        request_contract,
+                    ),
+                    "judgment": judgment,
+                }
+            return scored
+
+        needs_samples = any((case["id"], label) not in generated for case in pending for label, _ in models)
+        lifecycle = replay_sampler if replay_sampler and needs_samples else nullcontext(tuned_model)
+        if baseten_lifecycle is not None and pending:
+            lifecycle = baseten_lifecycle
+        state_path = output_dir / "evaluation-state.json"
+        _json_dump(state_path, {"status": "running", "completed": len(results), "total": len(cases)})
+        try:
+            with lifecycle as tuned_route, ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = []
+                errors = []
+                try:
+                    for case in pending:
+                        futures.append(executor.submit(score_case, case))
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            errors.append(exc)
+                            continue
+                        results.append(result)
+                        results.sort(key=lambda result: case_order[result["case"]["id"]])
+                        _jsonl_dump(results_path, results)
+                        publisher.submit(result)
+                finally:
+                    # Ctrl-C must not drain the entire queue of paid requests.
+                    for future in futures:
+                        future.cancel()
+                if errors:
+                    raise PipelineError(f"evaluation interrupted: {len(errors)} cases failed; {len(results)}/{len(cases)} saved; rerun to resume") from errors[0]
+        except BaseException:
+            _json_dump(state_path, {"status": "interrupted", "completed": len(results), "total": len(cases)})
+            raise
+        tuned_passes = sum(result["tuned"]["judgment"]["pass"] for result in results)
+        count = len(results)
+        by_case_type = {}
+        for case_type in sorted({result["case"]["case_type"] for result in results}):
             group = [result for result in results if result["case"]["case_type"] == case_type]
-            group_base = sum(result["base"]["judgment"]["pass"] for result in group)
-            group_wins = sum(
+            group_tuned = sum(result["tuned"]["judgment"]["pass"] for result in group)
+            group_count = len(group)
+            by_case_type[case_type] = {
+                "cases": group_count,
+                "tuned_passes": group_tuned,
+                "tuned_pass_rate": group_tuned / group_count,
+            }
+        summary = {
+            **plan,
+            "tuned_model": tuned_model,
+            "judge_model": judge_model,
+            "evaluated_models": len(models),
+            "generation_calls": len(results) * len(models),
+            "judge_scoring_calls": len(results) * len(models),
+            "calibration_passed": True,
+            "calibration_checks": len(calibration),
+            "tuned_passes": tuned_passes,
+            "tuned_pass_rate": tuned_passes / count,
+            "by_case_type": by_case_type,
+            "deterministic_metrics": summarize_deterministic_metrics(
+                results,
+                [label for label, _ in models],
+            ),
+        }
+        if base_model:
+            base_passes = sum(result["base"]["judgment"]["pass"] for result in results)
+            wins = sum(
                 result["tuned"]["judgment"]["pass"] and not result["base"]["judgment"]["pass"]
-                for result in group
+                for result in results
             )
-            group_regressions = sum(
+            regressions = sum(
                 result["base"]["judgment"]["pass"] and not result["tuned"]["judgment"]["pass"]
-                for result in group
+                for result in results
             )
-            scores.update(
+            summary.update(
                 {
-                    "base_passes": group_base,
-                    "base_pass_rate": group_base / len(group),
-                    "pass_rate_delta": (scores["tuned_passes"] - group_base) / len(group),
-                    "paired_wins": group_wins,
-                    "paired_regressions": group_regressions,
-                    "paired_ties": len(group) - group_wins - group_regressions,
+                    "base_model": base_model,
+                    "base_passes": base_passes,
+                    "base_pass_rate": base_passes / count,
+                    "pass_rate_delta": (tuned_passes - base_passes) / count,
+                    "paired_wins": wins,
+                    "paired_regressions": regressions,
+                    "paired_ties": count - wins - regressions,
                 }
             )
-    summary["serving_mode"] = config["serving_mode"]
-    if baseten_endpoint is not None:
-        summary["baseten_endpoint"] = baseten_endpoint.to_dict()
-    # Persist the local summary even if LangSmith is temporarily unavailable.
-    _json_dump(output_dir / "summary.json", summary)
-    _json_dump(state_path, {"status": "publishing", "completed": len(results), "total": len(cases)})
-    try:
-        summary["langsmith"] = reporting.publish_evaluation(output_dir, config, results, cases, langsmith_context)
-    except BaseException:
-        _json_dump(state_path, {"status": "interrupted", "phase": "langsmith_publication",
-                               "completed": len(results), "total": len(cases)})
-        raise
-    _json_dump(output_dir / "summary.json", summary)
-    _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
-    return summary
+            for case_type, scores in by_case_type.items():
+                group = [result for result in results if result["case"]["case_type"] == case_type]
+                group_base = sum(result["base"]["judgment"]["pass"] for result in group)
+                group_wins = sum(
+                    result["tuned"]["judgment"]["pass"] and not result["base"]["judgment"]["pass"]
+                    for result in group
+                )
+                group_regressions = sum(
+                    result["base"]["judgment"]["pass"] and not result["tuned"]["judgment"]["pass"]
+                    for result in group
+                )
+                scores.update(
+                    {
+                        "base_passes": group_base,
+                        "base_pass_rate": group_base / len(group),
+                        "pass_rate_delta": (scores["tuned_passes"] - group_base) / len(group),
+                        "paired_wins": group_wins,
+                        "paired_regressions": group_regressions,
+                        "paired_ties": len(group) - group_wins - group_regressions,
+                    }
+                )
+        summary["serving_mode"] = config["serving_mode"]
+        if baseten_endpoint is not None:
+            summary["baseten_endpoint"] = baseten_endpoint.to_dict()
+        # Persist the local summary even if LangSmith is temporarily unavailable.
+        _json_dump(output_dir / "summary.json", summary)
+        _json_dump(state_path, {"status": "publishing", "completed": len(results), "total": len(cases)})
+        try:
+            summary["langsmith"] = publisher.close()
+        except BaseException:
+            _json_dump(state_path, {"status": "interrupted", "phase": "langsmith_publication",
+                                   "completed": len(results), "total": len(cases)})
+            raise
+        _json_dump(output_dir / "summary.json", summary)
+        _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
+        return summary
+    finally:
+        # Includes calibration failures, Ctrl-C, and provider cleanup failures.
+        # Preserve the original exception if publication also needs a retry.
+        active_error = sys.exc_info()[0] is not None
+        try:
+            publisher.close()
+        except Exception as exc:
+            if not active_error:
+                raise
+            print(f"LangSmith publication pending: {exc}", file=sys.stderr)

@@ -134,6 +134,13 @@ class MemoryClient(Client):
             self.feedback_store.append(item)
         return item
 
+    def update_feedback(self, feedback_id, *, score=None, **kwargs):
+        for item in self.feedback_store:
+            if str(item.id) == str(feedback_id):
+                item.score = score
+                return
+        raise LangSmithNotFoundError("feedback missing")
+
     def list_feedback(self, *, run_ids=None, **kwargs):
         ids = {str(run_id) for run_id in run_ids}
         return iter(item for item in self.feedback_store if str(item.run_id) in ids)
@@ -261,7 +268,8 @@ def toy_chat(calls):
     return chat
 
 
-def test_publication_attaches_child_and_root_feedback_and_resumes(prepared, tmp_path):
+def test_publication_attaches_child_and_root_feedback_and_resumes(prepared, tmp_path, monkeypatch):
+    monkeypatch.setattr(reporting.BackgroundPublisher, "batch_size", 1)
     data, manifest, client = prepared
     calls = []
     output = tmp_path / "eval"
@@ -498,7 +506,6 @@ def test_sampler_publication_failure_resumes_after_cleanup_without_inference(pre
     original_feedback = client.create_feedback
 
     def feedback(*args, **kwargs):
-        assert events[-1] == "closed"
         return original_feedback(*args, **kwargs)
 
     monkeypatch.setattr(client, "create_feedback", feedback)
@@ -711,3 +718,205 @@ def test_legacy_experiment_names_survive_interrupted_publication(prepared, tmp_p
     for project in client.projects.values():
         role = project.metadata["model_role"]
         assert project.name == f"smithtune-{role}-{receipt['evaluation_id']}"
+
+
+@pytest.mark.parametrize("prepared", ["fireworks", "baseten"], indirect=True)
+def test_comparison_and_paired_results_are_visible_before_next_action_finishes(prepared, tmp_path, monkeypatch, capsys):
+    from threading import Event
+
+    data, manifest, client = prepared
+    events = []
+    sampler = ReplaySampler(dataset._model_from_manifest(manifest).provider, events)
+    output = tmp_path / "streaming"
+    paired_feedback = Event()
+    generate, feedback = sampler.generate, client.create_feedback
+    calls = 0
+    monkeypatch.setattr(reporting.BackgroundPublisher, "batch_size", 1)
+    monkeypatch.setattr(reporting.BackgroundPublisher, "interval", 0)
+
+    def sample(*args):
+        nonlocal calls
+        assert len(client.projects) == 2
+        receipt = _load_json(output / "langsmith-experiments.json")
+        assert len(parse_qs(urlsplit(receipt["comparison_url"]).query)["selectedSessions"][0].split(",")) == 2
+        calls += 1
+        if calls == 3:
+            # One complete pair must publish while this next model call is waiting.
+            assert paired_feedback.wait(5), "publication blocked behind generation"
+            roots = [run for run in client.runs_store.values() if not run.parent_run_id]
+            assert len(roots) == 2
+            assert all(run.outputs["completed_actions"] == 1 and run.outputs["status"] == "partial" for run in roots)
+        return generate(*args)
+
+    def upload(*args, **kwargs):
+        result = feedback(*args, **kwargs)
+        project = client.read_project(project_id=kwargs["session_id"])
+        if kwargs["key"] == "trajectory_teacher_agreement" and project.metadata["model_role"] == "tuned":
+            paired_feedback.set()
+        return result
+
+    monkeypatch.setattr(sampler, "generate", sample)
+    monkeypatch.setattr(client, "create_feedback", upload)
+    summary = evaluation.run_replay_evaluation(data, output, "tuned", "judge", base_model="base",
+        chat=toy_chat([]), replay_sampler=sampler, concurrency=1, confirm=True)
+    assert "LangSmith comparison:" in capsys.readouterr().err
+    assert events[-1] == "closed"
+    assert summary["langsmith"]["comparison_url"]
+    receipt = _load_json(output / "langsmith-experiments.json")
+    assert receipt["status"] == "complete"
+    assert receipt["completed"] == receipt["total"]
+
+
+def test_incremental_conversation_average_updates_without_duplicate_children_or_scores(prepared, tmp_path):
+    data, _, client = prepared
+    source = tmp_path / "source"
+    evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
+    rows = _load_jsonl(source / "results.jsonl")[:2]
+    assert rows[0]["case"]["example_id"] == rows[1]["case"]["example_id"]
+    rows[1]["tuned"]["judgment"] = {"pass": False, "reason": "second action fails"}
+    output = tmp_path / "incremental"
+    config, cases = _load_json(source / "evaluation-config.json"), _load_jsonl(source / "cases.jsonl")
+    context = evaluation.preflight_langsmith(data)
+    publisher = reporting.EvaluationPublisher(output, config, cases, context, rows)
+    publisher.start()
+    publisher.publish(rows[:1])
+    project_id = publisher.receipt["experiments"]["tuned"]["id"]
+    root = next(client.list_runs(project_id=project_id, is_root=True))
+    score = next(client.list_feedback(run_ids=[root.id]))
+    first_score_id = score.id
+    assert root.outputs["status"] == "partial"
+    assert score.score == 1
+    initial_child = next(run for run in client.list_runs(project_id=project_id) if run.parent_run_id)
+    batches_before = len(client.run_batches)
+    publisher.publish(rows)
+    root = client.read_run(root.id)
+    assert root.outputs["status"] == "complete"
+    assert root.outputs["completed_actions"] == root.outputs["total_actions"] == 2
+    score = next(client.list_feedback(run_ids=[root.id]))
+    assert score.id == first_score_id
+    assert score.score == .5
+    assert str(initial_child.id) not in {item for batch in client.run_batches[batches_before:] for item in batch}
+    before = (len(client.runs_store), len(client.feedback_store), len(client.run_batches))
+    # A fresh writer reconciles partial remote results without regressing the root.
+    reporting.publish_evaluation(output, config, rows, cases, context)
+    assert before == (len(client.runs_store), len(client.feedback_store), len(client.run_batches))
+    assert _load_json(output / "langsmith-experiments.json")["status"] == "partial"
+
+
+def test_interrupt_flushes_saved_pairs_and_resumes_the_same_experiments(prepared, tmp_path, monkeypatch):
+    data, _, client = prepared
+    output = tmp_path / "interrupted"
+    original = evaluation.as_completed
+
+    def interrupt(futures):
+        yield next(original(futures))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(evaluation, "as_completed", interrupt)
+    kwargs = dict(base_model="base", chat=toy_chat([]), concurrency=1, confirm=True)
+    with pytest.raises(KeyboardInterrupt):
+        evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    receipt = _load_json(output / "langsmith-experiments.json")
+    saved = _load_jsonl(output / "results.jsonl")
+    assert len(saved) == receipt["completed"] == 1
+    assert receipt["status"] == "partial"
+    assert len(client.projects) == 2
+    assert len(client.feedback_store) == 4  # action + conversation for each model
+    ids = set(client.runs_store)
+    monkeypatch.setattr(evaluation, "as_completed", original)
+    summary = evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    assert summary["langsmith"]["comparison_url"] == receipt["comparison_url"]
+    assert len(client.projects) == 2
+    assert ids <= client.runs_store.keys()
+
+
+def test_slow_publication_does_not_block_generation_and_close_is_bounded(prepared, tmp_path, monkeypatch):
+    from threading import Event
+
+    data, _, client = prepared
+    entered, release = Event(), Event()
+    output = tmp_path / "slow"
+    original = reporting.EvaluationPublisher.publish
+    original_close = reporting.BackgroundPublisher.close
+    publisher_instance = []
+
+    def slow_publish(self, rows):
+        if rows:
+            entered.set()
+            assert release.wait(5)
+        return original(self, rows)
+
+    def close(self):
+        publisher_instance.append(self)
+        assert entered.wait(5)
+        assert len(_load_jsonl(output / "results.jsonl")) == len(_load_jsonl(output / "cases.jsonl"))
+        return original_close(self)
+
+    monkeypatch.setattr(reporting.EvaluationPublisher, "publish", slow_publish)
+    monkeypatch.setattr(reporting.BackgroundPublisher, "close", close)
+    monkeypatch.setattr(reporting.BackgroundPublisher, "close_timeout", .01)
+    try:
+        with pytest.raises(PipelineError, match="publication is still pending"):
+            evaluation.run_replay_evaluation(data, output, "tuned", "judge", chat=toy_chat([]), confirm=True)
+        receipt = _load_json(output / "langsmith-experiments.json")
+        with pytest.raises(PipelineError, match="another smithtune operation"):
+            reporting.BackgroundPublisher(output, _load_json(output / "evaluation-config.json"),
+                _load_jsonl(output / "cases.jsonl"), evaluation.preflight_langsmith(data), [])
+    finally:
+        release.set()
+        for publisher in publisher_instance:
+            publisher.thread.join(5)
+            assert not publisher.thread.is_alive()
+    # The stopped worker must not overwrite receipts after returning to the user.
+    assert _load_json(output / "langsmith-experiments.json") == receipt
+    assert client.runs_store == {}
+
+
+def test_lost_running_average_update_resumes_without_duplicate_feedback(prepared, tmp_path, monkeypatch):
+    data, _, client = prepared
+    source = tmp_path / "source"
+    evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
+    rows = _load_jsonl(source / "results.jsonl")[:2]
+    rows[1]["tuned"]["judgment"] = {"pass": False, "reason": "second action fails"}
+    config, cases = _load_json(source / "evaluation-config.json"), _load_jsonl(source / "cases.jsonl")
+    context = evaluation.preflight_langsmith(data)
+    output = tmp_path / "interrupted-score"
+    publisher = reporting.EvaluationPublisher(output, config, cases, context, rows)
+    publisher.start()
+    publisher.publish(rows[:1])
+    update = client.update_feedback
+
+    def lost_response(*args, **kwargs):
+        update(*args, **kwargs)
+        raise ConnectionError("accepted update but lost response")
+
+    monkeypatch.setattr(client, "update_feedback", lost_response)
+    with pytest.raises(PipelineError, match="feedback_upload"):
+        publisher.publish(rows)
+    count = len(client.feedback_store)
+    monkeypatch.setattr(client, "update_feedback", update)
+    reporting.publish_evaluation(output, config, rows, cases, context)
+    project_id = publisher.receipt["experiments"]["tuned"]["id"]
+    root = next(client.list_runs(project_id=project_id, is_root=True))
+    assert next(client.list_feedback(run_ids=[root.id])).score == .5
+    assert len(client.feedback_store) == count
+
+
+@pytest.mark.parametrize("prepared", ["baseten"], indirect=True)
+def test_completed_resume_cleans_up_before_experiment_setup(prepared, tmp_path, monkeypatch):
+    from test_baseten_evaluation import endpoint
+
+    data, _, _ = prepared
+    output = tmp_path / "completed"
+    kwargs = dict(chat=toy_chat([]), confirm=True, baseten_endpoint=endpoint())
+    evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    cleaned = []
+
+    def unavailable(*args):
+        assert cleaned == [True]
+        raise PipelineError("experiment creation unavailable")
+
+    monkeypatch.setattr(reporting, "BackgroundPublisher", unavailable)
+    with pytest.raises(PipelineError, match="experiment creation unavailable"):
+        evaluation.run_replay_evaluation(data, output, "tuned", "judge",
+            baseten_cleanup=lambda: cleaned.append(True), **kwargs)

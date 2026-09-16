@@ -461,10 +461,10 @@ train --evaluate
   +-- train, validate, and save a checkpoint after each epoch
   +-- select the epoch with the lowest validation loss
   +-- open samplers for that checkpoint and the base model
+  +-- create experiments and show the comparison link
   +-- sample base and tuned responses to the same test cases
-  +-- score and save results
-  +-- clean up sampler resources
-  +-- publish results and return LangSmith experiment links
+  +-- score, save, and publish completed comparisons during replay
+  +-- clean up sampler resources and finish pending publication
 ```
 
 You do not write separate replay examples. The CLI makes a case before each
@@ -534,8 +534,9 @@ when comparing both models, or one experiment when evaluating only a tuned endpo
 Names follow `smithtune-base-<short-model-name>-<evaluation-id>` and
 `smithtune-tuned-<short-model-name>-<same-evaluation-id>`. Both use the base-model
 name; exact model and checkpoint identifiers remain in metadata.
-Open the single returned `langsmith.comparison_url` to view base and tuned results
-side by side on the original dataset's test split. For tuned-only evaluation,
+The CLI prints one comparison link before generation starts. Open it to watch
+completed results appear side by side on the original dataset's test split.
+For tuned-only evaluation,
 the same link opens that experiment. Each conversation has a root run, with a
 child LLM run for each generated action. Experiment metadata identifies the provider and whether
 predictions came from a sampler or deployed endpoint. When a saved training run
@@ -557,11 +558,23 @@ LangSmith's pinned dataset version is verified before paid work. For older
 prepared data, rerun `prepare --no-fetch` with its original settings to register
 the splits first. `plan` and `eval-plan` remain local previews.
 
-Results are saved before upload, and owned samplers or temporary serving are
-closed before publication. If uploading fails, repeat standalone `evaluate` with
-the same directories and settings to publish saved results without repeating
-inference. Keep the local files for recovery. Run uploads and resume checks use
-batches and use the LangSmith SDK's native retries for rate limits, transient
+Each completed action comparison is saved locally, then queued for background
+publication. The publisher sends up to 10 comparisons per batch, starting with
+the first completed pair and then every five seconds or when a batch fills.
+Each batch includes both models. Conversation outputs show completed and total
+actions; their running average includes only completed judgments. Refresh the
+comparison view to see new results. The final JSON also contains the same
+`langsmith.comparison_url`.
+
+Publication retries and indexing waits do not block model workers. If publication
+fails, evaluation continues saving results locally and reports the upload failure.
+On completion or Ctrl-C, the publisher gets up to 75 seconds to flush saved results;
+model workers and owned serving resources still follow their normal cleanup.
+If publication remains pending, repeat standalone `evaluate` with the same
+directories and settings. Completed predictions and judgments are reused;
+unfinished cases still require evaluation. Keep the local files for recovery.
+Run uploads and resume checks use batches and the LangSmith SDK's native retries
+for rate limits, transient
 server errors, and connection failures. Errors include the request method,
 endpoint, status, and valid `Retry-After` timing. Known rate/usage-limit messages
 are shown; other response bodies are omitted. Publication errors are also
