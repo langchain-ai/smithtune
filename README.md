@@ -39,6 +39,9 @@ Follow each tool's installation and authentication instructions, then run
 Run from a writable directory. Data defaults to `./data/`; use `--data-dir` to
 choose another location.
 
+Commands show a music-note spinner and elapsed time in interactive terminals.
+When output is redirected, they print a plain status line; JSON results stay on stdout.
+
 Configure credentials in your environment:
 
 | Task | Variable |
