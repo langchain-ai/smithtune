@@ -166,15 +166,18 @@ def prepare_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     *,
+    split: str = "test",
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_context_limit: int | None = None,
 ) -> dict[str, Any]:
-    """Build model-ready replay cases from the untouched test split."""
+    """Build replay cases from validation or the untouched test split."""
+    if split not in ("validation", "test"):
+        raise PipelineError("replay split must be validation or test")
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
     if not isinstance(manifest, dict):
         raise PipelineError("prepared manifest is not an object")
-    if _prepared_split(manifest)["test"] < 1:
-        raise PipelineError("prepared dataset has no test rows")
+    if _prepared_split(manifest)[split] < 1:
+        raise PipelineError(f"prepared dataset has no {split} rows")
     model = _model_from_manifest(manifest)
     if baseten_endpoint is not None:
         baseten_endpoint.validate()
@@ -187,7 +190,7 @@ def prepare_replay_evaluation(
         model = _require_prepared_provider(manifest, "baseten")
     global_contract = _prepared_inference_contract(data_dir, manifest)
     example_contracts = _prepared_example_contracts(data_dir, manifest)
-    test_rows = _load_jsonl(data_dir / "prepared" / "test.jsonl")
+    rows = _load_jsonl(data_dir / "prepared" / f"{split}.jsonl")
     conversion = manifest.get("conversion", {})
     if not isinstance(conversion, dict):
         raise PipelineError("prepared manifest has an invalid conversion summary")
@@ -196,13 +199,13 @@ def prepare_replay_evaluation(
         raise PipelineError("prepared manifest has an invalid reasoning policy")
     has_reasoning = any(
         message.get("reasoning_content")
-        for row in test_rows for message in row["messages"]
+        for row in rows for message in row["messages"]
     )
     if has_reasoning:
         if reasoning_policy == "omit":
-            raise PipelineError("prepared test rows contain reasoning despite reasoning_policy='omit'; prepare again")
+            raise PipelineError(f"prepared {split} rows contain reasoning despite reasoning_policy='omit'; prepare again")
         validate_reasoning_support(model)
-    cases = build_replay_cases(test_rows, max_points_per_trajectory)
+    cases = build_replay_cases(rows, max_points_per_trajectory)
     for case in cases:
         contract = _case_contract(case, global_contract, example_contracts)
         if contract is None and (case["case_type"] == "tool_call" or case["tools"]):
@@ -220,10 +223,11 @@ def prepare_replay_evaluation(
     context_options = {"max_seq_len": baseten_context_limit} if baseten_context_limit else {}
     accepted, rejected = validate_replay_context(cases, model, max_output_tokens, **context_options)
     if not accepted:
-        raise PipelineError("the test split contains no usable assistant replay cases")
+        raise PipelineError(f"the {split} split contains no usable assistant replay cases")
     case_types = Counter(case["case_type"] for case in accepted)
     plan = {
-        "test_trajectories": len(test_rows),
+        "split": split,
+        f"{split}_trajectories": len(rows),
         "cases": len(accepted),
         "case_types": dict(sorted(case_types.items())),
         "rejected": len(rejected),
@@ -547,6 +551,8 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
+    split: str = "test",
+    prepared_replay_dir: Path | None = None,
     fireworks_sampler: Any | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_lifecycle: AbstractContextManager[str] | None = None,
@@ -559,6 +565,8 @@ def run_replay_evaluation(
 ) -> dict[str, Any]:
     """Score tuned next messages and optionally compare a base model."""
     _require_confirm(confirm, "model and judge inference")
+    if split not in ("validation", "test"):
+        raise PipelineError("replay split must be validation or test")
     if baseten_endpoint is not None:
         baseten_endpoint.validate()
         if fireworks_sampler is not None:
@@ -587,6 +595,9 @@ def run_replay_evaluation(
         models.insert(0, ("base", base_model))
     config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
               "serving_mode": "temporary" if baseten_lifecycle is not None else ("serverless" if fireworks_sampler else "existing")}
+    # Keep existing test replay caches compatible.
+    if split != "test":
+        config["split"] = split
     if judge_endpoint is not None:
         config["judge_endpoint"] = judge_endpoint
     if baseten_endpoint is not None:
@@ -615,17 +626,37 @@ def run_replay_evaluation(
                 raise PipelineError("existing replay results use different serving routes; use a new output directory")
     if (output_dir / "generations.jsonl").exists() and not config_path.exists():
         raise PipelineError("saved generations have no evaluation settings; use a new output directory")
-    plan = prepare_replay_evaluation(
-        data_dir,
-        output_dir,
-        max_points_per_trajectory,
-        max_output_tokens,
-        baseten_endpoint=baseten_endpoint,
-    )
+    if prepared_replay_dir is None:
+        plan = prepare_replay_evaluation(
+            data_dir, output_dir, max_points_per_trajectory, max_output_tokens,
+            split=split, baseten_endpoint=baseten_endpoint,
+        )
+    else:
+        # Freeze validation inputs once before training, including case order.
+        plan = _load_json(prepared_replay_dir / "plan.json")
+        if (plan.get("split") != split or plan.get("max_output_tokens") != max_output_tokens
+                or plan.get("max_points_per_trajectory") != max_points_per_trajectory):
+            raise PipelineError("frozen replay cases use different evaluation settings")
+        frozen_cases = _load_jsonl(prepared_replay_dir / "cases.jsonl")
+        if not frozen_cases:
+            raise PipelineError("frozen replay cases are empty")
+        if (output_dir / "cases.jsonl").exists() and _load_jsonl(output_dir / "cases.jsonl") != frozen_cases:
+            raise PipelineError("existing replay results use different cases")
+        _jsonl_dump(output_dir / "cases.jsonl", frozen_cases)
+        _json_dump(output_dir / "plan.json", plan)
+        _json_dump(output_dir / "rejected.json", _load_json(prepared_replay_dir / "rejected.json"))
     cases = _load_jsonl(output_dir / "cases.jsonl")
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
     global_contract = _prepared_inference_contract(data_dir, manifest)
     example_contracts = _prepared_example_contracts(data_dir, manifest)
+    if prepared_replay_dir is not None:
+        if plan["training_base_model"] != _model_from_manifest(manifest).base_model:
+            raise PipelineError("prepared model differs from frozen replay cases")
+        for case in cases:
+            contract = _case_contract(case, global_contract, example_contracts)
+            if (case.get("contract_sha256") != (contract.contract_sha256 if contract else None)
+                    or case["tools"] != (list(contract.tools) if contract else [])):
+                raise PipelineError("prepared tool schemas differ from frozen replay cases")
     chat_fn = chat or _chat_completion
     candidate_fn = (
         partial(_baseten_chat_completion, endpoint=baseten_endpoint)
@@ -679,10 +710,11 @@ def run_replay_evaluation(
     pending = [case for case in cases if case["id"] not in completed]
     if baseten_cleanup is not None and not pending:
         baseten_cleanup()
+    calibration_dir = prepared_replay_dir or output_dir
     if pending:
-        calibration = ensure_judge_calibration(cases, output_dir, judge_model, chat_fn)
+        calibration = ensure_judge_calibration(cases, calibration_dir, judge_model, chat_fn)
     else:
-        calibration = _load_jsonl(output_dir / "calibration.jsonl")
+        calibration = _load_jsonl(calibration_dir / "calibration.jsonl")
     if not calibration or any(result["actual"] != result["expected"] for result in calibration):
         raise PipelineError("judge failed positive or negative calibration controls")
     case_order = {case["id"]: index for index, case in enumerate(cases)}

@@ -174,9 +174,9 @@ class ServerlessTraining:
             raise PipelineError("Fireworks validation returned no finite loss")
         self.runner.append_metrics(self.step, {"eval/loss": loss, "eval/epoch": epoch})
         self.checkpoints.save(f"epoch-{epoch}", resumable=True, promotable=True, data_consumed=self.consumed)
-        result = {"job_id": self.job_id, "steps": self.step, "eval_loss": loss,
+        result = {"job_id": self.job_id, "steps": self.step, "eval_loss": loss, "epoch": epoch,
                   **_epoch_checkpoints(self.job_id)}
-        self.history.append({**result, "epoch": epoch})
+        self.history.append(result)
         _json_dump(self.run_dir / "epochs.json", self.history)
         return result
 
@@ -184,6 +184,10 @@ class ServerlessTraining:
         """Restore the selected epoch in this session before publishing weights."""
         self.client.load_state(checkpoint)
         return self.client.save_weights_for_sampler("replay").path
+
+    def snapshot_current(self, epoch: int) -> str:
+        """Publish current weights without resetting the optimizer between epochs."""
+        return self.client.save_weights_for_sampler(f"validation-epoch-{epoch}").path
 
     def complete(self):
         from training.utils.runner_state import write_completed

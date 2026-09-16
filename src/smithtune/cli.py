@@ -51,16 +51,17 @@ def _training_replay(args):
     values = {key: getattr(args, key) for key in (
         "judge_model", "concurrency", "max_points_per_trajectory", "max_output_tokens",
     )}
-    if not args.evaluate:
+    if not (args.evaluate or args.validation_replay):
         defaults = {"judge_model": replay_evaluation.DEFAULT_JUDGE_MODEL,
                     "concurrency": replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY,
                     "max_points_per_trajectory": None, "max_output_tokens": DEFAULT_REPLAY_MAX_TOKENS}
         if values != defaults:
-            raise PipelineError("replay options require --evaluate")
+            raise PipelineError("replay options require --evaluate or --validation-replay")
         return {}
     if args.provider != "fireworks":
-        raise PipelineError("train --evaluate currently requires --provider fireworks")
-    return {"replay": values}
+        raise PipelineError("training replay requires --provider fireworks")
+    return {**({"replay": values} if args.evaluate else {}),
+            **({"validation_replay": values} if args.validation_replay else {})}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -192,6 +193,7 @@ def _parser() -> argparse.ArgumentParser:
     baseten_defaults = BasetenSFTSettings()
     for command in (plan, training):
         command.add_argument("--evaluate", action="store_true", help="compare base and best checkpoint with the live Fireworks serverless sampler")
+        command.add_argument("--validation-replay", action="store_true", help="select checkpoints and stop training by validation replay after each epoch (Fireworks only)")
         _add_replay_options(command)
         shared = command.add_argument_group(
             "Shared training options", "Supported by both Fireworks and Baseten.",
@@ -206,7 +208,7 @@ def _parser() -> argparse.ArgumentParser:
         )
         shared.add_argument(
             "--early-stopping-min-delta", type=float, default=common_defaults.early_stopping_min_delta,
-            help="minimum validation-loss improvement (default: %(default)s)",
+            help="minimum validation-loss improvement, or absolute pass-rate improvement with --validation-replay (default: %(default)s)",
         )
         shared.add_argument(
             "--learning-rate", type=float, default=common_defaults.learning_rate,

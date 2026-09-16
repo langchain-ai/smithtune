@@ -227,12 +227,13 @@ def run_early_stopping(
     settings: SFTSettings,
     run_epoch: Callable[[int, str | None], dict[str, Any]],
     initial_checkpoint: str | None = None,
+    *, validation_replay: bool = False,
 ) -> dict[str, Any]:
-    """Run epochs and select the checkpoint with the best validation loss."""
+    """Select by loss, or by replay pass rate with loss as the tie-breaker."""
     settings.validate()
     history: list[dict[str, Any]] = []
     best: dict[str, Any] | None = None
-    patience_loss = math.inf
+    patience_score = -math.inf
     stale_epochs = 0
     checkpoint = initial_checkpoint
     for epoch in range(1, settings.max_epochs + 1):
@@ -247,13 +248,22 @@ def run_early_stopping(
         if not isinstance(result.get("resume_checkpoint"), str):
             raise PipelineError(f"epoch {epoch} returned no resume checkpoint")
         result = {**result, "epoch": epoch, "eval_loss": float(loss)}
+        score = -float(loss)
+        if validation_replay:
+            score = result.get("validation_replay_pass_rate")
+            if (not isinstance(score, (int, float)) or isinstance(score, bool)
+                    or not math.isfinite(score) or not 0 <= score <= 1):
+                raise PipelineError(f"epoch {epoch} returned no complete validation replay score")
         history.append(result)
         checkpoint = result["resume_checkpoint"]
-        if best is None or result["eval_loss"] < best["eval_loss"]:
+        if best is None or (
+            (score, -result["eval_loss"]) >
+            (best["validation_replay_pass_rate"] if validation_replay else -best["eval_loss"], -best["eval_loss"])
+        ):
             best = result
         # Patience tracks significant improvement independently of checkpoint selection.
-        if result["eval_loss"] < patience_loss - settings.early_stopping_min_delta:
-            patience_loss = result["eval_loss"]
+        if score > patience_score + settings.early_stopping_min_delta:
+            patience_score = score
             stale_epochs = 0
         else:
             stale_epochs += 1
@@ -264,6 +274,7 @@ def run_early_stopping(
         "epochs": history,
         "best": best,
         "stopped_early": len(history) < settings.max_epochs,
+        "selection_metric": "validation_replay_pass_rate" if validation_replay else "eval_loss",
     }
 
 
@@ -351,6 +362,7 @@ class FireworksProvider:
         run_id: str,
         settings: SFTSettings,
         *, replay: dict[str, Any] | None = None,
+        validation_replay: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         settings.validate()
         manifest = _load_json(data_dir / "prepared" / "manifest.json")
@@ -408,27 +420,42 @@ class FireworksProvider:
             "cost": "serverless token charges at the current account rate; resolve in the Fireworks console before confirmation",
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
-        if replay is not None:
+        if validation_replay is not None:
+            value["evaluation"] = (
+                "validation loss and replay after each epoch; highest replay pass rate selects the checkpoint, "
+                "with lower loss breaking ties; replay improvement controls early stopping; test is reserved for final replay"
+            )
+        value["selection_metric"] = "validation_replay_pass_rate" if validation_replay is not None else "eval_loss"
+        for split_name, options in (("validation", validation_replay), ("test", replay)):
+            if options is None:
+                continue
             from smithtune.evaluation import prepare_replay_evaluation
 
-            if replay["concurrency"] < 1:
+            if options["concurrency"] < 1:
                 raise PipelineError("evaluation concurrency must be positive")
             with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
                 preview = prepare_replay_evaluation(
-                    data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
+                    data_dir, Path(temporary), options["max_points_per_trajectory"], options["max_output_tokens"],
+                    split=split_name,
                 )
-            value["replay"] = {**preview, **replay, "serving_mode": "serverless", "evaluated_models": 2}
+            key = "validation_replay" if split_name == "validation" else "replay"
+            model_count = 1 if split_name == "validation" else 2
+            repeats = settings.max_epochs if split_name == "validation" else 1
+            value[key] = {**preview, **options, "serving_mode": "serverless", "evaluated_models": model_count,
+                          "maximum_generation_calls": preview["cases"] * model_count * repeats,
+                          "maximum_judge_scoring_calls": preview["cases"] * model_count * repeats}
         return value
 
     def train(
         self, data_dir: Path, run_dir: Path, run_id: str, settings: SFTSettings,
         *, confirm: bool, init_from_checkpoint: str | None,
         replay: dict[str, Any] | None = None,
+        validation_replay: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        _require_confirm(confirm, "training and replay" if replay is not None else "training")
+        _require_confirm(confirm, "training and replay" if replay is not None or validation_replay is not None else "training")
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
-        plan = self.plan(data_dir, run_id, settings, replay=replay)
+        plan = self.plan(data_dir, run_id, settings, replay=replay, validation_replay=validation_replay)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
         model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
@@ -442,16 +469,18 @@ class FireworksProvider:
         _set_skill_session()
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
         _json_dump(run_dir / "plan.json", plan)
-        if replay is not None:
+        for split_name, options in (("validation", validation_replay), ("test", replay)):
+            if options is None:
+                continue
             from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials
             from smithtune.inference import _chat_completion
 
-            validate_judge_credentials(replay["judge_model"])
+            directory = run_dir / ("validation-replay" if split_name == "validation" else "replay")
+            validate_judge_credentials(options["judge_model"])
             prepare_replay_evaluation(
-                data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
+                data_dir, directory, options["max_points_per_trajectory"], options["max_output_tokens"], split=split_name,
             )
-            ensure_judge_calibration(_load_jsonl(run_dir / "replay" / "cases.jsonl"),
-                                     run_dir / "replay", replay["judge_model"], _chat_completion)
+            ensure_judge_calibration(_load_jsonl(directory / "cases.jsonl"), directory, options["judge_model"], _chat_completion)
         cfg = sft_loop.Config(
             log_path=str(run_dir), base_model=model.base_model,
             dataset=str(data_dir / "prepared" / "train.jsonl"),
@@ -471,9 +500,46 @@ class FireworksProvider:
         )
         _write_run_md(run_dir / "run.md", plan, "job_running", "wait for training and replay")
         result = None
+        epoch_records = []
         try:
             with ServerlessTraining(cfg, run_dir) as session:
-                result = run_early_stopping(settings, session.run_epoch, init_from_checkpoint)
+                def run_epoch(epoch, checkpoint):
+                    record = session.run_epoch(epoch, checkpoint)
+                    if validation_replay is None:
+                        return record
+                    from smithtune.evaluation import run_replay_evaluation
+                    from smithtune.fireworks_sampling import FireworksReplaySampler
+
+                    directory = run_dir / "validation-replay" / f"epoch-{epoch}"
+                    epoch_records.append(record)
+                    record.update(epoch=epoch, validation_replay={"status": "running", "output_dir": str(directory)})
+                    _json_dump(run_dir / "epochs.json", epoch_records)
+                    try:
+                        sampler = FireworksReplaySampler(
+                            model, record["resume_checkpoint"], directory, service=session.service,
+                            snapshot=session.snapshot_current(epoch), lora_rank=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+                        )
+                        summary = run_replay_evaluation(
+                            data_dir, directory, record["resume_checkpoint"],
+                            split="validation", prepared_replay_dir=run_dir / "validation-replay",
+                            fireworks_sampler=sampler, confirm=True, **validation_replay,
+                        )
+                    except BaseException as exc:
+                        record["validation_replay"]["status"] = "interrupted"
+                        _json_dump(run_dir / "epochs.json", epoch_records)
+                        if isinstance(exc, Exception):
+                            raise PipelineError(
+                                f"validation replay interrupted after epoch {epoch}; checkpoint saved in epochs.json; "
+                                f"completed responses and scores are in {directory}"
+                            ) from exc
+                        raise
+                    record["validation_replay"].update(status="completed", cases=summary["cases"], tuned_passes=summary["tuned_passes"])
+                    record["validation_replay_pass_rate"] = summary["tuned_pass_rate"]
+                    _json_dump(run_dir / "epochs.json", epoch_records)
+                    return record
+
+                result = run_early_stopping(settings, run_epoch, init_from_checkpoint,
+                                            validation_replay=validation_replay is not None)
                 _json_dump(run_dir / "epochs.json", result["epochs"])
                 _json_dump(run_dir / "result.json", result)
                 session.complete()
@@ -495,6 +561,10 @@ class FireworksProvider:
                     _json_dump(run_dir / "result.json", result)
         except BaseException:
             phase = "replay_incomplete" if result is not None else "failed"
+            if epoch_records and epoch_records[-1].get("validation_replay", {}).get("status") == "interrupted":
+                _write_run_md(run_dir / "run.md", plan, "validation_replay_interrupted",
+                              "checkpoint saved in epochs.json; inspect validation-replay for completed responses and scores")
+                raise
             _write_run_md(run_dir / "run.md", plan, phase,
                           "training completed; inspect replay results" if result is not None else "inspect status.json and metrics.jsonl")
             raise
