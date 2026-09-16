@@ -20,7 +20,7 @@ from smithtune.dataset import _source_key, validate_trajectories
 from smithtune.dataset_artifacts import load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
-from smithtune.triage_judges import FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, rubric_text, validate_judgment
+from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, rubric_text, validate_judgment
 from smithtune.triage_source import conversation_trajectories, load_snapshot, multimodal_types, snapshot, training_error
 
 
@@ -151,6 +151,10 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
                 "prefilter": "multimodal-and-provider-context-v1", "judging_unit": "conversation-v1"}
     identity["reasoning"].update({judge["model"]: FIREWORKS_REASONING[judge["model"]] for judge in config["judges"]
                                   if judge["provider"] == "fireworks" and judge["model"] in FIREWORKS_REASONING})
+    if any(judge["provider"] == "baseten" for judge in config["judges"]):
+        identity["reasoning"]["baseten"] = "none"
+        identity["reasoning"].update({judge["model"]: BASETEN_REASONING[judge["model"]] for judge in config["judges"]
+                                      if judge["provider"] == "baseten" and judge["model"] in BASETEN_REASONING})
     if runner_mode == "deepagent":
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
