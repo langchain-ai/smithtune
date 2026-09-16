@@ -14,7 +14,7 @@ import pytest
 
 from smithtune import artifacts, capabilities
 from smithtune import dataset as dataset_ops
-from smithtune import evaluation as replay
+from smithtune.evaluation import replay as replay
 from smithtune import inference as inference_transport
 from smithtune import inference_contract
 from smithtune import cli as pipeline

@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from smithtune import cli, evaluation, rendering
+from smithtune import cli, rendering
+from smithtune.evaluation import replay as evaluation
 from smithtune.providers import baseten, baseten_sampling
 from smithtune.providers.base import PipelineError
 from test_baseten_evaluation import replay_data

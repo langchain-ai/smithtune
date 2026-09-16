@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from smithtune import dataset
-from smithtune import evaluation
+from smithtune.evaluation import replay as evaluation
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_jsonl
 from smithtune.inference_contract import ContractError, TOOL_MERGE_POLICY, contract_from_runs, json_sha256
 from smithtune.providers import fireworks

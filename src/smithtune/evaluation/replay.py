@@ -16,7 +16,7 @@ from threading import Lock
 from typing import Any
 
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl, _utc_now
-from smithtune import langsmith_evaluation as reporting
+from smithtune.evaluation import langsmith as reporting
 from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
     _prepared_example_contracts, _prepared_split,

@@ -411,7 +411,7 @@ class FireworksProvider:
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
         if replay is not None:
-            from smithtune.evaluation import prepare_replay_evaluation
+            from smithtune.evaluation.replay import prepare_replay_evaluation
 
             if replay["concurrency"] < 1:
                 raise PipelineError("evaluation concurrency must be positive")
@@ -445,7 +445,7 @@ class FireworksProvider:
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
         _json_dump(run_dir / "plan.json", plan)
         if replay is not None:
-            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials, preflight_langsmith
+            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials, preflight_langsmith
             from smithtune.inference import _chat_completion
 
             validate_judge_credentials(replay["judge_model"])
@@ -481,7 +481,7 @@ class FireworksProvider:
                 _json_dump(run_dir / "result.json", result)
                 session.complete()
                 if replay is not None:
-                    from smithtune.evaluation import run_replay_evaluation, training_metadata
+                    from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
                     from smithtune.providers.fireworks_sampling import FireworksReplaySampler
 
                     checkpoint = result["best"]["resume_checkpoint"]

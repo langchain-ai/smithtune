@@ -5,10 +5,10 @@ pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
 is maintained here, and there is no bootstrap step.
 
 Provider-specific training, sampling, and deployment modules live under
-`src/smithtune/providers/`. Shared rendering and replay orchestration stay in
-`src/smithtune/`.
+`src/smithtune/providers/`. Shared rendering stays in `src/smithtune/`; replay orchestration lives in
+`src/smithtune/evaluation/replay.py`.
 
-`langsmith_evaluation.py` publishes versioned splits, saved replay predictions,
+`evaluation/langsmith.py` publishes versioned splits, saved replay predictions,
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable
 across upload retries. Verify snapshots before paid work and release owned
 serving resources before publication. Tests marked `sdk_integration` use an

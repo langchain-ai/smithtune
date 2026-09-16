@@ -1,6 +1,6 @@
 """Versioned dataset splits and resumable LangSmith replay experiments.
 
-Inference and judging are checkpointed by evaluation.py. Publication uses those
+Inference and judging are checkpointed by replay.py. Publication uses those
 saved predictions so a reporting failure never requires another paid model call.
 """
 

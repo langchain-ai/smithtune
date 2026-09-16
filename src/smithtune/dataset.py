@@ -29,7 +29,6 @@ from smithtune.inference_contract import (
     json_sha256,
 )
 from smithtune.providers.base import ModelSpec, PipelineError, ReasoningPolicy
-from smithtune.langsmith_evaluation import synchronize_splits
 from smithtune.rendering import validate_model_context, validate_reasoning_support
 
 
@@ -1146,6 +1145,8 @@ def prepare_dataset(
             data_dir / "prepared" / "inference_contract.json",
             inference_contract.to_dict(),
         )
+    from smithtune.evaluation.langsmith import synchronize_splits
+
     manifest["langsmith"]["split_sync"] = synchronize_splits(
         data_dir, manifest, examples, enabled=sync_splits,
     )

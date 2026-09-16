@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 import pytest
 
 from smithtune import capabilities, dataset, rendering
-from smithtune import evaluation
+from smithtune.evaluation import replay as evaluation
 from smithtune import inference
 from smithtune import cli as pipeline
 from smithtune.models import resolve_prepared_model

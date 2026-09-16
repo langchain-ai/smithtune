@@ -11,7 +11,9 @@ from langsmith import Client
 from langsmith.schemas import Example, Run, TracerSession
 from langsmith.utils import LangSmithNotFoundError
 
-from smithtune import dataset, evaluation, langsmith_evaluation as reporting
+from smithtune import dataset
+from smithtune.evaluation import replay as evaluation
+from smithtune.evaluation import langsmith as reporting
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError

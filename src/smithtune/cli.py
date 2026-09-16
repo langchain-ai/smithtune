@@ -18,7 +18,7 @@ from pathlib import Path
 from smithtune import curation, dataset, triage
 from smithtune.dataset_artifacts import new_run_directory
 from smithtune.triage_source import load_snapshot, source_options
-from smithtune import evaluation as replay_evaluation
+from smithtune.evaluation import replay as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
 from smithtune.inference import ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection
 from smithtune.providers.baseten import (

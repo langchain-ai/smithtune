@@ -4,7 +4,8 @@ from functools import wraps
 
 import pytest
 
-from smithtune import dataset, evaluation
+from smithtune import dataset
+from smithtune.evaluation import replay as evaluation
 from smithtune.providers import fireworks
 
 

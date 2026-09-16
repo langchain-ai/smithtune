@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune import cli, evaluation, inference, rendering
+from smithtune import cli, inference, rendering
+from smithtune.evaluation import replay as evaluation
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import PipelineError
 from test_pipeline import loaded_contract, tool_call, write_manifest

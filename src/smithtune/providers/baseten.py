@@ -717,7 +717,7 @@ class BasetenProvider:
         }
 
         if replay is not None:
-            from smithtune.evaluation import prepare_replay_evaluation
+            from smithtune.evaluation.replay import prepare_replay_evaluation
 
             if replay["concurrency"] < 1:
                 raise PipelineError("evaluation concurrency must be positive")
@@ -753,7 +753,7 @@ class BasetenProvider:
 
         plan = self.plan(Path(data_dir), run_id, settings, replay=replay)
         if replay is not None:
-            from smithtune.evaluation import validate_judge_credentials
+            from smithtune.evaluation.replay import validate_judge_credentials
 
             validate_judge_credentials(replay["judge_model"])
         manifest, train_rows, validation_rows = _load_prepared_data(Path(data_dir))
@@ -856,7 +856,7 @@ class BasetenProvider:
         _atomic_json(run_dir / "plan.json", plan)
         if replay is not None:
             from smithtune.artifacts import _load_jsonl
-            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
+            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
             from smithtune.inference import _chat_completion
 
             preflight_langsmith(data_dir)
@@ -1218,7 +1218,7 @@ class BasetenProvider:
             raise cleanup_error
         if replay is not None:
             from smithtune.providers.baseten_sampling import BasetenReplaySampler
-            from smithtune.evaluation import run_replay_evaluation, training_metadata
+            from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
 
             try:
                 if best_sampler_uri is None:

@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from smithtune import doctor, evaluation, inference, triage_judges
+from smithtune import doctor, inference, triage_judges
+from smithtune.evaluation import replay as evaluation
 from smithtune.providers.base import PipelineError
 
 

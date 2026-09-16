@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune import cli, evaluation
+from smithtune import cli
+from smithtune.evaluation import replay as evaluation
 from smithtune.providers import fireworks_sampling as sampling
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
