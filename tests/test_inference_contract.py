@@ -72,7 +72,7 @@ def test_contract_builds_tool_aware_request_without_mutating_messages(tmp_path: 
     contract = inference_contract.load_inference_contract(path)
     original = copy.deepcopy(messages)
 
-    request = contract.build_fireworks_request(
+    request = contract.build_chat_request(
         model="accounts/fireworks/models/model",
         messages=messages,
         max_tokens=512,
@@ -94,12 +94,12 @@ def test_contract_builds_tool_aware_request_without_mutating_messages(tmp_path: 
     assert contract.system_prompt_sha256 == (SYSTEM_PROMPT_SHA256 if legacy else None)
     assert len(contract.contract_sha256) == 64
 
-    base_request = contract.build_fireworks_request(
+    base_request = contract.build_chat_request(
         model="accounts/fireworks/models/base",
         messages=messages,
         max_tokens=512,
     )
-    tuned_request = contract.build_fireworks_request(
+    tuned_request = contract.build_chat_request(
         model="accounts/example/deployments/tuned",
         messages=messages,
         max_tokens=512,

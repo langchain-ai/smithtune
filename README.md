@@ -1,7 +1,8 @@
 <h1 align="center">smithtune</h1>
 
 Fine-tune models on LangSmith trajectories with Fireworks or Baseten.
-Fireworks supports training, deployment, and replay evaluation; Baseten supports SFT checkpoints.
+Fireworks supports training, deployment, and replay evaluation. Baseten supports
+SFT checkpoints and replay evaluation through an existing dedicated endpoint.
 
 ## Setup
 
@@ -45,7 +46,7 @@ Configure credentials in your environment:
 | --- | --- |
 | Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
-| Baseten preparation and training | `BASETEN_API_KEY` |
+| Baseten preparation, training, and inference | `BASETEN_API_KEY` |
 | Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
 | Optional LangSmith gateway judging | `LANGSMITH_GATEWAY_API_KEY` |
 
@@ -318,6 +319,37 @@ The best checkpoint is selected by validation loss and recorded in `<run-dir>/re
 Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
+
+## Evaluate an existing Baseten endpoint
+
+After [deploying your Loops checkpoint](https://docs.baseten.co/loops/deploy-checkpoints),
+evaluate its dedicated chat endpoint using `BASETEN_API_KEY` and, for the default
+judge, `ANTHROPIC_API_KEY`:
+
+```bash
+smithtune evaluate \
+  --provider baseten \
+  --data-dir data/qwen3p8-27b \
+  --output-dir runs/my-sft/replay \
+  --model-id '<baseten-model-id>' \
+  --deployment-id '<baseten-deployment-id>' \
+  --tuned-model '<checkpoint-name>' \
+  --max-seq-len 32768 \
+  --confirm
+```
+
+Use data prepared with Baseten and an endpoint serving the same base model and
+compatible chat template, with tool/reasoning parsing configured for your model.
+`--tuned-model` is the served checkpoint **name**, not its globally unique ID.
+Set `--max-seq-len` to the endpoint's configured context limit; replay uses the
+lower of that limit and the preparation limit, including the output budget.
+
+Use `eval-plan` with the same data and endpoint options, without `--confirm`, to
+preview cases. Add `--base-model '<served-base-model-name>'` to compare a base
+route available on the **same endpoint**. Results go to `summary.json`; rerun
+the same command to resume. No Fireworks key is needed with an Anthropic judge.
+This path uses an existing deployment and leaves it running; manage its lifecycle
+in Baseten. Training support alone does not verify a model's serving configuration.
 
 ## Evaluate a trained model (Fireworks)
 
