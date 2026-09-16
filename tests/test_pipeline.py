@@ -1706,55 +1706,55 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
     assert result["promotable_checkpoint"].endswith(f"{run_id}-step-4-abcd1234")
 
 
-def test_mocked_training_runs_recipe_by_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from training.recipes import sft_loop
+def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import smithtune.fireworks_training as runtime
 
     metadata_calls = []
     renderer_calls = []
-
-    def model_capability(model, context):
-        metadata_calls.append((model, context))
-        return capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
-
-    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", model_capability)
-    monkeypatch.setattr(
-        fireworks, "load_training_renderer", lambda model: renderer_calls.append(model) or object(),
-    )
+    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", lambda model, context: (
+        metadata_calls.append((model, context)) or
+        capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
+    ))
+    monkeypatch.setattr(fireworks, "load_training_renderer", lambda model: renderer_calls.append(model))
     data_dir = tmp_path / "data"
     write_manifest(data_dir)
-    losses = iter([1.0, 0.7, 0.8])
-    configs = []
+    events = []
 
-    def fake_main(config):
-        configs.append(config)
-        loss = next(losses)
-        Path(config.runner.metrics_file).write_text(json.dumps({"step": 1, "eval/loss": loss}) + "\n", encoding="utf-8")
-        return {"job_id": f"job-{len(configs)}", "steps": 1}
+    class Session:
+        def __init__(self, config, run_dir):
+            self.config = config
+            assert config.epochs == 5
+            assert config.seed == 42
+            assert config.pipeline_depth == 4
 
-    monkeypatch.setattr(sft_loop, "main", fake_main)
-    monkeypatch.setattr(
-        fireworks,
-        "_epoch_checkpoints",
-        lambda job_id: {
-            "resume_checkpoint": f"account/run-{job_id}/step-1",
-            "promotable_checkpoint": f"accounts/a/trainingSessions/{job_id}/checkpoints/step-1",
-        },
-    )
+        def __enter__(self):
+            events.append("open")
+            return self
+
+        def __exit__(self, *args):
+            events.append("close")
+
+        def run_epoch(self, epoch, checkpoint):
+            events.append(epoch)
+            return {"job_id": "one-session", "steps": epoch,
+                    "eval_loss": [1.0, 0.7, 0.8][epoch - 1],
+                    "resume_checkpoint": f"account/run/epoch-{epoch}"}
+
+        def complete(self):
+            events.append("complete")
+
+    monkeypatch.setattr(runtime, "ServerlessTraining", Session)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     result = fireworks.FireworksProvider().train(
-        data_dir,
-        tmp_path / "run",
-        "run-id",
+        data_dir, tmp_path / "run", "run-id",
         fireworks.SFTSettings(max_epochs=5, early_stopping_patience=1),
-        confirm=True,
-        init_from_checkpoint=None,
+        confirm=True, init_from_checkpoint=None,
     )
-    assert len(configs) == 3
+    assert events == ["open", 1, 2, 3, "complete", "close"]
+    assert result["best"]["epoch"] == 2
+    assert len({epoch["job_id"] for epoch in result["epochs"]}) == 1
     assert metadata_calls == [(fireworks.DEFAULT_MODEL.base_model, 131_072)]
     assert renderer_calls == [fireworks.DEFAULT_MODEL]
-    assert configs[1].init_from_checkpoint == "account/run-job-1/step-1"
-    assert configs[0].base_model == fireworks.DEFAULT_MODEL.base_model
-    assert result["best"]["job_id"] == "job-2"
 
 
 def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

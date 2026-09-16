@@ -4,6 +4,13 @@ Use Python 3.12, uv, and Git. The Fireworks cookbook is a direct Git dependency,
 pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
 is maintained here, and there is no bootstrap step.
 
+`fireworks_training.py` keeps one serverless session across epochs and optional
+replay. It uses the pinned cookbook's rendering, data loader, validation,
+optimizer, and checkpoint helpers. `fireworks_sampling.py` uses the official
+Training API sampler and the same renderer for replay. When changing these
+adapters, check checkpoint selection, session cleanup, tool parsing, and replay
+recovery from saved generations.
+
 ```bash
 sfw uv sync --locked --extra test --python 3.12
 uv run --no-sync smithtune --help

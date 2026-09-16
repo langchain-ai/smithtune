@@ -405,109 +405,99 @@ serving configuration.
 
 ## Evaluate a trained model (Fireworks)
 
-`deploy` starts a serving endpoint so a model can answer requests. `evaluate`
-sends test prompts to a model and scores its answers. A trained checkpoint
-needs running compute before it can answer a prompt.
+Use the serverless sampler to compare the base model and best SFT checkpoint.
+Evaluation needs no deployment, hardware shape, or model promotion.
 
-For a temporary evaluation, let `evaluate` manage that compute:
+For training and replay in the same session:
+
+```bash
+smithtune plan --provider fireworks --data-dir data --evaluate
+smithtune train --provider fireworks --data-dir data \
+  --run-dir runs/my-sft --evaluate --confirm
+```
+
+`--evaluate` adds model and judge inference to the training run. The plan shows
+case counts, prompt tokens, and call counts. Both training and sampling use the
+official Fireworks API and incur the current serverless token charges. The judge
+uses its provider's inference rates. Repeat any custom settings on `plan` and
+`train`; a preview does not save command options for the next command.
 
 ```text
-promote -> eval-plan -> evaluate --serving-mode preemptible
-                              |
-                              +-- create temporary serving capacity
-                              +-- wait until ready
-                              +-- generate and score responses
-                              +-- save results and delete the deployment
+prepare
+  +-- train.jsonl       ~80%: training
+  +-- validation.jsonl  ~10%: checkpoint selection
+  +-- test.jsonl        ~10%: replay
+
+train --evaluate
+  +-- build replay cases from test.jsonl
+  +-- check the judge on known positive and negative examples
+  +-- open one serverless session
+  +-- train, validate, and save a checkpoint after each epoch
+  +-- select the epoch with the lowest validation loss
+  +-- load that checkpoint in the same session
+  +-- sample base and tuned responses to the same test cases
+  +-- score and save results
+  +-- close samplers and the service client
 ```
 
-**You do not run `deploy` or `undeploy` yourself for this path.** Preemptible
-capacity uses idle GPUs that Fireworks can reclaim. If that interrupts the run,
-repeat the evaluation command to finish missing cases.
+You do not write separate replay examples. The CLI makes a case before each
+visible assistant message in the test conversations. The model sees the recorded
+prefix and tool definitions. The reference is the next recorded assistant text
+or tool call. Each case starts from recorded history, including recorded tool
+results; generated tool calls are never executed.
 
-First, promote the selected checkpoint to a Fireworks model ID:
+Validation loss selects the checkpoint. Replay scores do not influence training
+or checkpoint selection. The full-trajectory triage council is a separate step
+that decides which conversations enter the dataset.
+
+For a completed Fireworks training run:
 
 ```bash
-account_id='<fireworks-account-id>'
-run_id='<run-id printed by train>'
-run_dir='<run-dir printed by train>'
-
-smithtune promote \
-  --run-dir "$run_dir" \
-  --output-model-id "$run_id" \
-  --confirm
-
-eval_shape='<full-compatible-fireworks-deployment-shape-resource>'
+smithtune eval-plan --data-dir data --run-dir runs/my-sft
+smithtune evaluate --data-dir data --run-dir runs/my-sft --confirm
 ```
 
-The deployment shape specifies compatible serving hardware. Use a shape for
-the promoted model, in the form
-`accounts/<account>/deploymentShapes/<shape>` (optionally with `/versions/<version>`).
-See [Fireworks evaluation paths](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models).
-Use the data directory from `prepare` (`data` in these examples).
-`eval-plan` previews the held-out cases and deployment settings. It does not
-start a deployment or run model inference:
+`eval-plan` builds and previews cases without opening a session or calling models.
+`evaluate` reads the best training checkpoint from `result.json`, loads it into a
+new serverless session without training steps, and uses the same sampler and
+scorer as `train --evaluate`. Base-model comparison is automatic. The saved
+LoRA rank and alpha are used when restoring the checkpoint.
 
-```bash
-smithtune eval-plan \
-  --data-dir data \
-  --output-dir "$run_dir/replay" \
-  --tuned-model "accounts/$account_id/models/$run_id" \
-  --serving-mode preemptible --account-id "$account_id" \
-  --deployment-id "$run_id-eval" --deployment-shape "$eval_shape"
-```
+Both paths support `--judge-model`, `--concurrency`, `--max-output-tokens`, and
+`--max-points-per-trajectory` (an optional cap; the default scores every assistant
+action). With `train`, these options require `--evaluate`. Results go to
+`<run-dir>/replay`; standalone evaluation can use `--output-dir` to start another
+comparison with different settings.
 
-Run `evaluate` with the same settings. It checks the judge, creates one
-temporary replica, waits for readiness, and runs the evaluation:
+Replay checks tool selection, JSON arguments, argument schemas, and reference
+arguments. A calibrated judge also scores whether each response matches the
+recorded behavior. Results include base and tuned pass rates, paired wins and
+regressions, and scores by text/tool-call case type.
 
-```bash
-smithtune evaluate \
-  --data-dir data \
-  --output-dir "$run_dir/replay" \
-  --tuned-model "accounts/$account_id/models/$run_id" \
-  --serving-mode preemptible --account-id "$account_id" \
-  --deployment-id "$run_id-eval" --deployment-shape "$eval_shape" \
-  --confirm
-```
+- `cases.jsonl`: frozen replay inputs and references.
+- `generations.jsonl`: generated responses saved before judging.
+- `results.jsonl`: per-case responses, checks, and judgments.
+- `summary.json`: aggregate scores and base-versus-tuned differences.
+- `sampler.json`: the session, snapshot, and client cleanup record.
 
-For each case, the evaluator:
+Repeat standalone `evaluate` with the same data, run directory, output directory,
+and settings to finish missing results. Saved generations can be judged without
+sampling again. A fully completed evaluation makes no model calls. Training
+results and checkpoints survive a replay failure; the command reports the
+incomplete replay and exits with an error. Use a new training run directory to
+train again.
 
-1. Takes recorded conversation context from the held-out data.
-2. Asks the tuned model for its next response or tool call.
-3. Checks the response and asks a judge model to score it against the recorded behavior.
-4. Saves the result. It does not execute generated tool calls.
+This path requires a resumable serverless training checkpoint and a base model
+supported by the Fireworks serverless pool. A promoted model ID alone is not a
+sampler checkpoint. The CLI does not create evaluation deployments as a fallback.
+See [Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models#in-session-sampling-serverless-training).
 
-The CLI then deletes the temporary deployment and confirms deletion. Results
-are saved to `<run-dir>/replay/summary.json`.
-Add `--base-model '<deployed-base-model-route>'` for a before/after comparison.
-The base route must already be available; the temporary deployment serves only
-the tuned model. Model and judge inference use current provider rates.
-
-Replay judging calls Anthropic directly by default, using `ANTHROPIC_API_KEY`.
-For internal LangSmith gateway testing, set `LANGSMITH_GATEWAY_API_KEY` and add
-`--judge-model anthropic-gateway/claude-sonnet-5` to `evaluate`. For triage, use
-`anthropic-gateway:<model-id>` in `--judges`.
-
-If upgrading from gateway-based replay, move that credential out of
-`ANTHROPIC_API_KEY` into `LANGSMITH_GATEWAY_API_KEY` and select the gateway
-explicitly. `ANTHROPIC_CUSTOM_HEADERS` and `SMITHTUNE_ANTHROPIC_API_KEY` are no
-longer used. Start a new evaluation output directory for older replay results;
-they do not record which judge endpoint was used.
-
-The default readiness timeout is 600 seconds; use `--deployment-timeout` to
-change it. Capacity loss leaves the evaluation interrupted, rather than scoring
-a model failure. Repeat the command with the same settings and output directory
-to finish missing cases. Completed cases are retained. Completed runs do not
-repeat inference, but still check deployment cleanup.
-
-Ownership and cleanup are recorded in `deployments/<deployment-id>.json` under
-the evaluation directory. The CLI refuses to use or delete an unrelated
-deployment. It attempts cleanup after success, failure, or a keyboard interrupt.
-A killed process or failed API request can leave capacity behind. The receipt
-contains the exact `smithtune undeploy ... --confirm` recovery command; a cleanup
-failure is reported as an error. Inspect that receipt before deleting capacity.
-
-This mode requires a promoted model ID. It does not open an in-session sampling
-client from an active training checkpoint.
+Replay judging calls Anthropic directly by default with `ANTHROPIC_API_KEY`.
+For a Fireworks judge, pass `--judge-model accounts/fireworks/models/deepseek-v4p1-flash`.
+To use the internal Anthropic gateway, explicitly select
+`--judge-model anthropic-gateway/claude-sonnet-5` and set
+`LANGSMITH_GATEWAY_API_KEY`. Fireworks training and sampling always use the
+official Fireworks API.
 
 ### Keep an endpoint running with `deploy`
 
@@ -516,35 +506,26 @@ it does not run the evaluation. The endpoint stays available and can incur
 charges until you run `undeploy`:
 
 ```text
-promote -> deploy -> evaluate -> undeploy
+promote -> deploy -> use endpoint -> undeploy
 ```
 
 ```bash
+run_dir='runs/my-sft'
+account_id='<your-fireworks-account>'
+run_id='my-sft'
+deployment_id='my-sft'
+deployment_shape='<compatible-deployment-shape>'
+
+smithtune promote --run-dir "$run_dir" --output-model-id "$run_id" --confirm
 smithtune deploy \
   --run-dir "$run_dir" --account-id "$account_id" \
-  --output-model-id "$run_id" --deployment-id "$run_id" \
-  --deployment-shape "$eval_shape" --confirm
+  --output-model-id "$run_id" --deployment-id "$deployment_id" \
+  --deployment-shape "$deployment_shape" --confirm
 ```
 
-To evaluate a route that is already serving, omit `--serving-mode` (its default
-is `existing`) and all temporary deployment flags:
+For replay, use `evaluate --run-dir` as described above. The serverless sampler
+uses the saved training checkpoint independently of this production endpoint.
 
 ```bash
-smithtune eval-plan --output-dir "$run_dir/existing-replay"
-smithtune evaluate \
-  --output-dir "$run_dir/existing-replay" \
-  --tuned-model "accounts/$account_id/models/$run_id#accounts/$account_id/deployments/$run_id" \
-  --confirm
+smithtune undeploy --account-id "$account_id" --deployment-id "$deployment_id" --confirm
 ```
-
-Remove the endpoint when finished to stop deployment billing:
-
-```bash
-smithtune undeploy \
-  --account-id "$account_id" \
-  --deployment-id "$run_id" \
-  --confirm
-```
-
-Use `smithtune <command> --help` for more options. See [Contributing](CONTRIBUTING.md)
-for local development, tests, and releases.

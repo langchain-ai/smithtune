@@ -123,7 +123,7 @@ def test_baseten_replay_uses_endpoint_and_checkpoint_from_receipt(tmp_path, monk
     assert called.call_args.kwargs["baseten_endpoint"] == endpoint
     if command == "evaluate":
         assert called.call_args.args[2] == "checkpoint-name"
-        assert called.call_args.kwargs["deployment"] is None
+        assert "fireworks_sampler" not in called.call_args.kwargs
 
 
 @pytest.mark.parametrize("command", ["eval-plan", "evaluate"])
@@ -142,16 +142,16 @@ def test_baseten_receipt_rejects_manual_endpoint_overrides(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("command", ["eval-plan", "evaluate"])
-def test_fireworks_replay_rejects_run_dir(tmp_path, capsys, command):
+def test_fireworks_replay_requires_prepared_data_for_run_dir(tmp_path, capsys, command):
     with pytest.raises(SystemExit):
         cli.main([command, "--run-dir", "run", "--output-dir", str(tmp_path)])
-    assert "require --provider baseten" in capsys.readouterr().err
+    assert "manifest.json" in capsys.readouterr().err
 
 
-def test_existing_evaluation_still_requires_tuned_model(tmp_path, capsys):
+def test_fireworks_evaluation_requires_training_run(tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["evaluate", "--output-dir", str(tmp_path)])
-    assert "evaluate requires --tuned-model" in capsys.readouterr().err
+    assert "evaluate requires --run-dir" in capsys.readouterr().err
 
 
 @pytest.fixture
@@ -258,8 +258,8 @@ def test_temporary_evaluation_requires_confirmation_before_preflight(tmp_path, t
     ("--model-id", "model", "omit --model-id"),
     ("--deployment-id", "deployment", "omit --model-id"),
     ("--tuned-model", "checkpoint", "omit --model-id"),
-    ("--account-id", "account", "omit --model-id"),
-    ("--deployment-shape", "shape", "omit --model-id"),
+    ("--account-id", "account", "unrecognized arguments"),
+    ("--deployment-shape", "shape", "unrecognized arguments"),
     ("--base-model", "base", "does not support --base-model"),
     ("--concurrency", "0", "concurrency must be positive"),
     ("--max-output-tokens", "0", "--max-output-tokens must be positive"),
@@ -299,7 +299,7 @@ def test_temporary_evaluation_checks_selected_judge_credential(tmp_path, tempora
 def test_temporary_mode_rejects_missing_run_or_wrong_provider(tmp_path, capsys, command, provider):
     with pytest.raises(SystemExit):
         cli.main([command, "--provider", provider, "--serving-mode", "temporary", "--output-dir", str(tmp_path)])
-    assert ("requires --run-dir" if provider == "baseten" else "requires --provider baseten") in capsys.readouterr().err
+    assert ("requires --run-dir" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("mode", ["existing", "temporary"])
@@ -315,7 +315,7 @@ def test_baseten_evaluation_requires_separate_training_and_output_directories(tm
 def test_existing_mode_rejects_temporary_baseten_settings(tmp_path, capsys, flag, value, provider):
     with pytest.raises(SystemExit):
         cli.main(["eval-plan", "--provider", provider, "--output-dir", str(tmp_path), flag, value])
-    assert "require --provider baseten --serving-mode temporary" in capsys.readouterr().err
+    assert ("require --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("filename", ["evaluation-config.json", "results.jsonl"])

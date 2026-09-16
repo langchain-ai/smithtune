@@ -230,6 +230,14 @@ def validate_model_context(
     }
 
 
+def replay_prompt(messages, tools, model: ModelSpec, renderer):
+    """Use the same model-specific prompt for context checks and sampling."""
+    from training.utils.supervised import build_tool_prefixed_messages
+
+    normalized = build_tool_prefixed_messages(messages, renderer=renderer, tools=tools)
+    return renderer.build_generation_prompt(normalized)
+
+
 def validate_replay_context(
     cases: list[dict[str, Any]],
     model: ModelSpec,
@@ -250,7 +258,7 @@ def validate_replay_context(
             f"model profile {model.name} does not require tool declarations for tool-enabled replay"
         )
     if model.provider == "fireworks":
-        from training.utils.supervised import build_tool_prefixed_messages, renderer_declares_tools
+        from training.utils.supervised import renderer_declares_tools
 
         if has_tools and not renderer_declares_tools(renderer):
             raise PipelineError(f"renderer {model.renderer} cannot declare tools required by model profile {model.name}")
@@ -261,10 +269,7 @@ def validate_replay_context(
         if model.provider == "baseten":
             prompt_tokens = len(renderer.prompt_tokens(case["messages"], tools=case.get("tools")))
         else:
-            normalized = build_tool_prefixed_messages(
-                case["messages"], renderer=renderer, tools=case.get("tools"),
-            )
-            prompt_tokens = len(renderer.build_generation_prompt(normalized).to_ints())
+            prompt_tokens = len(replay_prompt(case["messages"], case.get("tools"), model, renderer).to_ints())
         if prompt_tokens + max_output_tokens > context_limit:
             rejected.append(
                 {
