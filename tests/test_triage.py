@@ -633,6 +633,7 @@ def test_source_pagination_is_bounded(tmp_path, monkeypatch):
 @pytest.mark.parametrize("provider,url,key", [
     ("fireworks", "https://api.fireworks.ai/inference/v1/chat/completions", "FIREWORKS_API_KEY"),
     ("openai", "https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
+    ("baseten", "https://inference.baseten.co/v1/chat/completions", "BASETEN_API_KEY"),
     ("anthropic", "https://api.anthropic.com/v1/messages", "ANTHROPIC_API_KEY"),
     ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "LANGSMITH_GATEWAY_API_KEY"),
 ])
@@ -655,8 +656,10 @@ def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch
     assert requests[0].full_url == url
     header = "X-api-key" if provider.startswith("anthropic") else "Authorization"
     assert requests[0].get_header(header) == ("test-credential" if provider.startswith("anthropic") else "Bearer test-credential")
-    if provider == "fireworks":
-        assert json.loads(requests[0].data)["reasoning_effort"] == "none"
+    if provider in {"fireworks", "baseten"}:
+        body = json.loads(requests[0].data)
+        assert body["reasoning_effort"] == "none"
+        assert body["max_tokens"] == 128 and "max_completion_tokens" not in body
 
 
 def test_missing_selected_thread_root_fails_closed(tmp_path):
@@ -818,3 +821,12 @@ def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume)
         triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()
     assert not list((tmp_path / "conversations").glob("*.json"))
+
+
+def test_baseten_council_settings_record_models_and_reasoning(tmp_path):
+    settings = triage.council_settings(tmp_path, judges=["baseten:zai-org/GLM-5.3-Flash", "glm-5.3-flash", "gpt-5.6-terra"])
+    plan = triage.run_triage(source(), tmp_path, runner=API(), dry_run=True, **settings)
+    assert plan["coordinator"] == {"name": "judge-1", "provider": "baseten", "model": "zai-org/GLM-5.3-Flash"}
+    assert plan["reasoning"]["baseten"] == "none"
+    assert plan["reasoning"]["zai-org/GLM-5.3-Flash"] == "low"
+    assert triage.council_settings(tmp_path)["config"] == settings["config"]

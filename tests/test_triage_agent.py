@@ -41,6 +41,7 @@ class JudgeModel(BaseChatModel):
 @pytest.mark.parametrize("provider,url,key", [
     ("fireworks", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
     ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
+    ("baseten", "https://inference.baseten.co/v1", "BASETEN_API_KEY"),
     ("anthropic", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
     ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic", "LANGSMITH_GATEWAY_API_KEY"),
 ])
@@ -73,11 +74,17 @@ def test_judge_gets_full_messages_in_one_request_without_tools(monkeypatch):
     assert json.loads(model.seen[0][-1].content)["untrusted_trajectory"] == messages
 
 
-@pytest.mark.parametrize("model_id,effort", [("deepseek-v4p1-flash", "none"), ("glm-5p3-flash", "low")])
-def test_fireworks_reasoning_survives_a_tool_round_trip(monkeypatch, model_id, effort):
+@pytest.mark.parametrize("provider,model_id,effort", [
+    ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash", "none"),
+    ("fireworks", "accounts/fireworks/models/glm-5p3-flash", "low"),
+    ("baseten", "deepseek-ai/DeepSeek-V4.1-Flash", "none"),
+    ("baseten", "zai-org/GLM-5.3-Flash", "low"),
+])
+def test_provider_reasoning_survives_a_tool_round_trip(monkeypatch, provider, model_id, effort):
     from smithtune.triage_agent import _model
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
-    model = _model({"provider": "fireworks", "model": "accounts/fireworks/models/" + model_id}, 4096)
+    monkeypatch.setenv("BASETEN_API_KEY", "test-credential")
+    model = _model({"provider": provider, "model": model_id}, 4096)
     result = model._create_chat_result({"choices": [{"message": {"role": "assistant", "content": "",
         "reasoning_content": "Need the saved evidence.",
         "tool_calls": [{"id": "call", "type": "function", "function": {"name": "code_mode", "arguments": json.dumps({"code": "read_run('run')"})}}]},
@@ -101,3 +108,28 @@ def test_terra_uses_responses_with_reasoning_off(monkeypatch):
     assert payload["reasoning"]["effort"] == "none"
     assert payload["max_output_tokens"] == 4096 and "messages" not in payload
     assert "reasoning.encrypted_content" not in payload.get("include", [])
+
+
+def test_baseten_judge_sends_correct_wire_payload(monkeypatch):
+    from openai._base_client import httpx2 as httpx
+    from smithtune.triage_judges import deepagent_judge
+    monkeypatch.setenv("BASETEN_API_KEY", "test-credential")
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    requests = []
+    def respond(_client, request, **kwargs):
+        requests.append(request)
+        return httpx.Response(200, request=request, json={"id": "test", "object": "chat.completion", "created": 0,
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash", "choices": [{"index": 0, "finish_reason": "stop",
+            "message": {"role": "assistant", "content": '{"keep":1,"reason":"Complete."}'}}]})
+    monkeypatch.setattr(httpx.Client, "send", respond)
+    messages = [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "Full trajectory"}]
+    result = deepagent_judge({"provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash"}, messages, 512)
+    assert result == {"keep": 1, "reason": "Complete."}
+    request, = requests
+    assert str(request.url) == "https://inference.baseten.co/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer test-credential"
+    assert not any("fireworks" in key for key in request.headers)
+    body = json.loads(request.content)
+    assert body["messages"] == messages and body["max_tokens"] == 512
+    assert body["reasoning_effort"] == "none" and body["response_format"] == {"type": "json_object"}
+    assert "max_completion_tokens" not in body and "store" not in body
