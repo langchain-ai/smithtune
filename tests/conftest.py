@@ -25,3 +25,15 @@ def local_langsmith_defaults(monkeypatch, request):
     monkeypatch.setattr(evaluation, "preflight_langsmith", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(evaluation.reporting, "bind_evaluation_snapshot", lambda *_args: None)
     monkeypatch.setattr(evaluation.reporting, "publish_evaluation", lambda *_args: {"comparison_url": "https://smith.langchain.com/test-comparison"})
+
+    class LocalPublisher:
+        def __init__(self, *args):
+            pass
+
+        def submit(self, results):
+            pass
+
+        def close(self):
+            return {"comparison_url": "https://smith.langchain.com/test-comparison"}
+
+    monkeypatch.setattr(evaluation.reporting, "BackgroundPublisher", LocalPublisher)
