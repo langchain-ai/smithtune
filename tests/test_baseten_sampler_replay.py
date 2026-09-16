@@ -22,9 +22,9 @@ REPLAY = {"judge_model": JUDGE, "concurrency": 1,
 def saved_run(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
-    (run / "plan.json").write_text(json.dumps({"provider": "baseten", "base_model": baseten.DEFAULT_MODEL.base_model}))
+    (run / "plan.json").write_text(json.dumps({"run_id": "weather-sft", "provider": "baseten", "base_model": baseten.DEFAULT_MODEL.base_model}))
     (run / "result.json").write_text(json.dumps({"provider": "baseten", "status": "completed",
-        "baseten_run_id": "run123", "best_sampler_weights_uri": CHECKPOINT,
+        "baseten_run_id": "run123", "best_epoch": 2, "best_sampler_weights_uri": CHECKPOINT,
         "last_resumable_state_uri": "bt://loops:run123/weights/last-epoch-3"}))
     return run
 
@@ -52,8 +52,7 @@ def test_sampler_preview_is_offline_and_defaults_to_base_comparison(tmp_path, mo
     constructor.assert_not_called()
 
 
-@pytest.mark.parametrize("publish", [False, True])
-def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_path, monkeypatch, capsys, publish):
+def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_path, monkeypatch, capsys):
     data = replay_data(tmp_path, monkeypatch)
     run = saved_run(tmp_path)
     sampler = object()
@@ -64,14 +63,14 @@ def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_pat
     monkeypatch.setattr(evaluation, "run_replay_evaluation", evaluate)
     monkeypatch.setattr(cli.baseten_deployment, "load_endpoint", Mock(side_effect=AssertionError("unexpected endpoint")))
     cli.main(["evaluate", "--provider", "baseten", "--run-dir", str(run),
-              "--data-dir", str(data), "--confirm", *([] if publish else ["--no-langsmith"])])
+              "--data-dir", str(data), "--confirm"])
     assert json.loads(capsys.readouterr().out)["serving_mode"] == "sampler"
     model, checkpoint, output = constructor.call_args.args
     assert (model.base_model, checkpoint, output) == (baseten.DEFAULT_MODEL.base_model, CHECKPOINT, run / "replay")
     assert evaluate.call_args.args[2] == CHECKPOINT
     assert evaluate.call_args.kwargs["base_model"] == model.base_model
     assert evaluate.call_args.kwargs["replay_sampler"] is sampler
-    assert evaluate.call_args.kwargs["publish"] is publish
+    assert evaluate.call_args.kwargs["training"] == {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}
 
 
 @pytest.mark.parametrize("failure", ["unconfirmed", "missing_judge"])
@@ -140,8 +139,7 @@ def test_training_replay_plan_is_offline_and_records_separate_sampler_cost(tmp_p
 
 
 @pytest.mark.parametrize("command", ["plan", "train"])
-@pytest.mark.parametrize("publish", [False, True])
-def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, capsys, command, publish):
+def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, capsys, command):
     provider = Mock()
     provider.plan.return_value = {"status": "planned"}
     provider.train.return_value = {"status": "completed"}
@@ -151,12 +149,10 @@ def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, 
             "--concurrency", "1", "--max-output-tokens", "128"]
     if command == "train":
         args += ["--run-dir", str(tmp_path / "run")]
-    if not publish:
-        args.append("--no-langsmith")
     cli.main(args)
     capsys.readouterr()
     called = provider.plan if command == "plan" else provider.train
-    assert called.call_args.kwargs["replay"] == {**REPLAY, "publish": publish}
+    assert called.call_args.kwargs["replay"] == REPLAY
 
 
 @pytest.mark.parametrize("replay_fails", [False, True])
@@ -186,6 +182,7 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
         assert args[2] == "sampler://approved-run-sampler-epoch-2"
         assert kwargs["base_model"] == baseten.DEFAULT_MODEL.base_model
         assert kwargs["confirm"] is True
+        assert kwargs["training"] == {"parent_training_run_id": "approved-run", "checkpoint_epoch": 2}
         events.append("replay")
         if replay_fails:
             raise PipelineError("judge failed after training")

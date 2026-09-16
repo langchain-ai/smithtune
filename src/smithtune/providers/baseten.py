@@ -859,7 +859,7 @@ class BasetenProvider:
             from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
             from smithtune.inference import _chat_completion
 
-            preflight_langsmith(data_dir, publish=replay.get("publish", True))
+            preflight_langsmith(data_dir)
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
             )
@@ -1218,7 +1218,7 @@ class BasetenProvider:
             raise cleanup_error
         if replay is not None:
             from smithtune.providers.baseten_sampling import BasetenReplaySampler
-            from smithtune.evaluation import run_replay_evaluation
+            from smithtune.evaluation import run_replay_evaluation, training_metadata
 
             try:
                 if best_sampler_uri is None:
@@ -1226,7 +1226,8 @@ class BasetenProvider:
                 sampler = BasetenReplaySampler(model, best_sampler_uri, run_dir / "replay")
                 result["replay"] = run_replay_evaluation(
                     data_dir, run_dir / "replay", best_sampler_uri,
-                    base_model=model.base_model, replay_sampler=sampler, confirm=True, **replay,
+                    base_model=model.base_model, replay_sampler=sampler, confirm=True,
+                    training=training_metadata(run_dir), **replay,
                 )
             except BaseException:
                 result["replay_status"] = "incomplete"

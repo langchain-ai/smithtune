@@ -201,6 +201,10 @@ def test_temporary_plan_uses_context_without_invented_endpoint(tmp_path, tempora
 
 def test_temporary_evaluation_preflights_separately_and_exits(tmp_path, temporary_baseten, capsys):
     endpoint, events, _, prepare, evaluate = temporary_baseten
+    run = tmp_path / "training"
+    run.mkdir()
+    (run / "plan.json").write_text(json.dumps({"run_id": "weather-sft"}))
+    (run / "result.json").write_text(json.dumps({"best_epoch": 2}))
     output = tmp_path / "replay"
     output.mkdir()
     (output / "plan.json").write_text('{"existing": true}')
@@ -214,6 +218,7 @@ def test_temporary_evaluation_preflights_separately_and_exits(tmp_path, temporar
     })
     assert events[-1] == ("exit",)
     assert evaluate.call_args.args[2] == "checkpoint-name"
+    assert evaluate.call_args.kwargs["training"] == {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}
     assert evaluate.call_args.kwargs["baseten_endpoint"] == endpoint
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
 
@@ -257,7 +262,6 @@ def test_first_temporary_evaluation_closes_serving_before_publication(tmp_path, 
     _, events, _, _, evaluate = temporary_baseten
 
     def replay(*args, **kwargs):
-        assert kwargs["publish"] is True
         with kwargs["baseten_lifecycle"]:
             events.append(("sample",))
         assert events[-1] == ("exit",)

@@ -147,7 +147,9 @@ def verify_test_split(data_dir: Path, manifest: dict, *, client=None):
 def bind_evaluation_snapshot(output_dir: Path, config: dict, cases: list[dict], context) -> str:
     """Pin the dataset version before inference, including interrupted evaluations."""
     splits = context[2]
-    value = {"config": config, "cases_sha256": json_sha256(sorted(cases, key=lambda case: case["id"])), "split_identity": splits["identity_sha256"],
+    # Training lineage is descriptive metadata, not prediction identity.
+    prediction_config = {key: value for key, value in config.items() if key != "training"}
+    value = {"config": prediction_config, "cases_sha256": json_sha256(sorted(cases, key=lambda case: case["id"])), "split_identity": splits["identity_sha256"],
              "dataset_id": splits["dataset_id"], "dataset_version": splits["dataset_version"]}
     path = output_dir / "langsmith-evaluation-input.json"
     if path.exists() and _load_json(path) != value:
@@ -226,7 +228,7 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
         for label, model in config["models"].items():
             phase = f"{label}:experiment_creation"
             name = f"smithtune-{label}-{namespace}"
-            metadata = {"smithtune_evaluation_id": str(namespace), "model": model, "model_role": label,
+            metadata = {**config.get("training", {}), "smithtune_evaluation_id": str(namespace), "model": model, "model_role": label,
                         "judge_model": config["judge_model"], "evaluation_mode": "recorded_prefix",
                         "serving_mode": config["serving_mode"],
                         "generation_source": "sampler" if config.get("sampler") else "endpoint",
@@ -239,7 +241,9 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
             except LangSmithNotFoundError:
                 project = client.create_project(name, reference_dataset_id=splits["dataset_id"], metadata=metadata)
             if (str(project.reference_dataset_id) != splits["dataset_id"]
-                    or any(project.metadata.get(key) != value for key, value in metadata.items() if key not in ("dataset_version", "dataset_splits"))):
+                    or any(project.metadata.get(key) != value for key, value in metadata.items()
+                           if key not in ("dataset_version", "dataset_splits")
+                           and not (key in config.get("training", {}) and key not in project.metadata))):
                 raise PipelineError(f"LangSmith experiment ownership/settings conflict: {name}")
             client.update_project(project.id, metadata=metadata)
             url = project.url

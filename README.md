@@ -531,7 +531,11 @@ when comparing both models, or one experiment when evaluating only a tuned endpo
 Open the returned `langsmith.experiments` links to compare results on the original
 dataset's test split. Each conversation has a root run, with a child LLM run for
 each generated action. Experiment metadata identifies the provider and whether
-predictions came from a sampler or deployed endpoint.
+predictions came from a sampler or deployed endpoint. When a saved training run
+is available, `parent_training_run_id` records the smithtune run ID and
+`checkpoint_epoch` records the selected checkpoint’s epoch. Both experiments in
+a base/tuned comparison carry this training context; the epoch describes the
+tuned checkpoint. Endpoints without saved training provenance omit these fields.
 
 - `teacher_agreement`: each action's judge pass/fail, with its explanation.
 - `trajectory_teacher_agreement`: fraction of evaluated actions that passed in a
@@ -551,10 +555,10 @@ closed before publication. If uploading fails, repeat standalone `evaluate` with
 the same directories and settings to publish saved results without repeating
 inference. Keep the local files for recovery.
 
-Use `--no-langsmith` with `evaluate` or `train --evaluate` for local results only.
-To publish those results later, register the matching splits and rerun standalone
-`evaluate` without that flag. Repeat the flag on `plan --evaluate` when previewing
-a local-only training workflow.
+Evaluation always publishes to LangSmith. Local files are recovery artifacts;
+an upload failure leaves evaluation incomplete until publication succeeds.
+Data prepared with `--no-sync-splits` must have its splits synchronized before
+evaluation, using `prepare --no-fetch` with the original settings.
 
 ### Keep an endpoint running with `deploy`
 

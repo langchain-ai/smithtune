@@ -449,7 +449,7 @@ class FireworksProvider:
             from smithtune.inference import _chat_completion
 
             validate_judge_credentials(replay["judge_model"])
-            preflight_langsmith(data_dir, publish=replay.get("publish", True))
+            preflight_langsmith(data_dir)
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
             )
@@ -481,7 +481,7 @@ class FireworksProvider:
                 _json_dump(run_dir / "result.json", result)
                 session.complete()
                 if replay is not None:
-                    from smithtune.evaluation import run_replay_evaluation
+                    from smithtune.evaluation import run_replay_evaluation, training_metadata
                     from smithtune.providers.fireworks_sampling import FireworksReplaySampler
 
                     checkpoint = result["best"]["resume_checkpoint"]
@@ -493,7 +493,8 @@ class FireworksProvider:
                     _write_run_md(run_dir / "run.md", plan, "evaluating", "wait for replay")
                     result["replay"] = run_replay_evaluation(
                         data_dir, run_dir / "replay", checkpoint,
-                        base_model=model.base_model, replay_sampler=sampler, confirm=True, **replay,
+                        base_model=model.base_model, replay_sampler=sampler, confirm=True,
+                        training=training_metadata(run_dir), **replay,
                     )
                     _json_dump(run_dir / "result.json", result)
         except BaseException:

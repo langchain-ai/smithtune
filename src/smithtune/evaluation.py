@@ -69,11 +69,23 @@ def validate_judge_credentials(judge_model: str) -> None:
         raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
 
 
-def preflight_langsmith(data_dir: Path, *, publish: bool = True):
+def training_metadata(run_dir: Path | None) -> dict:
+    """Read the smithtune run ID and selected epoch without guessing missing lineage."""
+    if run_dir is None:
+        return {}
+    plan_path, result_path = run_dir / "plan.json", run_dir / "result.json"
+    plan = _load_json(plan_path) if plan_path.exists() else {}
+    result = _load_json(result_path) if result_path.exists() else {}
+    values = {
+        "parent_training_run_id": plan.get("run_id") or result.get("run_id"),
+        "checkpoint_epoch": result.get("best_epoch") or (result.get("best") or {}).get("epoch"),
+    }
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def preflight_langsmith(data_dir: Path):
     """Verify the pinned test cohort before training, judging, or sampling."""
-    if publish:
-        return reporting.verify_test_split(data_dir, _load_json(data_dir / "prepared" / "manifest.json"))
-    return None
+    return reporting.verify_test_split(data_dir, _load_json(data_dir / "prepared" / "manifest.json"))
 
 
 JUDGE_INSTRUCTIONS = """You judge the next assistant message against a recorded trajectory.
@@ -555,7 +567,7 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
-    publish: bool = True,
+    training: dict | None = None,
     replay_sampler: Any | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_lifecycle: AbstractContextManager[str] | None = None,
@@ -603,11 +615,17 @@ def run_replay_evaluation(
         config["baseten_endpoint"] = baseten_endpoint.to_dict()
     if replay_sampler:
         config["sampler"] = replay_sampler.config
+    if training:
+        config["training"] = training
     config_path = output_dir / "evaluation-config.json"
     if config_path.exists():
         saved_config = _load_json(config_path)
         if isinstance(saved_config, dict) and (saved_config.get("models") != config["models"] or saved_config.get("judge_model") != judge_model):
             raise PipelineError("existing replay results use different models")
+        # Older evaluations did not record training lineage. Adding it does
+        # not change the checkpoint or generation settings of saved predictions.
+        if isinstance(saved_config, dict) and "training" not in saved_config and training:
+            saved_config = {**saved_config, "training": training}
         if saved_config != config:
             raise PipelineError("existing replay results use different evaluation settings")
     if results and judge_endpoint is not None and not config_path.exists():
@@ -671,9 +689,8 @@ def run_replay_evaluation(
         raise PipelineError("existing replay results contain duplicate cases")
     if results and not config_path.exists() and max_output_tokens != DEFAULT_REPLAY_MAX_TOKENS:
         raise PipelineError("legacy replay results do not record generation settings; use a new output directory")
-    langsmith_context = preflight_langsmith(data_dir, publish=publish)
-    if langsmith_context is not None:
-        reporting.bind_evaluation_snapshot(output_dir, config, cases, langsmith_context)
+    langsmith_context = preflight_langsmith(data_dir)
+    reporting.bind_evaluation_snapshot(output_dir, config, cases, langsmith_context)
     _json_dump(config_path, config)
     # Keep successful samples even if judging fails or the session expires.
     generations_path = output_dir / "generations.jsonl"
@@ -856,14 +873,13 @@ def run_replay_evaluation(
         summary["baseten_endpoint"] = baseten_endpoint.to_dict()
     # Persist the local summary even if LangSmith is temporarily unavailable.
     _json_dump(output_dir / "summary.json", summary)
-    if publish:
-        _json_dump(state_path, {"status": "publishing", "completed": len(results), "total": len(cases)})
-        try:
-            summary["langsmith"] = reporting.publish_evaluation(output_dir, config, results, cases, langsmith_context)
-        except BaseException:
-            _json_dump(state_path, {"status": "interrupted", "phase": "langsmith_publication",
-                                   "completed": len(results), "total": len(cases)})
-            raise
-        _json_dump(output_dir / "summary.json", summary)
+    _json_dump(state_path, {"status": "publishing", "completed": len(results), "total": len(cases)})
+    try:
+        summary["langsmith"] = reporting.publish_evaluation(output_dir, config, results, cases, langsmith_context)
+    except BaseException:
+        _json_dump(state_path, {"status": "interrupted", "phase": "langsmith_publication",
+                               "completed": len(results), "total": len(cases)})
+        raise
+    _json_dump(output_dir / "summary.json", summary)
     _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
     return summary

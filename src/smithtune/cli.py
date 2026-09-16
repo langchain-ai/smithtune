@@ -40,7 +40,6 @@ from smithtune.artifacts import _json_dump, _load_json, output_lock
 
 
 def _add_replay_options(command):
-    command.add_argument("--no-langsmith", action="store_true", help="save replay results locally without publishing LangSmith experiments")
     command.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL)
     command.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
     command.add_argument("--max-points-per-trajectory", type=int, help="optional replay cap; default scores every assistant action")
@@ -52,15 +51,13 @@ def _training_replay(args):
         "judge_model", "concurrency", "max_points_per_trajectory", "max_output_tokens",
     )}
     if not args.evaluate:
-        if args.no_langsmith:
-            raise PipelineError("--no-langsmith requires --evaluate")
         defaults = {"judge_model": replay_evaluation.DEFAULT_JUDGE_MODEL,
                     "concurrency": replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY,
                     "max_points_per_trajectory": None, "max_output_tokens": DEFAULT_REPLAY_MAX_TOKENS}
         if values != defaults:
             raise PipelineError("replay options require --evaluate")
         return {}
-    return {"replay": {**values, "publish": not args.no_langsmith}}
+    return {"replay": values}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -311,7 +308,6 @@ def _parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
                             help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway")
     evaluation.add_argument("--confirm", action="store_true")
-    evaluation.add_argument("--no-langsmith", action="store_true", help="save replay results locally without publishing LangSmith experiments")
 
     remove = sub.add_parser("undeploy", help="stop serving capacity for a deployment")
     remove.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
@@ -385,7 +381,7 @@ def _run_evaluation(args, endpoint: BasetenEndpoint | None, tuned_model: str, *,
         base_model=args.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory,
         max_output_tokens=args.max_output_tokens, confirm=args.confirm,
-        publish=not args.no_langsmith,
+        training=replay_evaluation.training_metadata(args.run_dir),
         baseten_endpoint=endpoint, **lifecycle_options,
     )
 
@@ -399,7 +395,7 @@ def _run_temporary_evaluation(args, temporary_plan: dict) -> dict:
         )
     if replay_plan["training_base_model"] != temporary_plan["checkpoint"]["base_model"]:
         raise PipelineError("prepared data base model differs from the Baseten training checkpoint")
-    replay_evaluation.preflight_langsmith(args.data_dir, publish=not args.no_langsmith)
+    replay_evaluation.preflight_langsmith(args.data_dir)
 
     def temporary():
         return baseten_deployment.temporary(
@@ -477,7 +473,7 @@ def _run_fireworks_evaluation(args):
         args.data_dir, args.output_dir, best["resume_checkpoint"], args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
-        replay_sampler=sampler, confirm=args.confirm, publish=not args.no_langsmith,
+        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
     )
 
 
@@ -518,7 +514,7 @@ def _run_baseten_sampler_evaluation(args):
         args.data_dir, args.output_dir, checkpoint, args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
-        replay_sampler=sampler, confirm=args.confirm, publish=not args.no_langsmith,
+        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
     )
 
 

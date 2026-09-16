@@ -187,22 +187,21 @@ def test_saved_generations_resume_judging_without_reopening_session(tmp_path, mo
         evaluation.run_replay_evaluation(**options, max_output_tokens=12)
 
 
-@pytest.mark.parametrize("publish", [False, True])
-def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypatch, capsys, publish):
+def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypatch, capsys):
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"
     run.mkdir()
-    (run / "plan.json").write_text(json.dumps({"base_model": DEFAULT_MODEL.base_model, "config": {"lora_rank": 4, "lora_alpha": 16}}))
-    (run / "result.json").write_text(json.dumps({"best": {"resume_checkpoint": CHECKPOINT}}))
+    (run / "plan.json").write_text(json.dumps({"run_id": "weather-sft", "base_model": DEFAULT_MODEL.base_model, "config": {"lora_rank": 4, "lora_alpha": 16}}))
+    (run / "result.json").write_text(json.dumps({"best": {"resume_checkpoint": CHECKPOINT, "epoch": 2}}))
     fake_renderer(monkeypatch)
     calls = []
     monkeypatch.setattr(evaluation, "validate_judge_credentials", lambda _: None)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", lambda *args, **kwargs: calls.append((args, kwargs)) or {})
-    cli.main(["evaluate", "--data-dir", str(data), "--run-dir", str(run), "--confirm", *([] if publish else ["--no-langsmith"])])
+    cli.main(["evaluate", "--data-dir", str(data), "--run-dir", str(run), "--confirm"])
     _, options = calls[0]
     assert calls[0][0][1] == run / "replay"
     assert options["base_model"] == DEFAULT_MODEL.base_model
-    assert options["publish"] is publish
+    assert options["training"] == {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}
     assert options["replay_sampler"].config["lora_alpha"] == 16
     assert options["replay_sampler"].config["lora_rank"] == 4
     with pytest.raises(SystemExit):
@@ -268,6 +267,7 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
 
     def replay(*args, **kwargs):
         assert json.loads((run / "result.json").read_text())["best"]["resume_checkpoint"] == CHECKPOINT
+        assert kwargs["training"] == {"parent_training_run_id": "run", "checkpoint_epoch": 1}
         raise PipelineError("judge unavailable")
 
     monkeypatch.setattr(runtime, "ServerlessTraining", Session)

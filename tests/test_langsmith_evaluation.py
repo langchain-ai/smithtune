@@ -435,21 +435,52 @@ def test_judge_retry_preserves_generation_timestamps_for_publication(prepared, t
             assert run.end_time == datetime.fromisoformat(recorded["ended_at"])
 
 
-def test_local_evaluation_can_publish_later_without_sampling(prepared, tmp_path):
+def test_unsynchronized_splits_block_evaluation_before_sampling(prepared, tmp_path):
     data, manifest, client = prepared
-    pending = copy.deepcopy(manifest)
-    pending["langsmith"]["split_sync"] = {"status": "pending"}
-    _json_dump(data / "prepared/manifest.json", pending)
-    output, events, calls = tmp_path / "replay", [], []
-    kwargs = dict(chat=toy_chat(calls), replay_sampler=ReplaySampler("fireworks", events), confirm=True)
-    local = evaluation.run_replay_evaluation(data, output, "tuned", "judge", publish=False, **kwargs)
-    assert "langsmith" not in local
-    assert client.projects == {}
-    before = (list(events), len(calls))
+    manifest["langsmith"]["split_sync"] = {"status": "pending"}
     _json_dump(data / "prepared/manifest.json", manifest)
-    published = evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
-    assert published["langsmith"]["experiments"]["tuned"]["url"]
-    assert (events, len(calls)) == before
+    events, calls = [], []
+    with pytest.raises(PipelineError, match="splits are not synchronized"):
+        evaluation.run_replay_evaluation(
+            data, tmp_path / "replay", "tuned", "judge", chat=toy_chat(calls),
+            replay_sampler=ReplaySampler("fireworks", events), confirm=True,
+        )
+    assert events == calls == []
+    assert client.projects == {}
+
+
+@pytest.mark.parametrize("command", ["evaluate", "train", "plan"])
+def test_cli_rejects_langsmith_opt_out(command, capsys):
+    from smithtune import cli
+
+    args = [command, "--no-langsmith"]
+    if command != "evaluate":
+        args.append("--evaluate")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --no-langsmith" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("training", [{}, {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}])
+def test_experiments_record_available_training_origin(prepared, tmp_path, training):
+    data, _, client = prepared
+    output = tmp_path / "replay"
+    kwargs = dict(base_model="base", chat=toy_chat([]), confirm=True, training=training)
+    evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    assert len(client.projects) == 2
+    for project in client.projects.values():
+        for key in ("parent_training_run_id", "checkpoint_epoch"):
+            if key in training:
+                assert project.metadata[key] == training[key]
+            else:
+                assert key not in project.metadata
+    if training:
+        with pytest.raises(PipelineError, match="settings"):
+            evaluation.run_replay_evaluation(
+                data, output, "tuned", "judge", **{**kwargs, "training": {**training, "checkpoint_epoch": 3}},
+            )
+
 
 
 def test_lost_feedback_response_and_delayed_visibility_reuse_feedback_id(prepared, tmp_path, monkeypatch):
@@ -479,3 +510,23 @@ def test_lost_feedback_response_and_delayed_visibility_reuse_feedback_id(prepare
     assert len(calls) == before
     assert submitted[0] == submitted[1]
     assert len(client.feedback_store) == len(set(submitted))
+
+
+def test_resume_older_publication_adds_training_origin_without_resampling(prepared, tmp_path):
+    data, _, client = prepared
+    output, calls = tmp_path / "replay", []
+    kwargs = dict(base_model="base", chat=toy_chat(calls), confirm=True)
+    client.drop_feedback = "teacher_agreement"
+    with pytest.raises(PipelineError, match="feedback_upload"):
+        evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    original_projects = set(client.projects)
+    before = len(calls)
+    client.drop_feedback = None
+    training = {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}
+    summary = evaluation.run_replay_evaluation(data, output, "tuned", "judge", training=training, **kwargs)
+    assert len(calls) == before
+    assert original_projects <= client.projects.keys()
+    assert len(client.projects) == 2
+    assert len(summary["langsmith"]["experiments"]) == 2
+    for project in client.projects.values():
+        assert all(project.metadata[key] == value for key, value in training.items())
