@@ -549,3 +549,50 @@ def test_comparison_url_preserves_host_workspace_and_dataset(host, include_base)
         experiments["base"] = {"id": "base-id", "url": f"{host}{path}?selectedSessions=base-id"}
     selected = "base-id,tuned-id" if include_base else "tuned-id"
     assert reporting._comparison_url(experiments) == f"{host}{path}?selectedSessions={selected}"
+
+
+@pytest.mark.parametrize("prepared", ["fireworks", "baseten"], indirect=True)
+@pytest.mark.parametrize("compare_base", [False, True])
+def test_experiment_names_use_prepared_model_for_both_roles(prepared, tmp_path, compare_base):
+    data, manifest, client = prepared
+    output = tmp_path / "replay"
+    kwargs = dict(chat=toy_chat([]), confirm=True)
+    if compare_base:
+        kwargs["base_model"] = "base"
+    evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    receipt = _load_json(output / "langsmith-experiments.json")
+    short_model = manifest["model"]["base_model"].rsplit("/", 1)[-1]
+    for project in client.projects.values():
+        role = project.metadata["model_role"]
+        assert project.name == f"smithtune-{role}-{short_model}-{receipt['evaluation_id']}"
+        assert project.metadata["model"] == role
+
+
+def test_legacy_experiment_names_survive_interrupted_publication(prepared, tmp_path, monkeypatch):
+    data, _, client = prepared
+    output, calls = tmp_path / "replay", []
+    verify = reporting.verify_test_split
+
+    def legacy_context(*args, **kwargs):
+        client, examples, splits = verify(*args, **kwargs)
+        return client, examples, {**splits, "base_model": ""}
+
+    monkeypatch.setattr(reporting, "verify_test_split", legacy_context)
+    client.drop_feedback = "teacher_agreement"
+    kwargs = dict(base_model="base", chat=toy_chat(calls), confirm=True)
+    with pytest.raises(PipelineError, match="feedback_upload"):
+        evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    path = output / "langsmith-experiments.json"
+    receipt = _load_json(path)
+    receipt.pop("model_name")
+    _json_dump(path, receipt)
+    original_projects, before = set(client.projects), len(calls)
+    monkeypatch.setattr(reporting, "verify_test_split", verify)
+    client.drop_feedback = None
+    evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    assert len(calls) == before
+    assert original_projects <= client.projects.keys()
+    assert len(client.projects) == 2
+    for project in client.projects.values():
+        role = project.metadata["model_role"]
+        assert project.name == f"smithtune-{role}-{receipt['evaluation_id']}"

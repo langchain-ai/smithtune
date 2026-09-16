@@ -528,6 +528,9 @@ official Fireworks API.
 
 `train --evaluate` and standalone `evaluate` publish a base and tuned experiment
 when comparing both models, or one experiment when evaluating only a tuned endpoint.
+Names follow `smithtune-base-<short-model-name>-<evaluation-id>` and
+`smithtune-tuned-<short-model-name>-<same-evaluation-id>`. Both use the base-model
+name; exact model and checkpoint identifiers remain in metadata.
 Open the single returned `langsmith.comparison_url` to view base and tuned results
 side by side on the original dataset's test split. For tuned-only evaluation,
 the same link opens that experiment. Each conversation has a root run, with a

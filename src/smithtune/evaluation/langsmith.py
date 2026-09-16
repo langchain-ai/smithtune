@@ -142,7 +142,7 @@ def verify_test_split(data_dir: Path, manifest: dict, *, client=None):
         raise
     except Exception as exc:
         raise PipelineError(f"cannot verify the registered LangSmith test split ({type(exc).__name__}): {path}") from None
-    return client, examples, receipt
+    return client, examples, {**receipt, "base_model": manifest["model"]["base_model"]}
 
 
 def bind_evaluation_snapshot(output_dir: Path, config: dict, cases: list[dict], context) -> str:
@@ -224,12 +224,15 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
     receipt = _load_json(path) if path.exists() else {
         "schema_version": 1, "evaluation_id": str(uuid4()), "created_at": inference_start,
         "identity_sha256": identity, "experiments": {},
+        "model_name": splits["base_model"].rstrip("/").rsplit("/", 1)[-1],
     }
     if receipt.get("identity_sha256") != identity:
         raise PipelineError(f"LangSmith experiments use different evaluation settings: {path}")
     receipt["status"] = "publishing"
     _json_dump(path, receipt)
     namespace = UUID(receipt["evaluation_id"])
+    # Receipts without a model name retain their original naming on retries.
+    model_suffix = f"-{receipt['model_name']}" if receipt.get("model_name") else ""
     started = datetime.fromisoformat(receipt["created_at"])
     by_example = {str(example.id): [] for example in examples}
     for result in results:
@@ -238,7 +241,7 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
     try:
         for label, model in config["models"].items():
             phase = f"{label}:experiment_creation"
-            name = f"smithtune-{label}-{namespace}"
+            name = f"smithtune-{label}{model_suffix}-{namespace}"
             metadata = {**config.get("training", {}), "smithtune_evaluation_id": str(namespace), "model": model, "model_role": label,
                         "judge_model": config["judge_model"], "evaluation_mode": "recorded_prefix",
                         "serving_mode": config["serving_mode"],
