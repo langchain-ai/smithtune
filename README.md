@@ -565,7 +565,9 @@ batches and use the LangSmith SDK's native retries for rate limits, transient
 server errors, and connection failures. Errors include the request method,
 endpoint, status, and valid `Retry-After` timing. Known rate/usage-limit messages
 are shown; other response bodies are omitted. Publication errors are also
-recorded in `langsmith-experiments.json`.
+recorded in `langsmith-experiments.json`. After upload, verification allows up
+to one minute of backoff for runs and scores to become searchable, printing
+progress while waiting. A timeout preserves the saved results for resumption.
 
 Evaluation always publishes to LangSmith. Local files are recovery artifacts;
 an upload failure leaves evaluation incomplete until publication succeeds.
