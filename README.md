@@ -560,7 +560,12 @@ the splits first. `plan` and `eval-plan` remain local previews.
 Results are saved before upload, and owned samplers or temporary serving are
 closed before publication. If uploading fails, repeat standalone `evaluate` with
 the same directories and settings to publish saved results without repeating
-inference. Keep the local files for recovery.
+inference. Keep the local files for recovery. Run uploads and resume checks use
+batches and use the LangSmith SDK's native retries for rate limits, transient
+server errors, and connection failures. Errors include the request method,
+endpoint, status, and valid `Retry-After` timing. Known rate/usage-limit messages
+are shown; other response bodies are omitted. Publication errors are also
+recorded in `langsmith-experiments.json`.
 
 Evaluation always publishes to LangSmith. Local files are recovery artifacts;
 an upload failure leaves evaluation incomplete until publication succeeds.
