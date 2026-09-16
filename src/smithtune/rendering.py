@@ -234,10 +234,15 @@ def validate_replay_context(
     cases: list[dict[str, Any]],
     model: ModelSpec,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
+    *,
+    max_seq_len: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Reject complete replay cases that cannot fit the model context."""
     if max_output_tokens < 1:
         raise PipelineError("max output tokens must be positive")
+    if max_seq_len is not None and (isinstance(max_seq_len, bool) or not isinstance(max_seq_len, int) or max_seq_len < 1):
+        raise PipelineError("serving context must be a positive integer")
+    context_limit = min(model.max_seq_len, max_seq_len) if max_seq_len is not None else model.max_seq_len
     renderer = load_training_renderer(model)
     has_tools = any(case.get("tools") for case in cases)
     if has_tools and not model.requires_tool_declarations:
@@ -260,7 +265,7 @@ def validate_replay_context(
                 case["messages"], renderer=renderer, tools=case.get("tools"),
             )
             prompt_tokens = len(renderer.build_generation_prompt(normalized).to_ints())
-        if prompt_tokens + max_output_tokens > model.max_seq_len:
+        if prompt_tokens + max_output_tokens > context_limit:
             rejected.append(
                 {
                     "id": case["id"],
@@ -269,7 +274,7 @@ def validate_replay_context(
                     "source_scope_id": case.get("source_scope_id"),
                     "prompt_tokens": prompt_tokens,
                     "max_output_tokens": max_output_tokens,
-                    "context_limit": model.max_seq_len,
+                    "context_limit": context_limit,
                     "reason": "replay prompt and output budget exceed model context limit",
                 }
             )

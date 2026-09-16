@@ -1,14 +1,17 @@
-"""Inference transports for Fireworks replay and Anthropic judging."""
+"""Inference transports for provider replay and Anthropic judging."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from smithtune.inference_contract import ContractError, InferenceContract
+from smithtune.capabilities import open_without_redirects
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
 
@@ -22,10 +25,34 @@ ANTHROPIC_ENDPOINTS = {
 REQUEST_TIMEOUT_SECONDS = 300
 
 
-def _post_json(request: urllib.request.Request, label: str) -> dict[str, Any]:
+@dataclass(frozen=True)
+class BasetenEndpoint:
+    """An existing dedicated deployment and its configured serving context."""
+
+    model_id: str
+    deployment_id: str
+    max_seq_len: int
+
+    def validate(self) -> None:
+        for value, label in ((self.model_id, "model ID"), (self.deployment_id, "deployment ID")):
+            if not isinstance(value, str) or re.fullmatch(r"[a-z0-9]{1,64}", value) is None:
+                raise PipelineError(f"Baseten {label} must contain lowercase letters and digits")
+        if isinstance(self.max_seq_len, bool) or not isinstance(self.max_seq_len, int) or self.max_seq_len < 1:
+            raise PipelineError("Baseten serving context (--max-seq-len) must be a positive integer")
+
+    @property
+    def url(self) -> str:
+        self.validate()
+        return f"https://model-{self.model_id}.api.baseten.co/deployment/{self.deployment_id}/sync/v1/chat/completions"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "url": self.url}
+
+
+def _post_json(request: urllib.request.Request, label: str, *, opener=None) -> dict[str, Any]:
     """Send one request and return its JSON object without echoing bodies or headers."""
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with (opener or urllib.request.urlopen)(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         raise PipelineError(f"{label} failed with HTTP {exc.code}") from exc
@@ -45,7 +72,7 @@ def _inference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{key: value for key, value in message.items() if key in allowed} for message in messages]
 
 
-def _fireworks_chat_completion(
+def _chat_request_body(
     model: str,
     messages: list[dict[str, Any]],
     max_tokens: int,
@@ -64,15 +91,34 @@ def _fireworks_chat_completion(
             body["response_format"] = {"type": "json_object"}
     else:
         try:
-            body = request_contract.build_fireworks_request(
+            body = request_contract.build_chat_request(
                 model=model,
                 messages=inference_messages,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
             )
         except ContractError as exc:
-            raise PipelineError(f"cannot build Fireworks inference request: {exc}") from exc
+            raise PipelineError(f"cannot build inference request: {exc}") from exc
     body.setdefault("temperature", 0)
+    return body
+
+
+def _completion_message(result: dict[str, Any], model: str) -> dict[str, Any]:
+    choices = result.get("choices")
+    message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        raise PipelineError(f"inference returned no message for {model}")
+    return message
+
+
+def _fireworks_chat_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    json_mode: bool = False,
+    request_contract: InferenceContract | None = None,
+) -> dict[str, Any]:
+    body = _chat_request_body(model, messages, max_tokens, json_mode, request_contract)
     request = urllib.request.Request(
         INFERENCE_URL,
         data=json.dumps(body).encode(),
@@ -84,12 +130,29 @@ def _fireworks_chat_completion(
             "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"],
         },
     )
-    result = _post_json(request, f"inference for {model}")
-    choices = result.get("choices")
-    message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
-    if not isinstance(message, dict):
-        raise PipelineError(f"inference returned no message for {model}")
-    return message
+    return _completion_message(_post_json(request, f"inference for {model}"), model)
+
+
+def _baseten_chat_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    json_mode: bool = False,
+    request_contract: InferenceContract | None = None,
+    *,
+    endpoint: BasetenEndpoint,
+) -> dict[str, Any]:
+    endpoint.validate()
+    key = os.environ.get("BASETEN_API_KEY")
+    if not key or not key.strip():
+        raise PipelineError("BASETEN_API_KEY is not set")
+    body = _chat_request_body(model, messages, max_tokens, json_mode, request_contract)
+    request = urllib.request.Request(
+        endpoint.url, data=json.dumps(body).encode(), method="POST",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    result = _post_json(request, f"Baseten inference for {model}", opener=open_without_redirects)
+    return _completion_message(result, model)
 
 
 def anthropic_connection(provider: str = "anthropic") -> tuple[str, str]:

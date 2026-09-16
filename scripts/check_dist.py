@@ -57,6 +57,9 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
         run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[deepagents]")
         run("uv", "pip", "check", "--python", python)
         run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
+        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[baseten-deploy]")
+        run("uv", "pip", "check", "--python", python)
+        run(python, "-I", "-m", "pytest", "tests/test_baseten_truss.py", "tests/test_baseten_deployment.py", "tests/test_baseten_deploy_cli.py", cwd=work, env=env)
         # Commit a clean source snapshot in a disposable repository. This tests
         # Git installation of the current working tree without committing it to
         # the developer's repository or depending on a published branch.

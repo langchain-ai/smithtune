@@ -29,6 +29,7 @@ Repository = "https://github.com/langchain-ai/smithtune"
 Issues = "https://github.com/langchain-ai/smithtune/issues"
 
 [project.optional-dependencies]
+baseten-deploy = ["truss==0.18.30"]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
 deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]
 

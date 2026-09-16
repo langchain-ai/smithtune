@@ -206,7 +206,7 @@ class InferenceContract:
                     raise ContractError(f"arguments for tool {name} are not valid JSON") from exc
                 self.validate_tool_arguments(name, parsed)
 
-    def build_fireworks_request(
+    def build_chat_request(
         self,
         *,
         model: str,
