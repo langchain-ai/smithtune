@@ -39,7 +39,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Preparation preserves recorded messages and gathers each example's tool union from all its source LLM runs. Automatic capture is the normal path; a global inference contract is an explicit override.
 - Preparation combines tools by name, keeps the latest description by source run timestamp (run ID breaks ties), and combines optional top-level arguments when shared arguments and other schema fields match. Description replacements are reported in `prepared/tool_description_replacements.json`. The combined definition applies to the whole example. Provider built-ins and incompatible definitions still fail, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.
-- Fireworks supports deployment and replay evaluation. Baseten supports training checkpoints and replay through an existing dedicated endpoint; its deployment lifecycle is managed outside smithtune. Replay compares responses against recorded context without executing tools.
+- Fireworks and Baseten support deployment and replay evaluation. Baseten deploys saved sampler checkpoints through the optional `baseten-deploy` extra; `undeploy` deactivates only the recorded deployment and preserves its checkpoint. Temporary Baseten evaluation deactivates its owned deployment on exit. Replay compares responses against recorded context without executing tools.
 
 ## Change the repository
 

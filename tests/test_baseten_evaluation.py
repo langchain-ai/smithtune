@@ -289,3 +289,52 @@ def test_cli_requires_baseten_endpoint_fields(tmp_path, capsys, command, missing
     assert error.value.code == 2
     assert "Baseten evaluation requires" in capsys.readouterr().err
     assert not (tmp_path / "output/plan.json").exists()
+
+
+def test_temporary_replay_validates_resume_and_skips_compute_when_complete(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    data = replay_data(tmp_path, monkeypatch)
+    output = tmp_path / "replay"
+    events = []
+    monkeypatch.setattr(evaluation, "calibrate_judge", lambda *_: [{"actual": True, "expected": True}])
+    monkeypatch.setattr(evaluation, "judge_replay_candidate", lambda *_: {"pass": True, "reason": "ok"})
+
+    @contextmanager
+    def resources():
+        events.append("activate")
+        try:
+            yield "checkpoint-name"
+        finally:
+            events.append("deactivate")
+
+    def run(**overrides):
+        return evaluation.run_replay_evaluation(
+            data, output, "checkpoint-name", "anthropic/test", confirm=True,
+            chat=lambda *_: {"role": "assistant", "content": "x is 1"},
+            baseten_lifecycle=resources(), baseten_cleanup=lambda: events.append("cleanup_existing"),
+            **{"baseten_endpoint": endpoint(), **overrides},
+        )
+
+    assert run()["serving_mode"] == "temporary"
+    assert events == ["activate", "deactivate"]
+    saved = (output / "results.jsonl").read_bytes()
+    assert run()["serving_mode"] == "temporary"
+    assert events == ["activate", "deactivate", "cleanup_existing"]
+    with pytest.raises(PipelineError, match="different evaluation settings"):
+        run(baseten_endpoint=replace(endpoint(), max_seq_len=4096))
+    assert events == ["activate", "deactivate", "cleanup_existing"]
+    assert (output / "results.jsonl").read_bytes() == saved
+
+
+def test_run_bound_replay_rejects_another_models_prepared_data(tmp_path, monkeypatch):
+    from smithtune.baseten_deployment import validate_evaluation_model
+
+    data = replay_data(tmp_path, monkeypatch)
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "plan.json").write_text(json.dumps({"provider": "baseten", "base_model": "different/base-model"}))
+    (run / "result.json").write_text(json.dumps({"provider": "baseten", "baseten_run_id": "run123",
+        "best_sampler_weights_uri": "bt://loops:run123/sampler_weights/step-1"}))
+    with pytest.raises(PipelineError, match="different base model"):
+        validate_evaluation_model(run, data)

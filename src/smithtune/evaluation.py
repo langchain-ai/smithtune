@@ -9,7 +9,7 @@ import os
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -160,6 +160,7 @@ def prepare_replay_evaluation(
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     *,
     baseten_endpoint: BasetenEndpoint | None = None,
+    baseten_context_limit: int | None = None,
 ) -> dict[str, Any]:
     """Build model-ready replay cases from the untouched test split."""
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
@@ -170,6 +171,12 @@ def prepare_replay_evaluation(
     model = _model_from_manifest(manifest)
     if baseten_endpoint is not None:
         baseten_endpoint.validate()
+        if baseten_context_limit is not None:
+            raise PipelineError("supply a Baseten endpoint or a planned context limit, not both")
+        baseten_context_limit = baseten_endpoint.max_seq_len
+    if baseten_context_limit is not None:
+        if type(baseten_context_limit) is not int or baseten_context_limit < 1:
+            raise PipelineError("Baseten serving context must be a positive integer")
         model = _require_prepared_provider(manifest, "baseten")
     global_contract = _prepared_inference_contract(data_dir, manifest)
     example_contracts = _prepared_example_contracts(data_dir, manifest)
@@ -203,7 +210,7 @@ def prepare_replay_evaluation(
                 contract.validate_messages([*case["messages"], case["reference"]])
             except ContractError as exc:
                 raise PipelineError(f"replay case {case['id']} violates inference contract: {exc}") from exc
-    context_options = {"max_seq_len": baseten_endpoint.max_seq_len} if baseten_endpoint else {}
+    context_options = {"max_seq_len": baseten_context_limit} if baseten_context_limit else {}
     accepted, rejected = validate_replay_context(cases, model, max_output_tokens, **context_options)
     if not accepted:
         raise PipelineError("the test split contains no usable assistant replay cases")
@@ -229,7 +236,8 @@ def prepare_replay_evaluation(
         plan["example_contracts_sha256"] = manifest["example_contracts"]["sha256"]
     if baseten_endpoint is not None:
         plan["baseten_endpoint"] = baseten_endpoint.to_dict()
-        plan["context_limit"] = min(model.max_seq_len, baseten_endpoint.max_seq_len)
+    if baseten_context_limit is not None:
+        plan["context_limit"] = min(model.max_seq_len, baseten_context_limit)
     _jsonl_dump(output_dir / "cases.jsonl", accepted)
     _json_dump(output_dir / "rejected.json", rejected)
     _json_dump(output_dir / "plan.json", plan)
@@ -515,6 +523,8 @@ def run_replay_evaluation(
     confirm: bool,
     deployment: EvalDeployment | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
+    baseten_lifecycle: AbstractContextManager[str] | None = None,
+    baseten_cleanup: Callable[[], Any] | None = None,
     chat: Callable[
         [str, list[dict[str, Any]], int, bool, InferenceContract | None],
         dict[str, Any],
@@ -531,6 +541,8 @@ def run_replay_evaluation(
         deployment.validate()
         if deployment.model != tuned_model:
             raise PipelineError("temporary deployment model differs from tuned model")
+    if (baseten_lifecycle is not None or baseten_cleanup is not None) and baseten_endpoint is None:
+        raise PipelineError("Baseten lifecycle requires a saved Baseten endpoint")
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
     candidate_credential = "BASETEN_API_KEY" if baseten_endpoint else "FIREWORKS_API_KEY"
@@ -550,7 +562,7 @@ def run_replay_evaluation(
     if base_model:
         models.insert(0, ("base", base_model))
     config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
-              "serving_mode": "preemptible" if deployment else "existing"}
+              "serving_mode": "temporary" if baseten_lifecycle is not None else ("preemptible" if deployment else "existing")}
     if judge_endpoint is not None:
         config["judge_endpoint"] = judge_endpoint
     if baseten_endpoint is not None:
@@ -628,6 +640,8 @@ def run_replay_evaluation(
     pending = [case for case in cases if case["id"] not in completed]
     if deployment and not pending:
         TemporaryDeployment(deployment, output_dir).cleanup_existing()
+    if baseten_cleanup is not None and not pending:
+        baseten_cleanup()
     if pending:
         calibration = calibrate_judge(cases, judge_model, chat_fn)
         _jsonl_dump(output_dir / "calibration.jsonl", calibration)
@@ -669,6 +683,8 @@ def run_replay_evaluation(
         return scored
 
     lifecycle = TemporaryDeployment(deployment, output_dir) if deployment and pending else nullcontext(tuned_model)
+    if baseten_lifecycle is not None and pending:
+        lifecycle = baseten_lifecycle
     state_path = output_dir / "evaluation-state.json"
     _json_dump(state_path, {"status": "running", "completed": len(results), "total": len(cases)})
     try:
@@ -776,7 +792,7 @@ def run_replay_evaluation(
                     "paired_ties": len(group) - group_wins - group_regressions,
                 }
             )
-    summary["serving_mode"] = "preemptible" if deployment else "existing"
+    summary["serving_mode"] = config["serving_mode"]
     if baseten_endpoint is not None:
         summary["baseten_endpoint"] = baseten_endpoint.to_dict()
     _json_dump(output_dir / "summary.json", summary)
