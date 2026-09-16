@@ -116,14 +116,14 @@ def test_baseten_replay_uses_endpoint_and_checkpoint_from_receipt(tmp_path, monk
     evaluate = Mock(return_value={"status": "complete"})
     monkeypatch.setattr(cli.replay_evaluation, "prepare_replay_evaluation", plan)
     monkeypatch.setattr(cli.replay_evaluation, "run_replay_evaluation", evaluate)
-    cli.main([command, "--provider", "baseten", "--run-dir", "run",
+    cli.main([command, "--provider", "baseten", "--serving-mode", "existing", "--run-dir", "run",
               "--data-dir", "data", "--output-dir", str(tmp_path / "replay")])
     load.assert_called_once_with(Path("run"))
     called = plan if command == "eval-plan" else evaluate
     assert called.call_args.kwargs["baseten_endpoint"] == endpoint
     if command == "evaluate":
         assert called.call_args.args[2] == "checkpoint-name"
-        assert "fireworks_sampler" not in called.call_args.kwargs
+        assert "replay_sampler" not in called.call_args.kwargs
 
 
 @pytest.mark.parametrize("command", ["eval-plan", "evaluate"])
@@ -135,7 +135,7 @@ def test_baseten_receipt_rejects_manual_endpoint_overrides(tmp_path, monkeypatch
     load = Mock()
     monkeypatch.setattr(cli.baseten_deployment, "load_endpoint", load)
     with pytest.raises(SystemExit):
-        cli.main([command, "--provider", "baseten", "--run-dir", "run",
+        cli.main([command, "--provider", "baseten", "--serving-mode", "existing", "--run-dir", "run",
                   "--output-dir", str(tmp_path / "replay"), flag, value])
     assert "uses the saved Baseten endpoint" in capsys.readouterr().err
     load.assert_not_called()
@@ -314,7 +314,7 @@ def test_baseten_evaluation_requires_separate_training_and_output_directories(tm
 @pytest.mark.parametrize("provider", ["baseten", "fireworks"])
 def test_existing_mode_rejects_temporary_baseten_settings(tmp_path, capsys, flag, value, provider):
     with pytest.raises(SystemExit):
-        cli.main(["eval-plan", "--provider", provider, "--output-dir", str(tmp_path), flag, value])
+        cli.main(["eval-plan", "--provider", provider, "--serving-mode", "existing", "--output-dir", str(tmp_path), flag, value])
     assert ("require --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
 
 
@@ -390,7 +390,7 @@ def test_receipt_evaluation_checks_training_model_before_writing_or_running(tmp_
     monkeypatch.setattr(cli.replay_evaluation, "run_replay_evaluation", run)
     monkeypatch.setattr(cli.replay_evaluation, "prepare_replay_evaluation", prepare)
     with pytest.raises(SystemExit):
-        cli.main([command, "--provider", "baseten", "--run-dir", str(tmp_path / "training"),
+        cli.main([command, "--provider", "baseten", "--serving-mode", "existing", "--run-dir", str(tmp_path / "training"),
                   "--data-dir", str(tmp_path / "data"), "--output-dir", str(tmp_path / "replay")])
     validate_evaluation_model.assert_called_once_with(tmp_path / "training", tmp_path / "data")
     run.assert_not_called()

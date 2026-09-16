@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from smithtune import baseten_deployment as deployment
+from smithtune.providers import baseten_deployment as deployment
 from smithtune.inference import BasetenEndpoint
 from smithtune.providers.base import PipelineError
 

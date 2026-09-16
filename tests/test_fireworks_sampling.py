@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune import cli, evaluation, fireworks_sampling as sampling
+from smithtune import cli, evaluation
+from smithtune.providers import fireworks_sampling as sampling
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
 from test_pipeline import write_manifest
@@ -141,7 +142,7 @@ def test_saved_generations_resume_judging_without_reopening_session(tmp_path, mo
         checkpoint = CHECKPOINT
 
         def __init__(self):
-            self.config = {"checkpoint": CHECKPOINT}
+            self.config = {"checkpoint": CHECKPOINT, "provider": "fireworks", "serving_mode": "serverless"}
 
         def __enter__(self):
             calls.append("open")
@@ -171,7 +172,7 @@ def test_saved_generations_resume_judging_without_reopening_session(tmp_path, mo
 
     monkeypatch.setattr(evaluation, "judge_replay_candidate", score)
     options = dict(data_dir=data, output_dir=tmp_path / "replay", tuned_model=CHECKPOINT,
-                   judge_model="judge", chat=judge, fireworks_sampler=Sampler(), confirm=True)
+                   judge_model="judge", chat=judge, replay_sampler=Sampler(), confirm=True)
     with pytest.raises(PipelineError, match="interrupted"):
         evaluation.run_replay_evaluation(**options)
     assert calls == ["open", "generate", "close"]
@@ -200,8 +201,8 @@ def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypa
     _, options = calls[0]
     assert calls[0][0][1] == run / "replay"
     assert options["base_model"] == DEFAULT_MODEL.base_model
-    assert options["fireworks_sampler"].config["lora_alpha"] == 16
-    assert options["fireworks_sampler"].config["lora_rank"] == 4
+    assert options["replay_sampler"].config["lora_alpha"] == 16
+    assert options["replay_sampler"].config["lora_rank"] == 4
     with pytest.raises(SystemExit):
         cli.main(["evaluate", "--serving-mode", "preemptible"])
     assert "invalid choice" in capsys.readouterr().err
@@ -219,7 +220,7 @@ def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
 
 @pytest.mark.parametrize("failure", ["calibration", "replay"])
 def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_path, monkeypatch, failure):
-    from smithtune import fireworks_training as runtime
+    from smithtune.providers import fireworks_training as runtime
     from smithtune.providers import fireworks
 
     data = replay_data(tmp_path, monkeypatch)

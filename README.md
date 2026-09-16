@@ -1,8 +1,7 @@
 <h1 align="center">smithtune</h1>
 
 Fine-tune models on LangSmith trajectories with Fireworks or Baseten.
-Both providers support training, deployment, and replay evaluation. Baseten
-serves Loops checkpoints through dedicated endpoints.
+Both providers support training, sampler replay evaluation, and deployment.
 
 ## Setup
 
@@ -333,7 +332,9 @@ Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json`
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
-## Deploy and evaluate a Baseten checkpoint
+## Deploy a Baseten checkpoint
+
+For replay before deployment, use the [sampler workflow](#evaluate-a-trained-model) below.
 
 Install the optional deployment tools:
 
@@ -371,7 +372,7 @@ For an endpoint that stays running, deploy and evaluate using its saved receipt:
 ```bash
 smithtune deploy --provider baseten --run-dir "$run_dir" \
   --accelerator H200:1 --max-seq-len 32768 --confirm
-smithtune evaluate --provider baseten --run-dir "$run_dir" \
+smithtune evaluate --provider baseten --serving-mode existing --run-dir "$run_dir" \
   --data-dir data/qwen3p8-27b --output-dir "$run_dir/replay" --confirm
 smithtune undeploy --provider baseten --run-dir "$run_dir" --confirm
 ```
@@ -416,24 +417,27 @@ This path uses an existing deployment and leaves it running; manage externally
 created deployments in Baseten. Training support alone does not verify a model's
 serving configuration.
 
-## Evaluate a trained model (Fireworks)
+## Evaluate a trained model
 
-Use the serverless sampler to compare the base model and best SFT checkpoint.
-Evaluation needs no deployment, hardware shape, or model promotion.
+Both providers can compare the base model and best checkpoint through their
+training API samplers. No deployment command or model promotion is needed.
 
-For training and replay in the same session:
+To run replay after training:
 
 ```bash
-smithtune plan --provider fireworks --data-dir data --evaluate
-smithtune train --provider fireworks --data-dir data \
+provider=baseten # or fireworks
+smithtune plan --provider "$provider" --data-dir data --evaluate
+smithtune train --provider "$provider" --data-dir data \
   --run-dir runs/my-sft --evaluate --confirm
 ```
 
 `--evaluate` adds model and judge inference to the training run. The plan shows
-case counts, prompt tokens, and call counts. Both training and sampling use the
-official Fireworks API and incur the current serverless token charges. The judge
-uses its provider's inference rates. Repeat any custom settings on `plan` and
-`train`; a preview does not save command options for the next command.
+case counts, prompt tokens, and call counts. Fireworks reuses its serverless
+training session. Baseten shuts down its trainer, then starts dedicated Loops
+samplers for the saved best weights and base model. Both samplers are deactivated
+on exit; sampler and judge costs are separate from Baseten's training spend guard.
+Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key when using
+an Anthropic judge. Repeat custom settings on `plan` and `train`.
 
 ```text
 prepare
@@ -444,13 +448,13 @@ prepare
 train --evaluate
   +-- build replay cases from test.jsonl
   +-- check the judge on known positive and negative examples
-  +-- open one serverless session
+  +-- start training
   +-- train, validate, and save a checkpoint after each epoch
   +-- select the epoch with the lowest validation loss
-  +-- load that checkpoint in the same session
+  +-- open samplers for that checkpoint and the base model
   +-- sample base and tuned responses to the same test cases
   +-- score and save results
-  +-- close samplers and the service client
+  +-- clean up sampler resources
 ```
 
 You do not write separate replay examples. The CLI makes a case before each
@@ -463,18 +467,17 @@ Validation loss selects the checkpoint. Replay scores do not influence training
 or checkpoint selection. The full-trajectory triage council is a separate step
 that decides which conversations enter the dataset.
 
-For a completed Fireworks training run:
+For a completed training run:
 
 ```bash
-smithtune eval-plan --data-dir data --run-dir runs/my-sft
-smithtune evaluate --data-dir data --run-dir runs/my-sft --confirm
+smithtune eval-plan --provider "$provider" --data-dir data --run-dir runs/my-sft
+smithtune evaluate --provider "$provider" --data-dir data --run-dir runs/my-sft --confirm
 ```
 
 `eval-plan` builds and previews cases without opening a session or calling models.
-`evaluate` reads the best training checkpoint from `result.json`, loads it into a
-new serverless session without training steps, and uses the same sampler and
-scorer as `train --evaluate`. Base-model comparison is automatic. The saved
-LoRA rank and alpha are used when restoring the checkpoint.
+`evaluate` reads the best checkpoint from `result.json` and uses the same sampler
+and scorer as `train --evaluate`, without training steps. Base-model comparison
+is automatic. Periodic replay during training is not implemented.
 
 Both paths support `--judge-model`, `--concurrency`, `--max-output-tokens`, and
 `--max-points-per-trajectory` (an optional cap; the default scores every assistant
@@ -483,7 +486,8 @@ action). With `train`, these options require `--evaluate`. Results go to
 comparison with different settings.
 
 Replay checks tool selection, JSON arguments, argument schemas, and reference
-arguments. A calibrated judge also scores whether each response matches the
+arguments. Ambiguous text-encoded argument types fail format validation.
+A calibrated judge also scores whether each response matches the
 recorded behavior. Results include base and tuned pass rates, paired wins and
 regressions, and scores by text/tool-call case type.
 
@@ -491,7 +495,7 @@ regressions, and scores by text/tool-call case type.
 - `generations.jsonl`: generated responses saved before judging.
 - `results.jsonl`: per-case responses, checks, and judgments.
 - `summary.json`: aggregate scores and base-versus-tuned differences.
-- `sampler.json`: the session, snapshot, and client cleanup record.
+- `sampler.json`: sampler identities and cleanup status.
 
 Repeat standalone `evaluate` with the same data, run directory, output directory,
 and settings to finish missing results. Saved generations can be judged without
@@ -500,9 +504,10 @@ results and checkpoints survive a replay failure; the command reports the
 incomplete replay and exits with an error. Use a new training run directory to
 train again.
 
-This path requires a resumable serverless training checkpoint and a base model
-supported by the Fireworks serverless pool. A promoted model ID alone is not a
-sampler checkpoint. The CLI does not create evaluation deployments as a fallback.
+Fireworks requires its saved serverless training checkpoint; a promoted model ID
+alone cannot be sampled. Baseten requires saved Loops sampler weights. If a
+process is killed or Baseten cleanup fails, use the deployment IDs and cleanup
+instructions in `sampler.json` to stop paid capacity before resuming.
 See [Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models#in-session-sampling-serverless-training).
 
 Replay judging calls Anthropic directly by default with `ANTHROPIC_API_KEY`.

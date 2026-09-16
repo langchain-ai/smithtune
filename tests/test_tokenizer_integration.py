@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.parametrize("stop_reason,closed_body,valid", [("stop", True, True), ("length", True, False), ("stop", False, False)])
 def test_kimi_sampler_stop_framing_preserves_truncation_checks(stop_reason, closed_body, valid):
-    from smithtune.fireworks_sampling import restore_stop_suffix
+    from smithtune.providers.fireworks_sampling import restore_stop_suffix
 
     renderer = load_training_renderer(fireworks.MODEL_SPECS["kimi-k3"])
     text = "reason<|close|>think<|sep|><|open|>response<|sep|>ready"

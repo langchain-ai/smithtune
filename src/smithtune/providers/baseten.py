@@ -9,6 +9,7 @@ import os
 import random
 import re
 import signal
+import tempfile
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
@@ -661,7 +662,8 @@ class BasetenProvider:
             check_render=check_render,
         )
 
-    def plan(self, data_dir: Path, run_id: str, settings: Any) -> dict[str, Any]:
+    def plan(self, data_dir: Path, run_id: str, settings: Any, *,
+             replay: dict[str, Any] | None = None) -> dict[str, Any]:
         """Resolve the prepared model and run settings without remote calls."""
         _reject_loops_reuse_overrides()
         manifest, _train_rows, _validation_rows = _load_prepared_data(data_dir)
@@ -669,7 +671,7 @@ class BasetenProvider:
         settings = _resolved_settings(settings, model)
         prepared_max_seq_len = _prepared_max_sequence_tokens(manifest, model)
         max_seq_len = min(prepared_max_seq_len, model.training_context_limit)
-        return {
+        value = {
             "run_id": run_id,
             "provider": self.name,
             "method": "Baseten Loops LoRA SFT",
@@ -712,6 +714,21 @@ class BasetenProvider:
             },
         }
 
+        if replay is not None:
+            from smithtune.evaluation import prepare_replay_evaluation
+
+            if replay["concurrency"] < 1:
+                raise PipelineError("evaluation concurrency must be positive")
+            with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
+                preview = prepare_replay_evaluation(
+                    data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
+                )
+            value["replay"] = {**preview, **replay, "serving_mode": "sampler", "evaluated_models": 2,
+                               "capacity": "dedicated", "timing": "after trainer shutdown",
+                               "cleanup": "deactivate both sampler deployments on exit",
+                               "budget": "sampler and judge costs are separate from the training budget"}
+        return value
+
     def train(
         self,
         data_dir: Path,
@@ -721,6 +738,7 @@ class BasetenProvider:
         *,
         confirm: bool,
         init_from_checkpoint: str | None,
+        replay: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the guarded Loops SFT lifecycle through injected remote seams."""
         if not confirm:
@@ -731,7 +749,11 @@ class BasetenProvider:
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
 
-        plan = self.plan(Path(data_dir), run_id, settings)
+        plan = self.plan(Path(data_dir), run_id, settings, replay=replay)
+        if replay is not None:
+            from smithtune.evaluation import validate_judge_credentials
+
+            validate_judge_credentials(replay["judge_model"])
         manifest, train_rows, validation_rows = _load_prepared_data(Path(data_dir))
         model = _validate_manifest(manifest)
         settings = _resolved_settings(settings, model)
@@ -830,6 +852,16 @@ class BasetenProvider:
         }
         audit_identity = _audit_identity(Path(data_dir), manifest, plan)
         _atomic_json(run_dir / "plan.json", plan)
+        if replay is not None:
+            from smithtune.artifacts import _load_jsonl
+            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation
+            from smithtune.inference import _chat_completion
+
+            prepare_replay_evaluation(
+                data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
+            )
+            ensure_judge_calibration(_load_jsonl(run_dir / "replay" / "cases.jsonl"),
+                                     run_dir / "replay", replay["judge_model"], _chat_completion)
         _atomic_json(epochs_path, [])
         update_state(
             status="planned",
@@ -1181,6 +1213,26 @@ class BasetenProvider:
             raise primary_error
         if cleanup_error is not None:
             raise cleanup_error
+        if replay is not None:
+            from smithtune.providers.baseten_sampling import BasetenReplaySampler
+            from smithtune.evaluation import run_replay_evaluation
+
+            try:
+                if best_sampler_uri is None:
+                    raise PipelineError("training produced no best checkpoint for replay")
+                sampler = BasetenReplaySampler(model, best_sampler_uri, run_dir / "replay")
+                result["replay"] = run_replay_evaluation(
+                    data_dir, run_dir / "replay", best_sampler_uri,
+                    base_model=model.base_model, replay_sampler=sampler, confirm=True, **replay,
+                )
+            except BaseException:
+                result["replay_status"] = "incomplete"
+                _atomic_json(result_path, result)
+                update_state(replay_status="incomplete")
+                raise
+            result["replay_status"] = "completed"
+            _atomic_json(result_path, result)
+            update_state(replay_status="completed")
         return result
 
 
