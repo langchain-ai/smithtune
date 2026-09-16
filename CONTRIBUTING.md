@@ -11,6 +11,15 @@ Training API sampler and the same renderer for replay. When changing these
 adapters, check checkpoint selection, session cleanup, tool parsing, and replay
 recovery from saved generations.
 
+`baseten_sampling.py` uses the Loops sampler REST endpoint to save resource IDs
+before the SDK readiness wait, then samples through `baseten-loops`. Closing the
+SDK client does not release GPUs: deactivate each owned deployment explicitly.
+`baseten_sampling_formats.py` parses the pinned official model formats without a
+Fireworks renderer dependency. Test native-tokenizer roundtrips, malformed tool
+calls, best-checkpoint identity, cleanup failures, and cached-generation resume
+when changing either adapter. These offline checks do not replace a paid sampler
+smoke test.
+
 ```bash
 sfw uv sync --locked --extra test --python 3.12
 uv run --no-sync smithtune --help
@@ -92,7 +101,7 @@ configuration and checks tools, reasoning, and loss masks without provisioning
 training or downloading model weights. Run those checks locally with:
 
 ```bash
-SMITHTUNE_TOKENIZER_TESTS=1 uv run --no-sync pytest tests/test_tokenizer_integration.py
+SMITHTUNE_TOKENIZER_TESTS=1 uv run --no-sync pytest tests/test_tokenizer_integration.py tests/test_baseten_sampling_formats.py
 ```
 
 The ordinary test suite uses synthetic tokenizers and requires no Hub access.

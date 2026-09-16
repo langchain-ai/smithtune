@@ -490,7 +490,7 @@ class FireworksProvider:
                     _write_run_md(run_dir / "run.md", plan, "evaluating", "wait for replay")
                     result["replay"] = run_replay_evaluation(
                         data_dir, run_dir / "replay", checkpoint,
-                        base_model=model.base_model, fireworks_sampler=sampler, confirm=True, **replay,
+                        base_model=model.base_model, replay_sampler=sampler, confirm=True, **replay,
                     )
                     _json_dump(run_dir / "result.json", result)
         except BaseException:

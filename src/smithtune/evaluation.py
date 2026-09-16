@@ -547,7 +547,7 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
-    fireworks_sampler: Any | None = None,
+    replay_sampler: Any | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_lifecycle: AbstractContextManager[str] | None = None,
     baseten_cleanup: Callable[[], Any] | None = None,
@@ -561,15 +561,16 @@ def run_replay_evaluation(
     _require_confirm(confirm, "model and judge inference")
     if baseten_endpoint is not None:
         baseten_endpoint.validate()
-        if fireworks_sampler is not None:
-            raise PipelineError("a Fireworks sampler cannot serve Baseten evaluation")
-    if fireworks_sampler is not None and fireworks_sampler.checkpoint != tuned_model:
+        if replay_sampler is not None:
+            raise PipelineError("supply a sampler or a Baseten endpoint, not both")
+    if replay_sampler is not None and replay_sampler.checkpoint != tuned_model:
         raise PipelineError("sampler checkpoint differs from tuned model")
     if (baseten_lifecycle is not None or baseten_cleanup is not None) and baseten_endpoint is None:
         raise PipelineError("Baseten lifecycle requires a saved Baseten endpoint")
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
-    candidate_credential = "BASETEN_API_KEY" if baseten_endpoint else "FIREWORKS_API_KEY"
+    sampler_provider = replay_sampler.config["provider"] if replay_sampler is not None else None
+    candidate_credential = "BASETEN_API_KEY" if baseten_endpoint or sampler_provider == "baseten" else "FIREWORKS_API_KEY"
     if chat is None and not os.environ.get(candidate_credential, "").strip():
         raise PipelineError(f"{candidate_credential} is not set")
     judge_provider = judge_model.partition("/")[0]
@@ -578,7 +579,7 @@ def run_replay_evaluation(
         anthropic_connection(judge_provider)
     if chat is None and judge_endpoint is None and not os.environ.get("FIREWORKS_API_KEY", "").strip():
         raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
-    if baseten_endpoint is None or judge_endpoint is None:
+    if candidate_credential == "FIREWORKS_API_KEY" or judge_endpoint is None:
         _set_skill_session()
     results_path = output_dir / "results.jsonl"
     results = _load_jsonl(results_path) if results_path.exists() else []
@@ -586,13 +587,13 @@ def run_replay_evaluation(
     if base_model:
         models.insert(0, ("base", base_model))
     config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
-              "serving_mode": "temporary" if baseten_lifecycle is not None else ("serverless" if fireworks_sampler else "existing")}
+              "serving_mode": "temporary" if baseten_lifecycle is not None else (replay_sampler.config["serving_mode"] if replay_sampler else "existing")}
     if judge_endpoint is not None:
         config["judge_endpoint"] = judge_endpoint
     if baseten_endpoint is not None:
         config["baseten_endpoint"] = baseten_endpoint.to_dict()
-    if fireworks_sampler:
-        config["sampler"] = fireworks_sampler.config
+    if replay_sampler:
+        config["sampler"] = replay_sampler.config
     config_path = output_dir / "evaluation-config.json"
     if config_path.exists():
         saved_config = _load_json(config_path)
@@ -615,6 +616,8 @@ def run_replay_evaluation(
                 raise PipelineError("existing replay results use different serving routes; use a new output directory")
     if (output_dir / "generations.jsonl").exists() and not config_path.exists():
         raise PipelineError("saved generations have no evaluation settings; use a new output directory")
+    if replay_sampler is not None:
+        _require_prepared_provider(_load_json(data_dir / "prepared" / "manifest.json"), sampler_provider)
     plan = prepare_replay_evaluation(
         data_dir,
         output_dir,
@@ -631,8 +634,8 @@ def run_replay_evaluation(
         partial(_baseten_chat_completion, endpoint=baseten_endpoint)
         if baseten_endpoint is not None and chat is None else chat_fn
     )
-    if fireworks_sampler:
-        candidate_fn = fireworks_sampler.generate
+    if replay_sampler:
+        candidate_fn = replay_sampler.generate
     cases_by_id = {case["id"]: case for case in cases}
     for result in results:
         saved_case = result.get("case", {})
@@ -721,7 +724,7 @@ def run_replay_evaluation(
         return scored
 
     needs_samples = any((case["id"], label) not in generated for case in pending for label, _ in models)
-    lifecycle = fireworks_sampler if fireworks_sampler and needs_samples else nullcontext(tuned_model)
+    lifecycle = replay_sampler if replay_sampler and needs_samples else nullcontext(tuned_model)
     if baseten_lifecycle is not None and pending:
         lifecycle = baseten_lifecycle
     state_path = output_dir / "evaluation-state.json"

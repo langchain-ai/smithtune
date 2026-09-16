@@ -31,7 +31,7 @@ jobs:
       - name: Verify supported tokenizer integrations
         env:
           SMITHTUNE_TOKENIZER_TESTS: '1'
-        run: uv run --no-sync pytest tests/test_tokenizer_integration.py
+        run: uv run --no-sync pytest tests/test_tokenizer_integration.py tests/test_baseten_sampling_formats.py
       - name: Test installed wheels and rebuilt source distributions
         run: python scripts/check_dist.py
       - uses: actions/upload-artifact@v4
