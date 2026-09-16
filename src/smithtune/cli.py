@@ -18,6 +18,7 @@ from smithtune.dataset_artifacts import new_run_directory
 from smithtune.triage_source import load_snapshot, source_options
 from smithtune import evaluation as replay_evaluation
 from smithtune.inference_contract import ContractError, load_inference_contract
+from smithtune.inference import BasetenEndpoint
 from smithtune.providers.baseten import (
     MODEL_SPECS as BASETEN_MODEL_SPECS,
     BasetenRuntimeError,
@@ -251,6 +252,9 @@ def _parser() -> argparse.ArgumentParser:
     eval_plan = sub.add_parser("eval-plan", help="build held-out trajectory replay cases")
     evaluation = sub.add_parser("evaluate", help="compare base and tuned actions with a calibrated judge")
     for command in (eval_plan, evaluation):
+        command.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="candidate serving provider (default: %(default)s)")
+        command.add_argument("--model-id", help="existing Baseten model ID")
+        command.add_argument("--max-seq-len", type=int, help="existing Baseten endpoint's configured context limit (required for Baseten)")
         command.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
         command.add_argument("--output-dir", type=Path, required=True)
         command.add_argument(
@@ -262,11 +266,11 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
         command.add_argument("--serving-mode", choices=("existing", "preemptible"), default="existing")
         command.add_argument("--account-id", help="account owning the promoted model for temporary evaluation")
-        command.add_argument("--deployment-id", help="stable ID for the owned temporary deployment")
+        command.add_argument("--deployment-id", help="existing Baseten deployment ID, or ID for an owned temporary Fireworks deployment")
         command.add_argument("--deployment-shape", help="compatible Fireworks deployment shape resource")
         command.add_argument("--deployment-timeout", type=float, default=600, help="temporary deployment readiness timeout in seconds")
     eval_plan.add_argument("--tuned-model", help="promoted model resource; required for preemptible mode")
-    evaluation.add_argument("--tuned-model", required=True)
+    evaluation.add_argument("--tuned-model", required=True, help="Fireworks model route or Baseten checkpoint name served by the endpoint")
     evaluation.add_argument(
         "--base-model",
         help="optional base-model serving route for before-versus-after comparison",
@@ -295,6 +299,8 @@ def _settings_from_args(args: argparse.Namespace) -> CommonSFTSettings:
 
 
 def _eval_deployment(args) -> EvalDeployment | None:
+    if args.provider == "baseten":
+        return None
     fields = (args.account_id, args.deployment_id, args.deployment_shape)
     if args.serving_mode == "existing":
         if any(fields) or args.deployment_timeout != 600:
@@ -305,6 +311,21 @@ def _eval_deployment(args) -> EvalDeployment | None:
     config = EvalDeployment(args.tuned_model, *fields, timeout=args.deployment_timeout)
     config.validate()
     return config
+
+
+def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
+    if args.provider != "baseten":
+        if args.model_id is not None or args.max_seq_len is not None:
+            raise PipelineError("--model-id and --max-seq-len require --provider baseten")
+        return None
+    if (args.serving_mode != "existing" or args.account_id is not None
+            or args.deployment_shape is not None or args.deployment_timeout != 600):
+        raise PipelineError("Baseten evaluation supports existing endpoints only; omit Fireworks deployment options")
+    if args.model_id is None or args.deployment_id is None or args.max_seq_len is None:
+        raise PipelineError("Baseten evaluation requires --model-id, --deployment-id, and --max-seq-len")
+    endpoint = BasetenEndpoint(args.model_id, args.deployment_id, args.max_seq_len)
+    endpoint.validate()
+    return endpoint
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -440,6 +461,7 @@ def main(argv: list[str] | None = None) -> None:
                 confirm=args.confirm,
             )
         elif args.command == "eval-plan":
+            baseten_endpoint = _eval_baseten_endpoint(args)
             serving = _eval_deployment(args)
             with output_lock(args.output_dir):
                 value = replay_evaluation.prepare_replay_evaluation(
@@ -447,11 +469,13 @@ def main(argv: list[str] | None = None) -> None:
                     args.output_dir,
                     args.max_points_per_trajectory,
                     args.max_output_tokens,
+                    baseten_endpoint=baseten_endpoint,
                 )
                 if serving:
                     value["deployment"] = serving.plan()
                     _json_dump(args.output_dir / "plan.json", value)
         elif args.command == "evaluate":
+            baseten_endpoint = _eval_baseten_endpoint(args)
             value = replay_evaluation.run_replay_evaluation(
                 args.data_dir,
                 args.output_dir,
@@ -463,6 +487,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_output_tokens=args.max_output_tokens,
                 confirm=args.confirm,
                 deployment=_eval_deployment(args),
+                baseten_endpoint=baseten_endpoint,
             )
         else:
             FireworksProvider().undeploy(args.account_id, args.deployment_id, confirm=args.confirm)

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,14 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
 from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
     _prepared_example_contracts, _prepared_split,
+    _require_prepared_provider,
 )
 from smithtune.eval_deployment import EvalDeployment, TemporaryDeployment
 from smithtune.artifacts import exclusive_output
-from smithtune.inference import ANTHROPIC_ENDPOINTS, anthropic_connection, _chat_completion, _inference_messages
+from smithtune.inference import (
+    ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection,
+    _baseten_chat_completion, _chat_completion, _inference_messages,
+)
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import _require_confirm, _set_skill_session
@@ -153,6 +158,8 @@ def prepare_replay_evaluation(
     output_dir: Path,
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
+    *,
+    baseten_endpoint: BasetenEndpoint | None = None,
 ) -> dict[str, Any]:
     """Build model-ready replay cases from the untouched test split."""
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
@@ -161,6 +168,9 @@ def prepare_replay_evaluation(
     if _prepared_split(manifest)["test"] < 1:
         raise PipelineError("prepared dataset has no test rows")
     model = _model_from_manifest(manifest)
+    if baseten_endpoint is not None:
+        baseten_endpoint.validate()
+        model = _require_prepared_provider(manifest, "baseten")
     global_contract = _prepared_inference_contract(data_dir, manifest)
     example_contracts = _prepared_example_contracts(data_dir, manifest)
     test_rows = _load_jsonl(data_dir / "prepared" / "test.jsonl")
@@ -193,7 +203,8 @@ def prepare_replay_evaluation(
                 contract.validate_messages([*case["messages"], case["reference"]])
             except ContractError as exc:
                 raise PipelineError(f"replay case {case['id']} violates inference contract: {exc}") from exc
-    accepted, rejected = validate_replay_context(cases, model, max_output_tokens)
+    context_options = {"max_seq_len": baseten_endpoint.max_seq_len} if baseten_endpoint else {}
+    accepted, rejected = validate_replay_context(cases, model, max_output_tokens, **context_options)
     if not accepted:
         raise PipelineError("the test split contains no usable assistant replay cases")
     case_types = Counter(case["case_type"] for case in accepted)
@@ -216,6 +227,9 @@ def prepare_replay_evaluation(
         plan["contract_sha256"] = global_contract.contract_sha256
     if example_contracts is not None:
         plan["example_contracts_sha256"] = manifest["example_contracts"]["sha256"]
+    if baseten_endpoint is not None:
+        plan["baseten_endpoint"] = baseten_endpoint.to_dict()
+        plan["context_limit"] = min(model.max_seq_len, baseten_endpoint.max_seq_len)
     _jsonl_dump(output_dir / "cases.jsonl", accepted)
     _json_dump(output_dir / "rejected.json", rejected)
     _json_dump(output_dir / "plan.json", plan)
@@ -500,6 +514,7 @@ def run_replay_evaluation(
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
     deployment: EvalDeployment | None = None,
+    baseten_endpoint: BasetenEndpoint | None = None,
     chat: Callable[
         [str, list[dict[str, Any]], int, bool, InferenceContract | None],
         dict[str, Any],
@@ -508,30 +523,27 @@ def run_replay_evaluation(
 ) -> dict[str, Any]:
     """Score tuned next messages and optionally compare a base model."""
     _require_confirm(confirm, "model and judge inference")
+    if baseten_endpoint is not None:
+        baseten_endpoint.validate()
+        if deployment is not None:
+            raise PipelineError("Baseten evaluation supports existing endpoints only")
     if deployment is not None:
         deployment.validate()
         if deployment.model != tuned_model:
             raise PipelineError("temporary deployment model differs from tuned model")
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
-    if chat is None and not os.environ.get("FIREWORKS_API_KEY"):
-        raise PipelineError("FIREWORKS_API_KEY is not set")
+    candidate_credential = "BASETEN_API_KEY" if baseten_endpoint else "FIREWORKS_API_KEY"
+    if chat is None and not os.environ.get(candidate_credential, "").strip():
+        raise PipelineError(f"{candidate_credential} is not set")
     judge_provider = judge_model.partition("/")[0]
     judge_endpoint = ANTHROPIC_ENDPOINTS.get(judge_provider, (None, None))[0]
     if chat is None and judge_endpoint is not None:
         anthropic_connection(judge_provider)
-    _set_skill_session()
-    plan = prepare_replay_evaluation(
-        data_dir,
-        output_dir,
-        max_points_per_trajectory,
-        max_output_tokens,
-    )
-    cases = _load_jsonl(output_dir / "cases.jsonl")
-    manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    global_contract = _prepared_inference_contract(data_dir, manifest)
-    example_contracts = _prepared_example_contracts(data_dir, manifest)
-    chat_fn = chat or _chat_completion
+    if chat is None and judge_endpoint is None and not os.environ.get("FIREWORKS_API_KEY", "").strip():
+        raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
+    if baseten_endpoint is None or judge_endpoint is None:
+        _set_skill_session()
     results_path = output_dir / "results.jsonl"
     results = _load_jsonl(results_path) if results_path.exists() else []
     models = [("tuned", tuned_model)]
@@ -541,10 +553,10 @@ def run_replay_evaluation(
               "serving_mode": "preemptible" if deployment else "existing"}
     if judge_endpoint is not None:
         config["judge_endpoint"] = judge_endpoint
+    if baseten_endpoint is not None:
+        config["baseten_endpoint"] = baseten_endpoint.to_dict()
     if deployment:
         config["deployment"] = asdict(deployment)
-        plan["deployment"] = deployment.plan()
-        _json_dump(output_dir / "plan.json", plan)
     config_path = output_dir / "evaluation-config.json"
     if config_path.exists():
         saved_config = _load_json(config_path)
@@ -554,6 +566,38 @@ def run_replay_evaluation(
             raise PipelineError("existing replay results use different evaluation settings")
     if results and judge_endpoint is not None and not config_path.exists():
         raise PipelineError("existing replay results do not record the judge endpoint; use a new output directory")
+    if results and baseten_endpoint is not None and not config_path.exists():
+        raise PipelineError("existing replay results do not record the Baseten endpoint; use a new output directory")
+    expected_routes = {
+        label: baseten_endpoint.url if baseten_endpoint else (
+            deployment.route if deployment is not None and label == "tuned" else model
+        )
+        for label, model in models
+    }
+    for result in results:
+        for label, route in expected_routes.items():
+            saved = result.get(label)
+            if isinstance(saved, dict) and saved.get("serving_route") not in (None, route):
+                raise PipelineError("existing replay results use different serving routes; use a new output directory")
+    plan = prepare_replay_evaluation(
+        data_dir,
+        output_dir,
+        max_points_per_trajectory,
+        max_output_tokens,
+        baseten_endpoint=baseten_endpoint,
+    )
+    cases = _load_jsonl(output_dir / "cases.jsonl")
+    manifest = _load_json(data_dir / "prepared" / "manifest.json")
+    global_contract = _prepared_inference_contract(data_dir, manifest)
+    example_contracts = _prepared_example_contracts(data_dir, manifest)
+    chat_fn = chat or _chat_completion
+    candidate_fn = (
+        partial(_baseten_chat_completion, endpoint=baseten_endpoint)
+        if baseten_endpoint is not None and chat is None else chat_fn
+    )
+    if deployment:
+        plan["deployment"] = deployment.plan()
+        _json_dump(output_dir / "plan.json", plan)
     cases_by_id = {case["id"]: case for case in cases}
     for result in results:
         saved_case = result.get("case", {})
@@ -604,7 +648,7 @@ def run_replay_evaluation(
         }
         for label, model in models:
             route = tuned_route if label == "tuned" else model
-            candidate = chat_fn(
+            candidate = candidate_fn(
                 route,
                 case["messages"],
                 max_output_tokens,
@@ -613,7 +657,7 @@ def run_replay_evaluation(
             )
             scored[label] = {
                 "model": model,
-                "serving_route": route,
+                "serving_route": baseten_endpoint.url if baseten_endpoint else route,
                 "candidate": candidate,
                 "deterministic_metrics": score_replay_candidate(
                     case,
@@ -733,6 +777,8 @@ def run_replay_evaluation(
                 }
             )
     summary["serving_mode"] = "preemptible" if deployment else "existing"
+    if baseten_endpoint is not None:
+        summary["baseten_endpoint"] = baseten_endpoint.to_dict()
     _json_dump(output_dir / "summary.json", summary)
     _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
     return summary
