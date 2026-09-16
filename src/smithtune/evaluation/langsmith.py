@@ -6,6 +6,7 @@ saved predictions so a reporting failure never requires another paid model call.
 
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -160,6 +161,9 @@ def bind_evaluation_snapshot(output_dir: Path, config: dict, cases: list[dict], 
 
 
 def _feedback(run_id: str, key: str, score, comment=None) -> dict:
+    # Match the SDK's create_feedback precision for uploads and readback checks.
+    if isinstance(score, float):
+        score = round(score, 4)
     result = {"key": key, "score": score, "target_run_id": run_id}
     if comment is not None:
         result["comment"] = comment
@@ -200,6 +204,20 @@ def _check_run(run, value: dict, project_id) -> None:
         raise PipelineError(f"LangSmith run differs from saved replay: {value['id']}")
 
 
+def _wait_for_indexing(ready, label: str) -> None:
+    if ready():
+        return
+    # Ingestion acknowledgement can precede query visibility. Check without
+    # resubmitting accepted writes, allowing one minute of backoff in total.
+    for delay in (1, 2, 4, 8, 15, 30):
+        print(f"Waiting for LangSmith {label} to become searchable; checking again in {delay}s.", file=sys.stderr)
+        time.sleep(delay)
+        if ready():
+            return
+    raise PipelineError(f"LangSmith {label} are not fully indexed after 60s of waiting; "
+                        "saved results are preserved; rerun evaluate to resume publication")
+
+
 def _ensure_runs(client, values: list[dict], project_id) -> None:
     for offset in range(0, len(values), 100):
         batch = values[offset:offset + 100]
@@ -224,13 +242,7 @@ def _ensure_runs(client, values: list[dict], project_id) -> None:
                 {**{key: value for key, value in run.items() if key != "project_name"}, "session_id": project_id}
                 for run in missing
             ])
-            for attempt in range(5):
-                if len(read()) == len(expected):
-                    break
-                if attempt < 4:
-                    time.sleep(1)
-            else:
-                raise PipelineError("LangSmith runs are not fully indexed; rerun evaluate to resume publication")
+            _wait_for_indexing(lambda read=read, expected=expected: len(read()) == len(expected), "runs")
 
 
 def _comparison_url(experiments: dict) -> str:
@@ -347,13 +359,7 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
                         )
                 client.flush()
                 phase = f"{label}:feedback_verification"
-                for attempt in range(5):
-                    if len(_saved_feedback(client, expected)) == len(expected):
-                        break
-                    if attempt < 4:
-                        time.sleep(1)
-                else:
-                    raise PipelineError(f"LangSmith feedback upload is incomplete; rerun evaluate: {path}")
+                _wait_for_indexing(lambda expected=expected: len(_saved_feedback(client, expected)) == len(expected), "feedback scores")
         phase = "comparison_url"
         receipt["comparison_url"] = _comparison_url(receipt["experiments"])
         receipt["status"] = "complete"
