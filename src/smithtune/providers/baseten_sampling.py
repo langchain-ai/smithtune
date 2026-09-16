@@ -160,7 +160,7 @@ class BasetenReplaySampler:
         self._check_previous_receipt()
         self.renderer = load_training_renderer(model)
         self._samplers: dict[str, Any] = {}
-        from smithtune.baseten_sampling_formats import PARSING_VERSION
+        from smithtune.providers.baseten_sampling_formats import PARSING_VERSION
 
         self.config = {"parsing_version": PARSING_VERSION, "provider": "baseten", "serving_mode": "sampler", "checkpoint": checkpoint,
                        "base_model": model.base_model, "max_seq_len": model.max_seq_len,
@@ -269,7 +269,7 @@ class BasetenReplaySampler:
 
     def generate(self, model, messages, max_tokens, json_mode=False, request_contract=None):
         from baseten.loops import ModelInput, SamplingParams
-        from smithtune.baseten_sampling_formats import parse_completion, stop_sequences
+        from smithtune.providers.baseten_sampling_formats import parse_completion, stop_sequences
 
         if model not in self._samplers or json_mode:
             raise PipelineError("Baseten replay can sample only its checkpoint and matching base model")

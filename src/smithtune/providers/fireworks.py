@@ -380,7 +380,7 @@ class FireworksProvider:
             },
             "cookbook": {
                 "commit": COOKBOOK_COMMIT,
-                "recipe": "smithtune.fireworks_training (uses the pinned SFT runtime helpers)",
+                "recipe": "smithtune.providers.fireworks_training (uses the pinned SFT runtime helpers)",
             },
             "config": {
                 "tokenizer_model": model.tokenizer_model,
@@ -436,7 +436,7 @@ class FireworksProvider:
         load_training_renderer(model)
         from training.recipes import sft_loop
         from training.utils import RunnerConfig, WandBConfig
-        from smithtune.fireworks_training import ServerlessTraining
+        from smithtune.providers.fireworks_training import ServerlessTraining
 
         run_dir.mkdir(parents=True, exist_ok=True)
         _set_skill_session()
@@ -479,7 +479,7 @@ class FireworksProvider:
                 session.complete()
                 if replay is not None:
                     from smithtune.evaluation import run_replay_evaluation
-                    from smithtune.fireworks_sampling import FireworksReplaySampler
+                    from smithtune.providers.fireworks_sampling import FireworksReplaySampler
 
                     checkpoint = result["best"]["resume_checkpoint"]
                     sampler = FireworksReplaySampler(

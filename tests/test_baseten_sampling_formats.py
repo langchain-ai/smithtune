@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune.baseten_sampling_formats import parse_completion, stop_sequences
+from smithtune.providers.baseten_sampling_formats import parse_completion, stop_sequences
 from smithtune.providers.baseten import MODEL_SPECS
 
 

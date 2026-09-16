@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune import baseten_sampling as sampling
+from smithtune.providers import baseten_sampling as sampling
 from smithtune.artifacts import _json_dump
 from smithtune.providers.base import PipelineError
 from smithtune.providers.baseten import DEFAULT_MODEL
@@ -27,7 +27,7 @@ def renderer(monkeypatch):
 
     renderer = SimpleNamespace(tokenizer=SimpleNamespace(), prompt_tokens=prompt)
     monkeypatch.setattr(sampling, "load_training_renderer", lambda _: renderer)
-    monkeypatch.setitem(sys.modules, "smithtune.baseten_sampling_formats", SimpleNamespace(
+    monkeypatch.setitem(sys.modules, "smithtune.providers.baseten_sampling_formats", SimpleNamespace(
         PARSING_VERSION="test-v1", stop_sequences=lambda *_: ["<end>"],
         parse_completion=lambda *args, **kwargs: {"role": "assistant", "content": "answer",
                                                  "sampling": {"format_valid": True}},

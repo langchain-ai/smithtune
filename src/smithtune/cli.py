@@ -15,8 +15,7 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smithtune import baseten_deployment, dataset
-from smithtune import curation, triage
+from smithtune import curation, dataset, triage
 from smithtune.dataset_artifacts import new_run_directory
 from smithtune.triage_source import load_snapshot, source_options
 from smithtune import evaluation as replay_evaluation
@@ -33,7 +32,7 @@ from smithtune.providers.fireworks import (
     SFTSettings as FireworksSFTSettings,
 )
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
-from smithtune.providers import PROVIDERS, get_provider
+from smithtune.providers import PROVIDERS, baseten_deployment, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
@@ -425,7 +424,7 @@ def _run_temporary_evaluation(args, temporary_plan: dict) -> dict:
 
 
 def _run_fireworks_evaluation(args):
-    from smithtune.fireworks_sampling import FireworksReplaySampler, checkpoint_from_run
+    from smithtune.providers.fireworks_sampling import FireworksReplaySampler, checkpoint_from_run
 
     if args.serving_mode not in (None, "existing", "sampler") or any(value is not None for value in (
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
@@ -466,7 +465,7 @@ def _run_fireworks_evaluation(args):
 
 
 def _run_baseten_sampler_evaluation(args):
-    from smithtune.baseten_sampling import BasetenReplaySampler, checkpoint_from_run
+    from smithtune.providers.baseten_sampling import BasetenReplaySampler, checkpoint_from_run
 
     if any(value is not None for value in (
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,

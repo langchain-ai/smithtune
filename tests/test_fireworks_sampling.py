@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune import cli, evaluation, fireworks_sampling as sampling
+from smithtune import cli, evaluation
+from smithtune.providers import fireworks_sampling as sampling
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
 from test_pipeline import write_manifest
@@ -219,7 +220,7 @@ def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
 
 @pytest.mark.parametrize("failure", ["calibration", "replay"])
 def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_path, monkeypatch, failure):
-    from smithtune import fireworks_training as runtime
+    from smithtune.providers import fireworks_training as runtime
     from smithtune.providers import fireworks
 
     data = replay_data(tmp_path, monkeypatch)

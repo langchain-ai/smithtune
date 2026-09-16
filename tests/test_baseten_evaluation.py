@@ -328,7 +328,7 @@ def test_temporary_replay_validates_resume_and_skips_compute_when_complete(tmp_p
 
 
 def test_run_bound_replay_rejects_another_models_prepared_data(tmp_path, monkeypatch):
-    from smithtune.baseten_deployment import validate_evaluation_model
+    from smithtune.providers.baseten_deployment import validate_evaluation_model
 
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"

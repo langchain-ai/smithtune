@@ -4,17 +4,21 @@ Use Python 3.12, uv, and Git. The Fireworks cookbook is a direct Git dependency,
 pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
 is maintained here, and there is no bootstrap step.
 
-`fireworks_training.py` keeps one serverless session across epochs and optional
+Provider-specific training, sampling, and deployment modules live under
+`src/smithtune/providers/`. Shared rendering and replay orchestration stay in
+`src/smithtune/`.
+
+`providers/fireworks_training.py` keeps one serverless session across epochs and optional
 replay. It uses the pinned cookbook's rendering, data loader, validation,
-optimizer, and checkpoint helpers. `fireworks_sampling.py` uses the official
+optimizer, and checkpoint helpers. `providers/fireworks_sampling.py` uses the official
 Training API sampler and the same renderer for replay. When changing these
 adapters, check checkpoint selection, session cleanup, tool parsing, and replay
 recovery from saved generations.
 
-`baseten_sampling.py` uses the Loops sampler REST endpoint to save resource IDs
+`providers/baseten_sampling.py` uses the Loops sampler REST endpoint to save resource IDs
 before the SDK readiness wait, then samples through `baseten-loops`. Closing the
 SDK client does not release GPUs: deactivate each owned deployment explicitly.
-`baseten_sampling_formats.py` parses the pinned official model formats without a
+`providers/baseten_sampling_formats.py` parses the pinned official model formats without a
 Fireworks renderer dependency. Test native-tokenizer roundtrips, malformed tool
 calls, best-checkpoint identity, cleanup failures, and cached-generation resume
 when changing either adapter. These offline checks do not replace a paid sampler

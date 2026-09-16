@@ -16,7 +16,7 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _utc_now
-from smithtune.fireworks_sampling import create_service
+from smithtune.providers.fireworks_sampling import create_service
 from smithtune.providers.base import PipelineError
 
 

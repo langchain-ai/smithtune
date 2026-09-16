@@ -1707,7 +1707,7 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
 
 
 def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import smithtune.fireworks_training as runtime
+    import smithtune.providers.fireworks_training as runtime
 
     metadata_calls = []
     renderer_calls = []
