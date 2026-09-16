@@ -637,6 +637,7 @@ class BasetenProvider:
         test_fraction: float | None = None,
         fetch: bool = True,
         check_render: bool = True,
+        sync_splits: bool = True,
     ) -> dict[str, Any]:
         """Prepare canonical rows with the Baseten model and shared split defaults."""
         from smithtune.dataset import DEFAULT_TEST_FRACTION, DEFAULT_VALIDATION_FRACTION, prepare_dataset
@@ -660,6 +661,7 @@ class BasetenProvider:
             test_fraction=DEFAULT_TEST_FRACTION if test_fraction is None else test_fraction,
             fetch=fetch,
             check_render=check_render,
+            sync_splits=sync_splits,
         )
 
     def plan(self, data_dir: Path, run_id: str, settings: Any, *,
@@ -715,7 +717,7 @@ class BasetenProvider:
         }
 
         if replay is not None:
-            from smithtune.evaluation import prepare_replay_evaluation
+            from smithtune.evaluation.replay import prepare_replay_evaluation
 
             if replay["concurrency"] < 1:
                 raise PipelineError("evaluation concurrency must be positive")
@@ -751,7 +753,7 @@ class BasetenProvider:
 
         plan = self.plan(Path(data_dir), run_id, settings, replay=replay)
         if replay is not None:
-            from smithtune.evaluation import validate_judge_credentials
+            from smithtune.evaluation.replay import validate_judge_credentials
 
             validate_judge_credentials(replay["judge_model"])
         manifest, train_rows, validation_rows = _load_prepared_data(Path(data_dir))
@@ -854,9 +856,10 @@ class BasetenProvider:
         _atomic_json(run_dir / "plan.json", plan)
         if replay is not None:
             from smithtune.artifacts import _load_jsonl
-            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation
+            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
             from smithtune.inference import _chat_completion
 
+            preflight_langsmith(data_dir)
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
             )
@@ -1215,7 +1218,7 @@ class BasetenProvider:
             raise cleanup_error
         if replay is not None:
             from smithtune.providers.baseten_sampling import BasetenReplaySampler
-            from smithtune.evaluation import run_replay_evaluation
+            from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
 
             try:
                 if best_sampler_uri is None:
@@ -1223,7 +1226,8 @@ class BasetenProvider:
                 sampler = BasetenReplaySampler(model, best_sampler_uri, run_dir / "replay")
                 result["replay"] = run_replay_evaluation(
                     data_dir, run_dir / "replay", best_sampler_uri,
-                    base_model=model.base_model, replay_sampler=sampler, confirm=True, **replay,
+                    base_model=model.base_model, replay_sampler=sampler, confirm=True,
+                    training=training_metadata(run_dir), **replay,
                 )
             except BaseException:
                 result["replay_status"] = "incomplete"

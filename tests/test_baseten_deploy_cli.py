@@ -201,6 +201,10 @@ def test_temporary_plan_uses_context_without_invented_endpoint(tmp_path, tempora
 
 def test_temporary_evaluation_preflights_separately_and_exits(tmp_path, temporary_baseten, capsys):
     endpoint, events, _, prepare, evaluate = temporary_baseten
+    run = tmp_path / "training"
+    run.mkdir()
+    (run / "plan.json").write_text(json.dumps({"run_id": "weather-sft"}))
+    (run / "result.json").write_text(json.dumps({"best_epoch": 2}))
     output = tmp_path / "replay"
     output.mkdir()
     (output / "plan.json").write_text('{"existing": true}')
@@ -214,6 +218,7 @@ def test_temporary_evaluation_preflights_separately_and_exits(tmp_path, temporar
     })
     assert events[-1] == ("exit",)
     assert evaluate.call_args.args[2] == "checkpoint-name"
+    assert evaluate.call_args.kwargs["training"] == {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}
     assert evaluate.call_args.kwargs["baseten_endpoint"] == endpoint
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
 
@@ -242,6 +247,30 @@ def test_temporary_evaluation_does_not_provision_when_data_preflight_fails(tmp_p
         cli.main([*temporary_args(tmp_path), "--confirm"])
     assert events == []
     evaluate.assert_not_called()
+
+
+def test_temporary_evaluation_verifies_langsmith_before_provisioning(tmp_path, temporary_baseten, monkeypatch):
+    _, events, _, _, evaluate = temporary_baseten
+    monkeypatch.setattr(cli.replay_evaluation, "preflight_langsmith", Mock(side_effect=cli.PipelineError("snapshot mismatch")))
+    with pytest.raises(SystemExit):
+        cli.main([*temporary_args(tmp_path), "--confirm"])
+    assert events == []
+    evaluate.assert_not_called()
+
+
+def test_first_temporary_evaluation_closes_serving_before_publication(tmp_path, temporary_baseten):
+    _, events, _, _, evaluate = temporary_baseten
+
+    def replay(*args, **kwargs):
+        with kwargs["baseten_lifecycle"]:
+            events.append(("sample",))
+        assert events[-1] == ("exit",)
+        events.append(("publish",))
+        return {"status": "complete"}
+
+    evaluate.side_effect = replay
+    cli.main([*temporary_args(tmp_path), "--confirm"])
+    assert [event[0] for event in events] == ["enter", "sample", "exit", "publish"]
 
 
 def test_temporary_evaluation_requires_confirmation_before_preflight(tmp_path, temporary_baseten, capsys):

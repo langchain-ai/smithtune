@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from smithtune import cli, evaluation, rendering
+from smithtune import cli, rendering
+from smithtune.evaluation import replay as evaluation
 from smithtune.providers import baseten, baseten_sampling
 from smithtune.providers.base import PipelineError
 from test_baseten_evaluation import replay_data
@@ -22,9 +23,9 @@ REPLAY = {"judge_model": JUDGE, "concurrency": 1,
 def saved_run(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
-    (run / "plan.json").write_text(json.dumps({"provider": "baseten", "base_model": baseten.DEFAULT_MODEL.base_model}))
+    (run / "plan.json").write_text(json.dumps({"run_id": "weather-sft", "provider": "baseten", "base_model": baseten.DEFAULT_MODEL.base_model}))
     (run / "result.json").write_text(json.dumps({"provider": "baseten", "status": "completed",
-        "baseten_run_id": "run123", "best_sampler_weights_uri": CHECKPOINT,
+        "baseten_run_id": "run123", "best_epoch": 2, "best_sampler_weights_uri": CHECKPOINT,
         "last_resumable_state_uri": "bt://loops:run123/weights/last-epoch-3"}))
     return run
 
@@ -70,6 +71,7 @@ def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_pat
     assert evaluate.call_args.args[2] == CHECKPOINT
     assert evaluate.call_args.kwargs["base_model"] == model.base_model
     assert evaluate.call_args.kwargs["replay_sampler"] is sampler
+    assert evaluate.call_args.kwargs["training"] == {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}
 
 
 @pytest.mark.parametrize("failure", ["unconfirmed", "missing_judge"])
@@ -181,6 +183,7 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
         assert args[2] == "sampler://approved-run-sampler-epoch-2"
         assert kwargs["base_model"] == baseten.DEFAULT_MODEL.base_model
         assert kwargs["confirm"] is True
+        assert kwargs["training"] == {"parent_training_run_id": "approved-run", "checkpoint_epoch": 2}
         events.append("replay")
         if replay_fails:
             raise PipelineError("judge failed after training")
@@ -204,17 +207,21 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
     assert events == ["calibrate", "sampler", "replay"]
 
 
-@pytest.mark.parametrize("failure", ["credentials", "calibration"])
+@pytest.mark.parametrize("failure", ["credentials", "calibration", "langsmith"])
 def test_training_judge_preflight_failure_never_allocates_trainer(tmp_path, monkeypatch, failure):
     data = training_data(tmp_path, monkeypatch)
     service = FakeService(FakeTrainer())
     provider = _provider(service, FakeManagement())
     if failure == "credentials":
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    else:
+    elif failure == "calibration":
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
         monkeypatch.setattr(evaluation, "calibrate_judge", lambda *_: [{"actual": False, "expected": True}])
-    with pytest.raises(PipelineError, match="ANTHROPIC_API_KEY|calibration"):
+    else:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+        monkeypatch.setattr(evaluation, "preflight_langsmith", Mock(side_effect=PipelineError("LangSmith snapshot mismatch")))
+        monkeypatch.setattr(evaluation, "ensure_judge_calibration", Mock(side_effect=AssertionError("must verify before judge")))
+    with pytest.raises(PipelineError, match="ANTHROPIC_API_KEY|calibration|snapshot"):
         provider.train(data, tmp_path / "run", "approved-run", baseten.BasetenSFTSettings(),
                        confirm=True, init_from_checkpoint=None, replay=REPLAY)
     assert service.service_client_calls == []

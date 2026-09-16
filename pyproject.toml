@@ -13,6 +13,7 @@ dependencies = [
   "fireworks-ai[training]==1.2.11",
   "baseten-loops==0.21.0",
   "jsonschema==4.26.0",
+  "langsmith==0.12.4",
   "referencing==0.37.0",
   "tinker==0.23.0",
   "transformers==5.5.4",
@@ -43,6 +44,7 @@ include = ["smithtune*"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = ["sdk_integration: exercise LangSmith integration with an explicitly supplied test client"]
 
 [tool.ruff]
 target-version = "py312"

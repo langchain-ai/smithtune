@@ -25,6 +25,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Parse successful command results as JSON and retain returned IDs and artifact paths for the next step.
 - After a partial dataset import, inspect its receipt and the existing dataset before retrying. Dataset imports have no automatic resume.
 - `prepare --no-fetch` reuses the raw export and saved tool schemas; it still needs compatible tokenizer dependencies and cache access.
+- Preparation publishes dataset splits by default, including with `--no-fetch`. Replay verifies that pinned dataset version before paid work and returns one LangSmith comparison link. `--no-sync-splits` only skips publication during preparation; splits must be synchronized before evaluation. LangSmith publication is required for evaluation to complete.
 - Report failures with the relevant example/run IDs and artifact paths. Preserve recorded data and validation while diagnosing the cause.
 - Paid training, evaluation, and deployment must be within the user's authorized scope. Honor authorization already given; obtain it before adding `--confirm` for an operation that has not been authorized.
 - Use credentials through environment variables; keep their values out of messages, logs, and committed files.
@@ -40,6 +41,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Preparation combines tools by name, keeps the latest description by source run timestamp (run ID breaks ties), and combines optional top-level arguments when shared arguments and other schema fields match. Description replacements are reported in `prepared/tool_description_replacements.json`. The combined definition applies to the whole example. Provider built-ins and incompatible definitions still fail, even when the tools were not called.
 - SFT targets all supported assistant messages, including earlier turns. Keep source conversations separate across train, validation, and test splits.
 - Fireworks and Baseten support deployment and replay evaluation. Baseten deploys saved sampler checkpoints through the optional `baseten-deploy` extra; `undeploy` deactivates only the recorded deployment and preserves its checkpoint. Temporary Baseten evaluation deactivates its owned deployment on exit. Replay compares responses against recorded context without executing tools.
+- LangSmith replay experiments group independent next-action predictions by source conversation. `teacher_agreement` is per action; `trajectory_teacher_agreement` is the conversation's mean. Experiment metadata includes the parent smithtune run ID and selected checkpoint epoch when saved training provenance is available. Upload failures resume from saved predictions and judgments after owned serving resources have been closed.
 
 ## Change the repository
 
