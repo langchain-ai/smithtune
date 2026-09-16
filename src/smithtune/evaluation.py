@@ -10,9 +10,9 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import asdict
 from functools import partial
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
@@ -21,7 +21,6 @@ from smithtune.dataset import (
     _prepared_example_contracts, _prepared_split,
     _require_prepared_provider,
 )
-from smithtune.eval_deployment import EvalDeployment, TemporaryDeployment
 from smithtune.artifacts import exclusive_output
 from smithtune.inference import (
     ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection,
@@ -59,6 +58,14 @@ DETERMINISTIC_METRIC_KEYS = (
 
 
 DEFAULT_JUDGE_MODEL = "anthropic/claude-sonnet-5"
+
+
+def validate_judge_credentials(judge_model: str) -> None:
+    provider = judge_model.partition("/")[0]
+    if provider in ANTHROPIC_ENDPOINTS:
+        anthropic_connection(provider)
+    elif not os.environ.get("FIREWORKS_API_KEY", "").strip():
+        raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
 
 
 JUDGE_INSTRUCTIONS = """You judge the next assistant message against a recorded trajectory.
@@ -509,6 +516,25 @@ def calibrate_judge(
     return results
 
 
+def ensure_judge_calibration(cases, output_dir: Path, judge_model: str, chat) -> list[dict[str, Any]]:
+    """Check the judge before training; reuse that exact check for replay."""
+    identity = {"judge_model": judge_model, "instructions": JUDGE_INSTRUCTIONS,
+                "cases_sha256": hashlib.sha256(_canonical(_calibration_cases(cases)).encode()).hexdigest(),
+                "max_output_tokens": DEFAULT_JUDGE_MAX_TOKENS}
+    config = output_dir / "calibration-config.json"
+    path = output_dir / "calibration.jsonl"
+    if config.exists() and path.exists() and _load_json(config) == identity:
+        results = _load_jsonl(path)
+    else:
+        results = calibrate_judge(cases, judge_model, chat)
+        _jsonl_dump(path, results)
+        _json_dump(config, identity)
+    if (len(results) != len(_calibration_cases(cases)) * 3 or not results
+            or any(result["actual"] != result["expected"] for result in results)):
+        raise PipelineError("judge failed positive or negative calibration controls")
+    return results
+
+
 @exclusive_output("output_dir")
 def run_replay_evaluation(
     data_dir: Path,
@@ -521,7 +547,7 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
-    deployment: EvalDeployment | None = None,
+    fireworks_sampler: Any | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_lifecycle: AbstractContextManager[str] | None = None,
     baseten_cleanup: Callable[[], Any] | None = None,
@@ -535,12 +561,10 @@ def run_replay_evaluation(
     _require_confirm(confirm, "model and judge inference")
     if baseten_endpoint is not None:
         baseten_endpoint.validate()
-        if deployment is not None:
-            raise PipelineError("Baseten evaluation supports existing endpoints only")
-    if deployment is not None:
-        deployment.validate()
-        if deployment.model != tuned_model:
-            raise PipelineError("temporary deployment model differs from tuned model")
+        if fireworks_sampler is not None:
+            raise PipelineError("a Fireworks sampler cannot serve Baseten evaluation")
+    if fireworks_sampler is not None and fireworks_sampler.checkpoint != tuned_model:
+        raise PipelineError("sampler checkpoint differs from tuned model")
     if (baseten_lifecycle is not None or baseten_cleanup is not None) and baseten_endpoint is None:
         raise PipelineError("Baseten lifecycle requires a saved Baseten endpoint")
     if concurrency < 1:
@@ -562,13 +586,13 @@ def run_replay_evaluation(
     if base_model:
         models.insert(0, ("base", base_model))
     config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
-              "serving_mode": "temporary" if baseten_lifecycle is not None else ("preemptible" if deployment else "existing")}
+              "serving_mode": "temporary" if baseten_lifecycle is not None else ("serverless" if fireworks_sampler else "existing")}
     if judge_endpoint is not None:
         config["judge_endpoint"] = judge_endpoint
     if baseten_endpoint is not None:
         config["baseten_endpoint"] = baseten_endpoint.to_dict()
-    if deployment:
-        config["deployment"] = asdict(deployment)
+    if fireworks_sampler:
+        config["sampler"] = fireworks_sampler.config
     config_path = output_dir / "evaluation-config.json"
     if config_path.exists():
         saved_config = _load_json(config_path)
@@ -581,9 +605,7 @@ def run_replay_evaluation(
     if results and baseten_endpoint is not None and not config_path.exists():
         raise PipelineError("existing replay results do not record the Baseten endpoint; use a new output directory")
     expected_routes = {
-        label: baseten_endpoint.url if baseten_endpoint else (
-            deployment.route if deployment is not None and label == "tuned" else model
-        )
+        label: baseten_endpoint.url if baseten_endpoint else model
         for label, model in models
     }
     for result in results:
@@ -591,6 +613,8 @@ def run_replay_evaluation(
             saved = result.get(label)
             if isinstance(saved, dict) and saved.get("serving_route") not in (None, route):
                 raise PipelineError("existing replay results use different serving routes; use a new output directory")
+    if (output_dir / "generations.jsonl").exists() and not config_path.exists():
+        raise PipelineError("saved generations have no evaluation settings; use a new output directory")
     plan = prepare_replay_evaluation(
         data_dir,
         output_dir,
@@ -607,9 +631,8 @@ def run_replay_evaluation(
         partial(_baseten_chat_completion, endpoint=baseten_endpoint)
         if baseten_endpoint is not None and chat is None else chat_fn
     )
-    if deployment:
-        plan["deployment"] = deployment.plan()
-        _json_dump(output_dir / "plan.json", plan)
+    if fireworks_sampler:
+        candidate_fn = fireworks_sampler.generate
     cases_by_id = {case["id"]: case for case in cases}
     for result in results:
         saved_case = result.get("case", {})
@@ -637,14 +660,27 @@ def run_replay_evaluation(
     if results and not config_path.exists() and max_output_tokens != DEFAULT_REPLAY_MAX_TOKENS:
         raise PipelineError("legacy replay results do not record generation settings; use a new output directory")
     _json_dump(config_path, config)
+    # Keep successful samples even if judging fails or the session expires.
+    generations_path = output_dir / "generations.jsonl"
+    generations = _load_jsonl(generations_path) if generations_path.exists() else []
+    generated = {}
+    for generation in generations:
+        case = generation.get("case", {})
+        label = generation.get("label")
+        if (case != cases_by_id.get(case.get("id")) or label not in dict(models)
+                or generation.get("model") != dict(models)[label]
+                or not isinstance(generation.get("candidate"), dict)):
+            raise PipelineError("saved generations use different cases or models")
+        key = (case["id"], label)
+        if key in generated:
+            raise PipelineError("saved generations contain duplicate candidates")
+        generated[key] = generation["candidate"]
+    generation_lock = Lock()
     pending = [case for case in cases if case["id"] not in completed]
-    if deployment and not pending:
-        TemporaryDeployment(deployment, output_dir).cleanup_existing()
     if baseten_cleanup is not None and not pending:
         baseten_cleanup()
     if pending:
-        calibration = calibrate_judge(cases, judge_model, chat_fn)
-        _jsonl_dump(output_dir / "calibration.jsonl", calibration)
+        calibration = ensure_judge_calibration(cases, output_dir, judge_model, chat_fn)
     else:
         calibration = _load_jsonl(output_dir / "calibration.jsonl")
     if not calibration or any(result["actual"] != result["expected"] for result in calibration):
@@ -662,13 +698,15 @@ def run_replay_evaluation(
         }
         for label, model in models:
             route = tuned_route if label == "tuned" else model
-            candidate = candidate_fn(
-                route,
-                case["messages"],
-                max_output_tokens,
-                False,
-                request_contract,
-            )
+            candidate = generated.get((case["id"], label))
+            if candidate is None:
+                candidate = candidate_fn(route, case["messages"], max_output_tokens, False, request_contract)
+                with generation_lock:
+                    generations.append({"case": case, "label": label, "model": model, "candidate": candidate})
+                    _jsonl_dump(generations_path, generations)
+            judgment = judge_replay_candidate(case, candidate, judge_model, chat_fn)
+            if candidate.get("sampling", {}).get("format_valid") is False:
+                judgment = {"pass": False, "reason": "Response was truncated or contained a malformed tool call."}
             scored[label] = {
                 "model": model,
                 "serving_route": baseten_endpoint.url if baseten_endpoint else route,
@@ -678,11 +716,12 @@ def run_replay_evaluation(
                     candidate,
                     request_contract,
                 ),
-                "judgment": judge_replay_candidate(case, candidate, judge_model, chat_fn),
+                "judgment": judgment,
             }
         return scored
 
-    lifecycle = TemporaryDeployment(deployment, output_dir) if deployment and pending else nullcontext(tuned_model)
+    needs_samples = any((case["id"], label) not in generated for case in pending for label, _ in models)
+    lifecycle = fireworks_sampler if fireworks_sampler and needs_samples else nullcontext(tuned_model)
     if baseten_lifecycle is not None and pending:
         lifecycle = baseten_lifecycle
     state_path = output_dir / "evaluation-state.json"

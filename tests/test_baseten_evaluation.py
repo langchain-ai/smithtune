@@ -297,7 +297,7 @@ def test_temporary_replay_validates_resume_and_skips_compute_when_complete(tmp_p
     data = replay_data(tmp_path, monkeypatch)
     output = tmp_path / "replay"
     events = []
-    monkeypatch.setattr(evaluation, "calibrate_judge", lambda *_: [{"actual": True, "expected": True}])
+    monkeypatch.setattr(evaluation, "calibrate_judge", lambda cases, *_: [{"actual": True, "expected": True}] * (len(evaluation._calibration_cases(cases)) * 3))
     monkeypatch.setattr(evaluation, "judge_replay_candidate", lambda *_: {"pass": True, "reason": "ok"})
 
     @contextmanager

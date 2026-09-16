@@ -37,8 +37,30 @@ from smithtune.providers import PROVIDERS, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
-from smithtune.eval_deployment import EvalDeployment
-from smithtune.artifacts import _json_dump, output_lock
+from smithtune.artifacts import _json_dump, _load_json, output_lock
+
+
+def _add_replay_options(command):
+    command.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL)
+    command.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
+    command.add_argument("--max-points-per-trajectory", type=int, help="optional replay cap; default scores every assistant action")
+    command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
+
+
+def _training_replay(args):
+    values = {key: getattr(args, key) for key in (
+        "judge_model", "concurrency", "max_points_per_trajectory", "max_output_tokens",
+    )}
+    if not args.evaluate:
+        defaults = {"judge_model": replay_evaluation.DEFAULT_JUDGE_MODEL,
+                    "concurrency": replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY,
+                    "max_points_per_trajectory": None, "max_output_tokens": DEFAULT_REPLAY_MAX_TOKENS}
+        if values != defaults:
+            raise PipelineError("replay options require --evaluate")
+        return {}
+    if args.provider != "fireworks":
+        raise PipelineError("train --evaluate currently requires --provider fireworks")
+    return {"replay": values}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -169,6 +191,8 @@ def _parser() -> argparse.ArgumentParser:
     fireworks_defaults = FireworksSFTSettings()
     baseten_defaults = BasetenSFTSettings()
     for command in (plan, training):
+        command.add_argument("--evaluate", action="store_true", help="compare base and best checkpoint with the live Fireworks serverless sampler")
+        _add_replay_options(command)
         shared = command.add_argument_group(
             "Shared training options", "Supported by both Fireworks and Baseten.",
         )
@@ -261,11 +285,9 @@ def _parser() -> argparse.ArgumentParser:
     evaluation = sub.add_parser("evaluate", help="compare base and tuned actions with a calibrated judge")
     for command in (eval_plan, evaluation):
         command.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="candidate serving provider (default: %(default)s)")
-        command.add_argument("--run-dir", type=Path, help="Baseten training run directory containing the saved deployment receipt")
-        command.add_argument("--model-id", help="existing Baseten model ID")
-        command.add_argument("--max-seq-len", type=int, help="existing Baseten endpoint's configured context limit (required unless using --run-dir)")
+        command.add_argument("--run-dir", type=Path, help="training run directory; Fireworks restores its best checkpoint, Baseten reads its deployment receipt")
         command.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
-        command.add_argument("--output-dir", type=Path, required=True)
+        command.add_argument("--output-dir", type=Path, help="replay results directory (default: <run-dir>/replay)")
         command.add_argument(
             "--max-points-per-trajectory",
             type=int,
@@ -273,19 +295,17 @@ def _parser() -> argparse.ArgumentParser:
             help="optional cap; default evaluates every assistant turn",
         )
         command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
-        command.add_argument("--serving-mode", choices=("existing", "preemptible", "temporary"), default="existing")
-        command.add_argument("--accelerator", help="Baseten temporary serving GPU allocation, for example H200:1; omit to reuse saved settings")
-        command.add_argument("--hf-token-secret", help="Baseten temporary serving secret name (default for a new deployment: hf_access_token)")
-        command.add_argument("--account-id", help="account owning the promoted model for temporary evaluation")
-        command.add_argument("--deployment-id", help="existing Baseten deployment ID, or ID for an owned temporary Fireworks deployment")
-        command.add_argument("--deployment-shape", help="compatible Fireworks deployment shape resource")
-        command.add_argument("--deployment-timeout", type=float, default=600, help="temporary deployment readiness timeout in seconds")
-    eval_plan.add_argument("--tuned-model", help="promoted model resource; required for preemptible mode")
-    evaluation.add_argument("--tuned-model", help="Fireworks model route or Baseten checkpoint name served by the endpoint")
-    evaluation.add_argument(
-        "--base-model",
-        help="optional base-model serving route for before-versus-after comparison",
-    )
+        serving = command.add_argument_group("Baseten serving options", "Fireworks uses --run-dir and automatically compares the base model.")
+        serving.add_argument("--model-id", help="existing Baseten model ID")
+        serving.add_argument("--max-seq-len", type=int, help="existing endpoint's configured context limit (required unless using --run-dir)")
+        serving.add_argument("--serving-mode", choices=("existing", "temporary"), default="existing")
+        serving.add_argument("--accelerator", help="temporary serving GPU allocation, for example H200:1; omit to reuse saved settings")
+        serving.add_argument("--hf-token-secret", help="temporary serving secret name (default for a new deployment: hf_access_token)")
+        serving.add_argument("--deployment-id", help="existing deployment ID")
+        serving.add_argument("--deployment-timeout", type=float, default=600, help="temporary deployment readiness timeout in seconds")
+        serving.add_argument("--tuned-model", help="checkpoint name served by the endpoint")
+        if command is evaluation:
+            serving.add_argument("--base-model", help="optional base-model route served by the same endpoint")
     evaluation.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
     evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
                             help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway")
@@ -323,9 +343,9 @@ def _temporary_baseten_plan(args) -> dict | None:
     if args.run_dir is None:
         raise PipelineError("Baseten temporary evaluation requires --run-dir")
     if any(value is not None for value in (
-        args.model_id, args.deployment_id, args.tuned_model, args.account_id, args.deployment_shape,
+        args.model_id, args.deployment_id, args.tuned_model,
     )):
-        raise PipelineError("Baseten temporary evaluation uses the training run; omit --model-id, --deployment-id, --tuned-model, --account-id, and --deployment-shape")
+        raise PipelineError("Baseten temporary evaluation uses the training run; omit --model-id, --deployment-id, and --tuned-model")
     if getattr(args, "base_model", None) is not None:
         raise PipelineError("Baseten temporary evaluation does not support --base-model; the generated endpoint serves the checkpoint route")
     if args.command == "evaluate":
@@ -363,7 +383,7 @@ def _run_evaluation(args, endpoint: BasetenEndpoint | None, tuned_model: str, *,
         base_model=args.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory,
         max_output_tokens=args.max_output_tokens, confirm=args.confirm,
-        deployment=_eval_deployment(args), baseten_endpoint=endpoint, **lifecycle_options,
+        baseten_endpoint=endpoint, **lifecycle_options,
     )
 
 
@@ -406,19 +426,45 @@ def _run_temporary_evaluation(args, temporary_plan: dict) -> dict:
                                    baseten_lifecycle=nullcontext(tuned_model))
 
 
-def _eval_deployment(args) -> EvalDeployment | None:
-    if args.provider == "baseten":
-        return None
-    fields = (args.account_id, args.deployment_id, args.deployment_shape)
-    if args.serving_mode == "existing":
-        if any(fields) or args.deployment_timeout != 600:
-            raise PipelineError("deployment options require --serving-mode preemptible")
-        return None
-    if not all(fields) or not args.tuned_model:
-        raise PipelineError("preemptible mode requires --tuned-model, --account-id, --deployment-id, and --deployment-shape")
-    config = EvalDeployment(args.tuned_model, *fields, timeout=args.deployment_timeout)
-    config.validate()
-    return config
+def _run_fireworks_evaluation(args):
+    from smithtune.fireworks_sampling import FireworksReplaySampler, checkpoint_from_run
+
+    if args.serving_mode != "existing" or any(value is not None for value in (
+        args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
+        args.accelerator, args.hf_token_secret,
+    )) or args.deployment_timeout != 600:
+        raise PipelineError("Fireworks evaluation uses the serverless sampler and --run-dir; omit endpoint and deployment options")
+    model = best = None
+    if args.run_dir is not None:
+        if args.run_dir.resolve() == args.output_dir.resolve():
+            raise PipelineError("--run-dir and --output-dir must be different directories")
+        model, best = checkpoint_from_run(args.data_dir, args.run_dir)
+    if args.command == "eval-plan":
+        dataset._require_prepared_provider(_load_json(args.data_dir / "prepared" / "manifest.json"), "fireworks")
+        with output_lock(args.output_dir):
+            value = replay_evaluation.prepare_replay_evaluation(
+                args.data_dir, args.output_dir, args.max_points_per_trajectory, args.max_output_tokens,
+            )
+            value["serving_mode"] = "serverless"
+            if best is not None:
+                value["checkpoint"] = best["resume_checkpoint"]
+            _json_dump(args.output_dir / "plan.json", value)
+            return value
+    if best is None:
+        raise PipelineError("Fireworks evaluate requires --run-dir containing the saved training result")
+    if args.base_model not in (None, model.base_model):
+        raise PipelineError("serverless replay compares the checkpoint with its own base model")
+    if not args.confirm:
+        raise PipelineError("model and judge inference require --confirm")
+    replay_evaluation.validate_judge_credentials(args.judge_model)
+    sampler = FireworksReplaySampler(model, best["resume_checkpoint"], args.output_dir,
+                                     lora_rank=best["lora_rank"], lora_alpha=best["lora_alpha"])
+    return replay_evaluation.run_replay_evaluation(
+        args.data_dir, args.output_dir, best["resume_checkpoint"], args.judge_model,
+        base_model=model.base_model, concurrency=args.concurrency,
+        max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
+        fireworks_sampler=sampler, confirm=args.confirm,
+    )
 
 
 def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
@@ -426,8 +472,7 @@ def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
         if args.model_id is not None or args.max_seq_len is not None or args.run_dir is not None:
             raise PipelineError("--model-id, --max-seq-len, and --run-dir require --provider baseten")
         return None
-    if (args.serving_mode != "existing" or args.account_id is not None
-            or args.deployment_shape is not None or args.deployment_timeout != 600):
+    if args.serving_mode != "existing" or args.deployment_timeout != 600:
         raise PipelineError("Baseten evaluation supports existing endpoints only; omit Fireworks deployment options")
     if args.run_dir is not None:
         if any(value is not None for value in (args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model)):
@@ -540,7 +585,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         elif args.command == "plan":
             provider = get_provider(args.provider)
-            value = provider.plan(args.data_dir, args.run_id, _settings_from_args(args))
+            value = provider.plan(args.data_dir, args.run_id, _settings_from_args(args), **_training_replay(args))
         elif args.command == "train":
             provider = get_provider(args.provider)
             run_id = args.run_id
@@ -559,6 +604,7 @@ def main(argv: list[str] | None = None) -> None:
                 _settings_from_args(args),
                 confirm=args.confirm,
                 init_from_checkpoint=args.init_from_checkpoint,
+                **_training_replay(args),
             )
             value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
         elif args.command == "promote":
@@ -583,10 +629,19 @@ def main(argv: list[str] | None = None) -> None:
                 if not all(fireworks_options):
                     raise PipelineError("Fireworks deploy requires --account-id, --output-model-id, --deployment-id, and --deployment-shape")
                 value = FireworksProvider().deploy(args.run_dir, *fireworks_options, confirm=args.confirm)
+        elif args.command in ("eval-plan", "evaluate") and args.provider == "fireworks":
+            if args.output_dir is None:
+                if args.run_dir is None:
+                    raise PipelineError("supply --run-dir or --output-dir")
+                args.output_dir = args.run_dir / "replay"
+            value = _run_fireworks_evaluation(args)
         elif args.command == "eval-plan":
+            if args.output_dir is None:
+                if args.run_dir is None:
+                    raise PipelineError("supply --run-dir or --output-dir")
+                args.output_dir = args.run_dir / "replay"
             temporary_plan = _temporary_baseten_plan(args)
             baseten_endpoint = None if temporary_plan is not None else _eval_baseten_endpoint(args)
-            serving = _eval_deployment(args)
             context = {"baseten_context_limit": temporary_plan["settings"]["max_seq_len"]} if temporary_plan is not None else {}
             if args.run_dir is not None:
                 baseten_deployment.validate_evaluation_model(args.run_dir, args.data_dir)
@@ -599,10 +654,14 @@ def main(argv: list[str] | None = None) -> None:
                     baseten_endpoint=baseten_endpoint,
                     **context,
                 )
-                if temporary_plan is not None or serving:
-                    value["deployment"] = temporary_plan if temporary_plan is not None else serving.plan()
+                if temporary_plan is not None:
+                    value["deployment"] = temporary_plan
                     _json_dump(args.output_dir / "plan.json", value)
         elif args.command == "evaluate":
+            if args.output_dir is None:
+                if args.run_dir is None:
+                    raise PipelineError("supply --run-dir or --output-dir")
+                args.output_dir = args.run_dir / "replay"
             temporary_plan = _temporary_baseten_plan(args)
             if temporary_plan is not None:
                 value = _run_temporary_evaluation(args, temporary_plan)

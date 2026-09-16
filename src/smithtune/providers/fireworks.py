@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import uuid
 import urllib.error
 import urllib.request
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from smithtune.artifacts import _json_dump, _load_json, _run, _utc_now
+from smithtune.artifacts import _json_dump, _load_json, _load_jsonl, _run, _utc_now
 from smithtune.capabilities import preflight_model
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
@@ -166,24 +167,6 @@ next_action: {next_action}
     path.write_text(text, encoding="utf-8")
 
 
-def _last_eval_loss(path: Path) -> float:
-    losses: list[float] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise PipelineError(f"cannot read evaluation metrics from {path}") from exc
-    for line in lines:
-        try:
-            value = json.loads(line).get("eval/loss")
-        except json.JSONDecodeError as exc:
-            raise PipelineError(f"invalid metrics JSONL in {path}") from exc
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            losses.append(float(value))
-    if not losses or not math.isfinite(losses[-1]):
-        raise PipelineError(f"no finite eval/loss was recorded in {path}")
-    return losses[-1]
-
-
 def _epoch_checkpoints(job_id: str) -> dict[str, str]:
     from fireworks.training.sdk import FireworksClient
 
@@ -245,7 +228,7 @@ def run_early_stopping(
     run_epoch: Callable[[int, str | None], dict[str, Any]],
     initial_checkpoint: str | None = None,
 ) -> dict[str, Any]:
-    """Run one official recipe call per epoch and select the best held-out loss."""
+    """Run epochs and select the checkpoint with the best validation loss."""
     settings.validate()
     history: list[dict[str, Any]] = []
     best: dict[str, Any] | None = None
@@ -367,6 +350,7 @@ class FireworksProvider:
         data_dir: Path,
         run_id: str,
         settings: SFTSettings,
+        *, replay: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         settings.validate()
         manifest = _load_json(data_dir / "prepared" / "manifest.json")
@@ -382,11 +366,12 @@ class FireworksProvider:
         model = resolve_prepared_model(manifest, MODEL_SPECS, provider="fireworks", allow_legacy=True)
         _validate_model(model)
         lora_rank = settings.lora_rank or model.default_lora_rank
-        return {
+        value = {
             "run_id": run_id,
             "method": "Fireworks Training API serverless LoRA SFT",
             "training_api": TRAINING_BASE_URL,
             "base_model": model.base_model,
+            "source_examples_sha256": manifest.get("source_examples_sha256"),
             "dataset": {
                 "source_rows": source.get("examples"),
                 "train_rows": split["train"],
@@ -395,7 +380,7 @@ class FireworksProvider:
             },
             "cookbook": {
                 "commit": COOKBOOK_COMMIT,
-                "recipe": "training/recipes/sft_loop.py",
+                "recipe": "smithtune.fireworks_training (uses the pinned SFT runtime helpers)",
             },
             "config": {
                 "tokenizer_model": model.tokenizer_model,
@@ -423,114 +408,97 @@ class FireworksProvider:
             "cost": "serverless token charges at the current account rate; resolve in the Fireworks console before confirmation",
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
+        if replay is not None:
+            from smithtune.evaluation import prepare_replay_evaluation
+
+            if replay["concurrency"] < 1:
+                raise PipelineError("evaluation concurrency must be positive")
+            with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
+                preview = prepare_replay_evaluation(
+                    data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
+                )
+            value["replay"] = {**preview, **replay, "serving_mode": "serverless", "evaluated_models": 2}
+        return value
 
     def train(
-        self,
-        data_dir: Path,
-        run_dir: Path,
-        run_id: str,
-        settings: SFTSettings,
-        *,
-        confirm: bool,
-        init_from_checkpoint: str | None,
+        self, data_dir: Path, run_dir: Path, run_id: str, settings: SFTSettings,
+        *, confirm: bool, init_from_checkpoint: str | None,
+        replay: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        _require_confirm(confirm, "training")
+        _require_confirm(confirm, "training and replay" if replay is not None else "training")
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
-        plan = self.plan(data_dir, run_id, settings)
+        plan = self.plan(data_dir, run_id, settings, replay=replay)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
         model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
         preflight_model(model)
         load_training_renderer(model)
-        try:
-            from training.recipes import sft_loop
-            from training.utils import RunnerConfig, WandBConfig
-        except ImportError as exc:
-            raise PipelineError(
-                "training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor"
-            ) from exc
+        from training.recipes import sft_loop
+        from training.utils import RunnerConfig, WandBConfig
+        from smithtune.fireworks_training import ServerlessTraining
 
         run_dir.mkdir(parents=True, exist_ok=True)
         _set_skill_session()
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
-        lora_rank = settings.lora_rank or model.default_lora_rank
         _json_dump(run_dir / "plan.json", plan)
-        _write_run_md(
-            run_dir / "run.md",
-            plan,
-            "job_running",
-            "wait for the recipe to finish",
-        )
+        if replay is not None:
+            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials
+            from smithtune.inference import _chat_completion
 
-        def run_epoch(epoch: int, checkpoint: str | None) -> dict[str, Any]:
-            epoch_dir = run_dir / f"epoch-{epoch}"
-            epoch_dir.mkdir()
-            cfg = sft_loop.Config(
-                log_path=str(epoch_dir),
-                base_model=model.base_model,
-                dataset=str(data_dir / "prepared" / "train.jsonl"),
-                evaluation_dataset=str(data_dir / "prepared" / "validation.jsonl"),
-                tokenizer_model=model.tokenizer_model,
-                tokenizer_revision=model.tokenizer_revision,
-                tokenizer_trust_remote_code=model.trust_remote_code,
-                renderer_name=model.renderer,
-                thinking_trace_history_mode=model.thinking_trace_history_mode,
-                train_on_what=SFT_TARGET_POLICY,
-                serverless=True,
-                lora_rank=lora_rank,
-                lora_alpha=settings.lora_alpha,
-                max_seq_len=model.max_seq_len,
-                learning_rate=settings.learning_rate,
-                epochs=1,
-                batch_size=settings.batch_size,
-                pipeline_depth=settings.pipeline_depth,
-                seed=settings.seed + epoch - 1,
-                group_by_length=True,
-                dcp_save_interval=0,
-                init_from_checkpoint=checkpoint,
-                save_final_checkpoint=True,
-                output_model_id=None,
-                wandb=WandBConfig(project=None),
-                runner=RunnerConfig(
-                    status_file=str(epoch_dir / "status.json"),
-                    metadata_file=str(epoch_dir / "metadata.json"),
-                    metrics_file=str(epoch_dir / "metrics.jsonl"),
-                    output_model_path=str(epoch_dir / "output-model.json"),
-                ),
+            validate_judge_credentials(replay["judge_model"])
+            prepare_replay_evaluation(
+                data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
             )
-            recipe_result = sft_loop.main(cfg)
-            job_id = recipe_result.get("job_id")
-            steps = recipe_result.get("steps")
-            if not isinstance(job_id, str) or not isinstance(steps, int):
-                raise PipelineError(
-                    f"epoch {epoch} returned an invalid recipe result"
-                )
-            return {
-                "job_id": job_id,
-                "steps": steps,
-                "eval_loss": _last_eval_loss(epoch_dir / "metrics.jsonl"),
-                **_epoch_checkpoints(job_id),
-            }
-
+            ensure_judge_calibration(_load_jsonl(run_dir / "replay" / "cases.jsonl"),
+                                     run_dir / "replay", replay["judge_model"], _chat_completion)
+        cfg = sft_loop.Config(
+            log_path=str(run_dir), base_model=model.base_model,
+            dataset=str(data_dir / "prepared" / "train.jsonl"),
+            evaluation_dataset=str(data_dir / "prepared" / "validation.jsonl"),
+            tokenizer_model=model.tokenizer_model, tokenizer_revision=model.tokenizer_revision,
+            tokenizer_trust_remote_code=model.trust_remote_code, renderer_name=model.renderer,
+            thinking_trace_history_mode=model.thinking_trace_history_mode,
+            train_on_what=SFT_TARGET_POLICY, serverless=True,
+            lora_rank=settings.lora_rank or model.default_lora_rank, lora_alpha=settings.lora_alpha,
+            max_seq_len=model.max_seq_len, learning_rate=settings.learning_rate,
+            epochs=settings.max_epochs, batch_size=settings.batch_size,
+            pipeline_depth=settings.pipeline_depth, seed=settings.seed, group_by_length=True,
+            init_from_checkpoint=init_from_checkpoint, wandb=WandBConfig(project=None),
+            runner=RunnerConfig(status_file=str(run_dir / "status.json"),
+                                metadata_file=str(run_dir / "metadata.json"),
+                                metrics_file=str(run_dir / "metrics.jsonl")),
+        )
+        _write_run_md(run_dir / "run.md", plan, "job_running", "wait for training and replay")
+        result = None
         try:
-            result = run_early_stopping(settings, run_epoch, init_from_checkpoint)
+            with ServerlessTraining(cfg, run_dir) as session:
+                result = run_early_stopping(settings, session.run_epoch, init_from_checkpoint)
+                _json_dump(run_dir / "epochs.json", result["epochs"])
+                _json_dump(run_dir / "result.json", result)
+                session.complete()
+                if replay is not None:
+                    from smithtune.evaluation import run_replay_evaluation
+                    from smithtune.fireworks_sampling import FireworksReplaySampler
+
+                    checkpoint = result["best"]["resume_checkpoint"]
+                    sampler = FireworksReplaySampler(
+                        model, checkpoint, run_dir / "replay", service=session.service,
+                        snapshot=session.snapshot(checkpoint),
+                        lora_rank=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+                    )
+                    _write_run_md(run_dir / "run.md", plan, "evaluating", "wait for replay")
+                    result["replay"] = run_replay_evaluation(
+                        data_dir, run_dir / "replay", checkpoint,
+                        base_model=model.base_model, fireworks_sampler=sampler, confirm=True, **replay,
+                    )
+                    _json_dump(run_dir / "result.json", result)
         except BaseException:
-            _write_run_md(
-                run_dir / "run.md",
-                plan,
-                "failed",
-                "inspect status.json and metrics.jsonl",
-            )
+            phase = "replay_incomplete" if result is not None else "failed"
+            _write_run_md(run_dir / "run.md", plan, phase,
+                          "training completed; inspect replay results" if result is not None else "inspect status.json and metrics.jsonl")
             raise
-        _json_dump(run_dir / "epochs.json", result["epochs"])
-        _json_dump(run_dir / "result.json", result)
-        _write_run_md(
-            run_dir / "run.md",
-            plan,
-            "training_completed",
-            "confirm and run promote",
-        )
+        _write_run_md(run_dir / "run.md", plan, "training_completed", "inspect replay/summary.json" if replay is not None else "run evaluate --run-dir")
         return result
 
     def promote(self, run_dir: Path, output_model_id: str, *, confirm: bool) -> None:
