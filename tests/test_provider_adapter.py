@@ -274,7 +274,7 @@ def test_cli_training_generates_identity_and_preserves_overrides(
             assert identity == run_id
         assert output_dir == (Path(run_dir) if run_dir else tmp_path / "runs" / identity)
         assert result == {"checkpoint": "saved-checkpoint", "run_id": identity, "run_dir": str(output_dir.resolve())}
-        assert f"Run ID: {identity}\nRun directory: {output_dir.resolve()}\n" == captured.err
+        assert f"Running train\nRun ID: {identity}\nRun directory: {output_dir.resolve()}\n" == captured.err
         identities.append(identity)
     if run_id is None:
         assert identities[0] != identities[1]

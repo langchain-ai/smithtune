@@ -37,6 +37,7 @@ from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
 from smithtune.artifacts import _json_dump, _load_json, output_lock
+from smithtune.progress import command_status
 
 
 def _add_replay_options(command):
@@ -538,7 +539,10 @@ def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     args = parser.parse_args(argv)
+    activity = ExitStack()
     try:
+        command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
+        activity.enter_context(command_status(f"Running {command}"))
         if args.command == "doctor":
             value = diagnose()
         elif args.command == "skill":
@@ -744,7 +748,10 @@ def main(argv: list[str] | None = None) -> None:
                 FireworksProvider().undeploy(args.account_id, args.deployment_id, confirm=args.confirm)
                 value = {"status": "deleted", "deployment_id": args.deployment_id}
     except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
+        activity.close()
         parser.error(str(exc))
+    finally:
+        activity.close()
     print(json.dumps(value, indent=2, sort_keys=True))
     if args.command == "dataset" and args.dataset_command == "triage" and value.get("status") == "incomplete":
         raise SystemExit(1)
