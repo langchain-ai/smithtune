@@ -40,6 +40,7 @@ class MemoryClient(Client):
         self.split_writes = []
         self.fail_split = None
         self.drop_feedback = None
+        self.run_batches = []
         self._snapshot()
 
     def _snapshot(self):
@@ -99,6 +100,14 @@ class MemoryClient(Client):
         value.setdefault("trace_id", value["id"])
         self.runs_store[str(value["id"])] = Run(**value)
 
+    def batch_ingest_runs(self, create=None, update=None):
+        assert not update
+        self.run_batches.append([str(run["id"]) for run in create])
+        for run in create:
+            value = copy.deepcopy(run)
+            project = self.read_project(project_id=value.pop("session_id"))
+            self.create_run(project_name=project.name, **value)
+
     def update_run(self, run_id, **kwargs):
         value = self.runs_store[str(run_id)].model_dump()
         value.update(kwargs)
@@ -109,10 +118,11 @@ class MemoryClient(Client):
             raise LangSmithNotFoundError("run missing")
         return self.runs_store[str(run_id)].model_copy(deep=True)
 
-    def list_runs(self, *, project_id=None, project_name=None, is_root=None, **kwargs):
+    def list_runs(self, *, project_id=None, project_name=None, is_root=None, run_ids=None, **kwargs):
         project = self.read_project(project_id=project_id, project_name=project_name)
         for run in self.runs_store.values():
-            if run.session_id == project.id and (is_root is None or is_root == (run.parent_run_id is None)):
+            if (run.session_id == project.id and (is_root is None or is_root == (run.parent_run_id is None))
+                    and (run_ids is None or str(run.id) in {str(value) for value in run_ids})):
                 yield run.model_copy(deep=True)
 
     def create_feedback(self, run_id=None, key="unnamed", *, score=None, comment=None, feedback_id=None, **kwargs):
@@ -286,6 +296,70 @@ def test_publication_attaches_child_and_root_feedback_and_resumes(prepared, tmp_
     resumed = evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
     assert resumed == summary
     assert before == (len(calls), len(client.feedback_store), len(client.runs_store))
+
+
+def test_partial_batch_failure_resumes_only_missing_runs_without_inference(prepared, tmp_path, monkeypatch):
+    data, _, client = prepared
+    calls, batches = [], []
+    output = tmp_path / "eval"
+    upload = client.batch_ingest_runs
+
+    def interrupted(create=None, update=None):
+        batches.append([str(run["id"]) for run in create])
+        if len(batches) == 1:
+            upload(create=create[:1])
+            raise reporting.PublicationRequestError("LangSmith POST /runs/batch: HTTP 429; usage limit; Retry-After: 3600s")
+        return upload(create=create)
+
+    monkeypatch.setattr(client, "batch_ingest_runs", interrupted)
+    kwargs = dict(base_model="base", chat=toy_chat(calls), confirm=True)
+    with pytest.raises(PipelineError, match="base:run_upload.*POST /runs/batch.*429"):
+        evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    receipt = _load_json(output / "langsmith-experiments.json")
+    assert "Retry-After: 3600s" in receipt["last_error"]
+    assert receipt["status"] == "interrupted"
+    before = len(calls)
+    summary = evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    assert len(calls) == before
+    assert batches[0][0] not in {run_id for batch in batches[1:] for run_id in batch}
+    assert summary["langsmith"]["comparison_url"]
+    assert "last_error" not in _load_json(output / "langsmith-experiments.json")
+
+
+def test_existing_conflicting_run_is_not_overwritten(prepared, tmp_path):
+    data, _, client = prepared
+    output = tmp_path / "eval"
+    kwargs = dict(chat=toy_chat([]), confirm=True)
+    evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    run = next(iter(client.runs_store.values()))
+    run.outputs = {"changed": True}
+    batches_before = len(client.run_batches)
+    with pytest.raises(PipelineError, match="run differs"):
+        evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
+    assert len(client.run_batches) == batches_before
+
+
+def test_large_publication_resumes_after_indexing_lag_without_reupload(prepared, monkeypatch):
+    _, _, client = prepared
+    project = client.create_project("batch-test")
+    now = datetime.now(UTC)
+    values = []
+    for _ in range(205):
+        run_id = str(uuid4())
+        values.append({"id": run_id, "name": "replay_trajectory", "run_type": "chain",
+                       "project_name": project.name, "trace_id": run_id,
+                       "inputs": {}, "outputs": {}, "start_time": now, "end_time": now,
+                       "dotted_order": now.strftime("%Y%m%dT%H%M%S%fZ") + run_id,
+                       "extra": {"metadata": {"smithtune_evaluation_id": "eval-test"}}})
+    original = client.list_runs
+    monkeypatch.setattr(client, "list_runs", lambda **kwargs: iter([]))
+    with pytest.raises(PipelineError, match="not fully indexed"):
+        reporting._ensure_runs(client, values, project.id)
+    assert len(client.runs_store) == 100
+    monkeypatch.setattr(client, "list_runs", original)
+    reporting._ensure_runs(client, values, project.id)
+    assert [len(batch) for batch in client.run_batches] == [100, 100, 5]
+    assert len(client.runs_store) == 205
 
 
 def test_feedback_upload_failure_does_not_repeat_inference_or_successful_feedback(prepared, tmp_path):

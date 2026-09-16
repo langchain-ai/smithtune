@@ -12,9 +12,9 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4, uuid5
 
-from langsmith import Client
 from langsmith.utils import LangSmithNotFoundError
 
+from smithtune.evaluation.langsmith_client import PublicationRequestError, PublishingClient
 from smithtune.artifacts import _json_dump, _load_json, _load_jsonl, _utc_now
 from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
@@ -24,9 +24,9 @@ SPLITS = ("train", "validation", "test")
 SPLIT_RECEIPT = "langsmith-splits.json"
 
 
-def make_client(workspace_id: str) -> Client:
+def make_client(workspace_id: str) -> PublishingClient:
     """Use environment credentials, explicitly scoped to the dataset workspace."""
-    return Client(workspace_id=workspace_id, auto_batch_tracing=False)
+    return PublishingClient(workspace_id=workspace_id)
 
 
 def _example_hash(example) -> str:
@@ -191,18 +191,46 @@ def _saved_feedback(client, expected: list[dict]) -> set[tuple[str, str]]:
     return found
 
 
-def _ensure_run(client, value: dict, project_id) -> bool:
-    try:
-        run = client.read_run(value["id"], project_id=project_id, start_time=value["start_time"])
-    except LangSmithNotFoundError:
-        client.create_run(**value)
-        return False
+def _check_run(run, value: dict, project_id) -> None:
     if (run.inputs != value["inputs"] or run.outputs != value["outputs"]
+            or str(run.session_id) != str(project_id)
             or str(run.trace_id) != value["trace_id"]
             or str(run.parent_run_id or "") != str(value.get("parent_run_id") or "")
             or run.extra.get("metadata", {}).get("smithtune_evaluation_id") != value["extra"]["metadata"]["smithtune_evaluation_id"]):
         raise PipelineError(f"LangSmith run differs from saved replay: {value['id']}")
-    return True
+
+
+def _ensure_runs(client, values: list[dict], project_id) -> None:
+    for offset in range(0, len(values), 100):
+        batch = values[offset:offset + 100]
+        expected = {value["id"]: value for value in batch}
+
+        def read(expected=expected, batch=batch):
+            found = {}
+            for run in client.list_runs(project_id=project_id, run_ids=list(expected),
+                                        start_time=min(value["start_time"] for value in batch),
+                                        limit=len(batch)):
+                run_id = str(run.id)
+                if run_id not in expected:
+                    raise PipelineError("LangSmith returned a run outside the requested publication batch")
+                _check_run(run, expected[run_id], project_id)
+                found[run_id] = run
+            return found
+
+        found = read()
+        missing = [value for value in batch if value["id"] not in found]
+        if missing:
+            client.batch_ingest_runs(create=[
+                {**{key: value for key, value in run.items() if key != "project_name"}, "session_id": project_id}
+                for run in missing
+            ])
+            for attempt in range(5):
+                if len(read()) == len(expected):
+                    break
+                if attempt < 4:
+                    time.sleep(1)
+            else:
+                raise PipelineError("LangSmith runs are not fully indexed; rerun evaluate to resume publication")
 
 
 def _comparison_url(experiments: dict) -> str:
@@ -266,7 +294,6 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
             receipt["experiments"][label] = {"id": str(project.id), "name": name, "url": url}
             _json_dump(path, receipt)
             expected_by_root = {}
-            run_times = {}
             feedback_times = {}
             phase = f"{label}:run_upload"
             for example in examples:
@@ -297,22 +324,8 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
                         "extra": {"metadata": metadata}}
                 for value in [root, *children]:
                     feedback_times[value["id"]] = value["start_time"]
-                    if not _ensure_run(client, value, project.id):
-                        run_times[value["id"]] = value["start_time"]
+                _ensure_runs(client, [root, *children], project.id)
                 expected_by_root[root_id] = _expected_feedback(root_id, steps)
-            client.flush()
-            # Indexing may lag ingestion. Verify uploaded runs before adding feedback.
-            for attempt in range(5):
-                try:
-                    for run_id, start_time in run_times.items():
-                        client.read_run(run_id, project_id=project.id, start_time=start_time)
-                    break
-                except LangSmithNotFoundError:
-                    pass
-                if attempt < 4:
-                    time.sleep(1)
-            else:
-                raise PipelineError(f"LangSmith runs are not fully indexed; rerun evaluate to resume: {path}")
             expected = [item for items in expected_by_root.values() for item in items]
             phase = f"{label}:feedback_readback"
             found = _saved_feedback(client, expected)
@@ -346,9 +359,15 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
         receipt["status"] = "complete"
         receipt.pop("failure_phase", None)
         receipt.pop("error_type", None)
+        receipt.pop("last_error", None)
         _json_dump(path, receipt)
         return {"dataset_id": splits["dataset_id"], "dataset_version": splits["dataset_version"],
                 "split": "test", "comparison_url": receipt["comparison_url"]}
+    except PublicationRequestError as exc:
+        receipt.update(status="interrupted", failure_phase=phase, error_type=type(exc).__name__, last_error=str(exc))
+        _json_dump(path, receipt)
+        raise PipelineError(f"LangSmith experiment publication failed during {phase}: {exc}; "
+                            f"replay results are saved; rerun evaluate to resume publication: {path}") from None
     except PipelineError as exc:
         receipt.update(status="interrupted", failure_phase=phase, error_type=type(exc).__name__)
         _json_dump(path, receipt)
