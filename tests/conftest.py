@@ -24,4 +24,4 @@ def local_langsmith_defaults(monkeypatch, request):
     monkeypatch.setattr(fireworks, "prepare_dataset", local_prepare)
     monkeypatch.setattr(evaluation, "preflight_langsmith", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(evaluation.reporting, "bind_evaluation_snapshot", lambda *_args: None)
-    monkeypatch.setattr(evaluation.reporting, "publish_evaluation", lambda *_args: {"experiments": {}})
+    monkeypatch.setattr(evaluation.reporting, "publish_evaluation", lambda *_args: {"comparison_url": "https://smith.langchain.com/test-comparison"})

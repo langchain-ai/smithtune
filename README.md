@@ -528,9 +528,10 @@ official Fireworks API.
 
 `train --evaluate` and standalone `evaluate` publish a base and tuned experiment
 when comparing both models, or one experiment when evaluating only a tuned endpoint.
-Open the returned `langsmith.experiments` links to compare results on the original
-dataset's test split. Each conversation has a root run, with a child LLM run for
-each generated action. Experiment metadata identifies the provider and whether
+Open the single returned `langsmith.comparison_url` to view base and tuned results
+side by side on the original dataset's test split. For tuned-only evaluation,
+the same link opens that experiment. Each conversation has a root run, with a
+child LLM run for each generated action. Experiment metadata identifies the provider and whether
 predictions came from a sampler or deployed endpoint. When a saved training run
 is available, `parent_training_run_id` records the smithtune run ID and
 `checkpoint_epoch` records the selected checkpoint’s epoch. Both experiments in

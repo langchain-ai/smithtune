@@ -4,6 +4,7 @@ import copy
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -259,7 +260,10 @@ def test_publication_attaches_child_and_root_feedback_and_resumes(prepared, tmp_
     assert summary["tuned_pass_rate"] == 1
     assert summary["base_pass_rate"] == 0
     assert summary["langsmith"]["dataset_version"] == manifest["langsmith"]["split_sync"]["dataset_version"]
-    experiments = summary["langsmith"]["experiments"]
+    experiments = _load_json(output / "langsmith-experiments.json")["experiments"]
+    selected = parse_qs(urlsplit(summary["langsmith"]["comparison_url"]).query)["selectedSessions"][0]
+    assert selected == experiments["base"]["id"] + "," + experiments["tuned"]["id"]
+    assert "experiments" not in summary["langsmith"]
     for label, info in experiments.items():
         runs = list(client.list_runs(project_id=info["id"]))
         roots = [run for run in runs if run.parent_run_id is None]
@@ -324,7 +328,7 @@ def test_rejected_replay_points_do_not_add_feedback_or_fail_agreement(prepared, 
     summary = evaluation.run_replay_evaluation(data, tmp_path / "eval", "tuned", "judge", confirm=True, chat=toy_chat([]))
     assert summary["tuned_pass_rate"] == 1
     assert summary["rejected"] == manifest["split"]["test"]
-    roots = list(client.list_runs(project_id=summary["langsmith"]["experiments"]["tuned"]["id"], is_root=True))
+    roots = list(client.list_runs(project_id=_load_json(tmp_path / "eval/langsmith-experiments.json")["experiments"]["tuned"]["id"], is_root=True))
     scores = list(client.list_feedback(run_ids=[root.id for root in roots]))
     assert len(scores) == len(roots)
     assert {score.key for score in scores} == {"trajectory_teacher_agreement"}
@@ -393,7 +397,8 @@ def test_sampler_publication_failure_resumes_after_cleanup_without_inference(pre
     client.drop_feedback = None
     summary = evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
     assert (events, len(calls)) == before
-    for label, info in summary["langsmith"]["experiments"].items():
+    assert summary["langsmith"]["comparison_url"]
+    for label, info in _load_json(output / "langsmith-experiments.json")["experiments"].items():
         project = client.read_project(project_id=info["id"])
         assert project.metadata["generation_source"] == "sampler"
         assert project.metadata["serving_mode"] == sampler.config["serving_mode"]
@@ -429,7 +434,8 @@ def test_judge_retry_preserves_generation_timestamps_for_publication(prepared, t
     assert events == before
     assert _load_jsonl(output / "generations.jsonl") == generations
     expected = {row["case"]["id"]: row for row in generations}
-    info = summary["langsmith"]["experiments"]["tuned"]
+    info = _load_json(output / "langsmith-experiments.json")["experiments"]["tuned"]
+    assert parse_qs(urlsplit(summary["langsmith"]["comparison_url"]).query)["selectedSessions"] == [info["id"]]
     for run in client.list_runs(project_id=info["id"]):
         if run.parent_run_id:
             recorded = expected[run.extra["metadata"]["case_id"]]
@@ -529,6 +535,17 @@ def test_resume_older_publication_adds_training_origin_without_resampling(prepar
     assert len(calls) == before
     assert original_projects <= client.projects.keys()
     assert len(client.projects) == 2
-    assert len(summary["langsmith"]["experiments"]) == 2
+    assert len(parse_qs(urlsplit(summary["langsmith"]["comparison_url"]).query)["selectedSessions"][0].split(",")) == 2
     for project in client.projects.values():
         assert all(project.metadata[key] == value for key, value in training.items())
+
+
+@pytest.mark.parametrize("host", ["https://smith.langchain.com", "https://eu.smith.langchain.com", "https://smith.example.com/langsmith"])
+@pytest.mark.parametrize("include_base", [False, True])
+def test_comparison_url_preserves_host_workspace_and_dataset(host, include_base):
+    path = f"/o/{WORKSPACE}/datasets/{DATASET}/compare"
+    experiments = {"tuned": {"id": "tuned-id", "url": f"{host}{path}?selectedSessions=tuned-id"}}
+    if include_base:
+        experiments["base"] = {"id": "base-id", "url": f"{host}{path}?selectedSessions=base-id"}
+    selected = "base-id,tuned-id" if include_base else "tuned-id"
+    assert reporting._comparison_url(experiments) == f"{host}{path}?selectedSessions={selected}"

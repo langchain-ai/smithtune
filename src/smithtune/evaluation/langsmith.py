@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4, uuid5
 
 from langsmith import Client
@@ -204,6 +205,16 @@ def _ensure_run(client, value: dict, project_id) -> bool:
     return True
 
 
+def _comparison_url(experiments: dict) -> str:
+    selected = [experiments[label] for label in ("base", "tuned") if label in experiments]
+    if not selected or not selected[0].get("url"):
+        raise PipelineError("LangSmith did not return an experiment URL; rerun evaluate to resume")
+    parts = urlsplit(selected[0]["url"])
+    query = dict(parse_qsl(parts.query))
+    query["selectedSessions"] = ",".join(item["id"] for item in selected)
+    return urlunsplit(parts._replace(query=urlencode(query, safe=",")))
+
+
 def publish_evaluation(output_dir: Path, config: dict, results: list[dict], cases: list[dict], context) -> dict:
     """Publish saved predictions and judgments with stable run and feedback IDs."""
     client, examples, splits = context
@@ -327,12 +338,14 @@ def publish_evaluation(output_dir: Path, config: dict, results: list[dict], case
                         time.sleep(1)
                 else:
                     raise PipelineError(f"LangSmith feedback upload is incomplete; rerun evaluate: {path}")
+        phase = "comparison_url"
+        receipt["comparison_url"] = _comparison_url(receipt["experiments"])
         receipt["status"] = "complete"
         receipt.pop("failure_phase", None)
         receipt.pop("error_type", None)
         _json_dump(path, receipt)
         return {"dataset_id": splits["dataset_id"], "dataset_version": splits["dataset_version"],
-                "split": "test", "experiments": receipt["experiments"]}
+                "split": "test", "comparison_url": receipt["comparison_url"]}
     except PipelineError as exc:
         receipt.update(status="interrupted", failure_phase=phase, error_type=type(exc).__name__)
         _json_dump(path, receipt)

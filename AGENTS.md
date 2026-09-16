@@ -25,7 +25,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Parse successful command results as JSON and retain returned IDs and artifact paths for the next step.
 - After a partial dataset import, inspect its receipt and the existing dataset before retrying. Dataset imports have no automatic resume.
 - `prepare --no-fetch` reuses the raw export and saved tool schemas; it still needs compatible tokenizer dependencies and cache access.
-- Preparation publishes dataset splits by default, including with `--no-fetch`. Replay verifies that pinned dataset version before paid work and returns LangSmith experiment links. `--no-sync-splits` only skips publication during preparation; splits must be synchronized before evaluation. LangSmith publication is required for evaluation to complete.
+- Preparation publishes dataset splits by default, including with `--no-fetch`. Replay verifies that pinned dataset version before paid work and returns one LangSmith comparison link. `--no-sync-splits` only skips publication during preparation; splits must be synchronized before evaluation. LangSmith publication is required for evaluation to complete.
 - Report failures with the relevant example/run IDs and artifact paths. Preserve recorded data and validation while diagnosing the cause.
 - Paid training, evaluation, and deployment must be within the user's authorized scope. Honor authorization already given; obtain it before adding `--confirm` for an operation that has not been authorized.
 - Use credentials through environment variables; keep their values out of messages, logs, and committed files.
