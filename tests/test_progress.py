@@ -2,8 +2,11 @@
 
 import io
 import json
+import logging
 import sys
+import warnings
 from contextlib import contextmanager
+from threading import Thread
 
 import pytest
 
@@ -111,3 +114,44 @@ def test_help_and_version_do_not_start_status(terminal, args):
             cli.main(args)
         assert exc.value.code == 0
         assert not streams[1].getvalue()
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("fails", [False, True])
+def test_command_hides_warnings_but_preserves_errors_and_restores_logging(terminal, monkeypatch, interactive, fails):
+    with terminal() as (stdout, stderr):
+        if not interactive:
+            monkeypatch.setattr(stdout, "isatty", lambda: False)
+        logger = logging.getLogger("smithtune.progress-test")
+        monkeypatch.setattr(logger, "handlers", [logging.StreamHandler(stderr)])
+        monkeypatch.setattr(logger, "level", logging.DEBUG)
+        monkeypatch.setattr(logger, "propagate", False)
+        previous_level = logging.root.manager.disable
+        previous_filters = list(warnings.filters)
+
+        def worker():
+            logger.info("library chatter")
+            logger.warning("library warning")
+            warnings.warn("Python warning", UserWarning, stacklevel=2)
+            logger.error("provider failed")
+
+        try:
+            with progress.command_status("Running evaluate"):
+                thread = Thread(target=worker)
+                thread.start()
+                thread.join()
+                print("LangSmith comparison: https://smith.langchain.com/comparison", file=sys.stderr)
+                if fails:
+                    raise PipelineError("command failed")
+        except PipelineError:
+            assert fails
+        assert "Running evaluate" in stderr.getvalue()
+        assert "library chatter" not in stderr.getvalue()
+        assert "library warning" not in stderr.getvalue()
+        assert "Python warning" not in stderr.getvalue()
+        assert "provider failed" in stderr.getvalue()
+        assert "LangSmith comparison:" in stderr.getvalue()
+        assert logging.root.manager.disable == previous_level
+        assert warnings.filters == previous_filters
+        logger.warning("warnings restored")
+        assert "warnings restored" in stderr.getvalue()

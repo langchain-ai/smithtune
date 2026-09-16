@@ -1,7 +1,9 @@
 """Command activity on stderr, leaving JSON results on stdout."""
 
+import logging
 import sys
 import time
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -15,7 +17,21 @@ ASCII_FRAMES = ("|", "/", "-", "\\")
 
 @contextmanager
 def command_status(label: str, *, frames: tuple[str, ...] = MUSIC_FRAMES) -> Iterator[None]:
-    """Show an interchangeable animation only when both output streams are terminals."""
+    """Show the command step without routine library logs or Python warnings."""
+    previous_level = logging.root.manager.disable
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        logging.disable(max(previous_level, logging.WARNING))
+        try:
+            with _render_status(label, frames=frames):
+                yield
+        finally:
+            logging.disable(previous_level)
+
+
+@contextmanager
+def _render_status(label: str, *, frames: tuple[str, ...]) -> Iterator[None]:
+    """Animate only when both output streams are terminals."""
     console = Console(stderr=True)
     if not sys.stdout.isatty() or not console.is_terminal or console.is_dumb_terminal:
         print(label, file=sys.stderr)

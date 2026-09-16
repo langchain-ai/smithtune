@@ -40,6 +40,7 @@ Run from a writable directory. Data defaults to `./data/`; use `--data-dir` to
 choose another location.
 
 Commands show a music-note spinner and elapsed time in interactive terminals.
+Routine library logs and Python warnings are suppressed; errors remain visible.
 When output is redirected, they print a plain status line; JSON results stay on stdout.
 
 Configure credentials in your environment:
