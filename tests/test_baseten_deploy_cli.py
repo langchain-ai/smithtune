@@ -24,7 +24,7 @@ def test_baseten_deploy_dispatches_explicit_hardware_and_defaults(monkeypatch, c
               "--accelerator", "H200:1", "--max-seq-len", "32768", "--confirm"])
     deploy.assert_called_once_with(
         Path("runs/training"), accelerator="H200:1", max_seq_len=32768,
-        hf_token_secret="hf_access_token", timeout=1800, confirm=True,
+        timeout=1800, confirm=True,
     )
     assert json.loads(capsys.readouterr().out) == {"status": "ready"}
 
@@ -34,10 +34,10 @@ def test_baseten_deploy_forwards_custom_settings_and_confirmation(monkeypatch):
     monkeypatch.setattr(cli.baseten_deployment, "deploy", deploy)
     cli.main(["deploy", "--provider", "baseten", "--run-dir", "run",
               "--accelerator", "H200:2", "--max-seq-len", "8192",
-              "--hf-token-secret", "my-hf-secret", "--deployment-timeout", "90"])
+              "--deployment-timeout", "90"])
     deploy.assert_called_once_with(
         Path("run"), accelerator="H200:2", max_seq_len=8192,
-        hf_token_secret="my-hf-secret", timeout=90, confirm=False,
+        timeout=90, confirm=False,
     )
 
 
@@ -62,7 +62,7 @@ def test_baseten_deploy_rejects_missing_and_foreign_options(monkeypatch, capsys,
 
 @pytest.mark.parametrize("extra", [
     ["--accelerator", "H200:1"], ["--max-seq-len", "32768"],
-    ["--hf-token-secret", "hf_access_token"], ["--deployment-timeout", "1800"],
+    ["--deployment-timeout", "1800"],
 ])
 def test_fireworks_rejects_baseten_deployment_options(capsys, extra):
     with pytest.raises(SystemExit):
@@ -160,7 +160,7 @@ def temporary_baseten(monkeypatch):
 
     endpoint = BasetenEndpoint("model123", "deploy123", 32768)
     events = []
-    settings = {"accelerator": "H200:1", "max_seq_len": 32768, "hf_token_secret": "hf_access_token"}
+    settings = {"accelerator": "H200:1", "max_seq_len": 32768}
     plan = Mock(return_value={"settings": settings, "cleanup": "deactivate", "checkpoint": {"base_model": "test-base"}})
     monkeypatch.setattr(cli.baseten_deployment, "plan", plan)
 
@@ -191,7 +191,7 @@ def test_temporary_plan_uses_context_without_invented_endpoint(tmp_path, tempora
     _, events, plan, prepare, evaluate = temporary_baseten
     cli.main([*temporary_args(tmp_path, "eval-plan"), "--accelerator", "H200:1", "--max-seq-len", "32768"])
     plan.assert_called_once_with(tmp_path / "training", accelerator="H200:1", max_seq_len=32768,
-                                 hf_token_secret=None, timeout=600)
+                                 timeout=600)
     assert prepare.call_args.kwargs == {"baseten_endpoint": None, "baseten_context_limit": 32768}
     assert json.loads(capsys.readouterr().out)["deployment"]["cleanup"] == "deactivate"
     assert json.loads((tmp_path / "replay/plan.json").read_text())["deployment"]["settings"]["max_seq_len"] == 32768
@@ -210,7 +210,7 @@ def test_temporary_evaluation_preflights_separately_and_exits(tmp_path, temporar
     assert not prepare.call_args.args[1].exists()
     assert (output / "plan.json").read_text() == '{"existing": true}'
     assert events[0] == ("enter", (tmp_path / "training",), {
-        "accelerator": None, "max_seq_len": None, "hf_token_secret": None, "timeout": 600, "confirm": True,
+        "accelerator": None, "max_seq_len": None, "timeout": 600, "confirm": True,
     })
     assert events[-1] == ("exit",)
     assert evaluate.call_args.args[2] == "checkpoint-name"
@@ -221,9 +221,9 @@ def test_temporary_evaluation_preflights_separately_and_exits(tmp_path, temporar
 def test_temporary_evaluation_forwards_requested_settings(tmp_path, temporary_baseten):
     _, events, _, _, _ = temporary_baseten
     cli.main([*temporary_args(tmp_path), "--confirm", "--accelerator", "H200:2",
-              "--max-seq-len", "32768", "--hf-token-secret", "other-secret", "--deployment-timeout", "1800"])
+              "--max-seq-len", "32768", "--deployment-timeout", "1800"])
     assert events[0][2] == {"accelerator": "H200:2", "max_seq_len": 32768,
-                           "hf_token_secret": "other-secret", "timeout": 1800, "confirm": True}
+                           "timeout": 1800, "confirm": True}
 
 
 @pytest.mark.parametrize("failure", [cli.PipelineError("evaluation failed"), KeyboardInterrupt()])
@@ -310,12 +310,11 @@ def test_baseten_evaluation_requires_separate_training_and_output_directories(tm
     assert "must be different directories" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("flag, value", [("--accelerator", "H200:1"), ("--hf-token-secret", "hf_access_token")])
 @pytest.mark.parametrize("provider", ["baseten", "fireworks"])
-def test_existing_mode_rejects_temporary_baseten_settings(tmp_path, capsys, flag, value, provider):
+def test_existing_mode_rejects_temporary_baseten_settings(tmp_path, capsys, provider):
     with pytest.raises(SystemExit):
-        cli.main(["eval-plan", "--provider", provider, "--serving-mode", "existing", "--output-dir", str(tmp_path), flag, value])
-    assert ("require --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
+        cli.main(["eval-plan", "--provider", provider, "--serving-mode", "existing", "--output-dir", str(tmp_path), "--accelerator", "H200:1"])
+    assert ("requires --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("filename", ["evaluation-config.json", "results.jsonl"])

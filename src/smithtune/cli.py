@@ -274,7 +274,6 @@ def _parser() -> argparse.ArgumentParser:
     deployment.add_argument("--deployment-shape", help="Fireworks deployment shape")
     deployment.add_argument("--accelerator", help="required Baseten GPU allocation, for example H200:1")
     deployment.add_argument("--max-seq-len", type=int, help="required Baseten evaluation context cap, verified against the live server; does not configure serving context")
-    deployment.add_argument("--hf-token-secret", help="Baseten secret name for Hugging Face access (default: hf_access_token)")
     deployment.add_argument("--deployment-timeout", type=float, help="Baseten readiness timeout in seconds (default: 1800)")
     deployment.add_argument("--confirm", action="store_true")
 
@@ -297,7 +296,6 @@ def _parser() -> argparse.ArgumentParser:
         serving.add_argument("--max-seq-len", type=int, help="existing endpoint's configured context limit (required unless using --run-dir)")
         serving.add_argument("--serving-mode", choices=("sampler", "existing", "temporary"), help="default: sampler; explicit endpoint IDs use existing serving")
         serving.add_argument("--accelerator", help="temporary serving GPU allocation, for example H200:1; omit to reuse saved settings")
-        serving.add_argument("--hf-token-secret", help="temporary serving secret name (default for a new deployment: hf_access_token)")
         serving.add_argument("--deployment-id", help="existing deployment ID")
         serving.add_argument("--deployment-timeout", type=float, default=600, help="temporary deployment readiness timeout in seconds")
         serving.add_argument("--tuned-model", help="checkpoint name served by the endpoint")
@@ -332,8 +330,8 @@ def _temporary_baseten_plan(args) -> dict | None:
     if args.run_dir is not None and args.run_dir.resolve() == args.output_dir.resolve():
         raise PipelineError("--run-dir and --output-dir must be different directories")
     if args.serving_mode != "temporary":
-        if args.accelerator is not None or args.hf_token_secret is not None:
-            raise PipelineError("--accelerator and --hf-token-secret require --provider baseten --serving-mode temporary")
+        if args.accelerator is not None:
+            raise PipelineError("--accelerator requires --provider baseten --serving-mode temporary")
         return None
     if args.provider != "baseten":
         raise PipelineError("--serving-mode temporary requires --provider baseten")
@@ -361,7 +359,7 @@ def _temporary_baseten_plan(args) -> dict | None:
             raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
     return baseten_deployment.plan(
         args.run_dir, accelerator=args.accelerator, max_seq_len=args.max_seq_len,
-        hf_token_secret=args.hf_token_secret, timeout=args.deployment_timeout,
+        timeout=args.deployment_timeout,
     )
 
 
@@ -397,7 +395,7 @@ def _run_temporary_evaluation(args, temporary_plan: dict) -> dict:
     def temporary():
         return baseten_deployment.temporary(
             args.run_dir, accelerator=args.accelerator, max_seq_len=args.max_seq_len,
-            hf_token_secret=args.hf_token_secret, timeout=args.deployment_timeout, confirm=args.confirm,
+            timeout=args.deployment_timeout, confirm=args.confirm,
         )
 
     with output_lock(args.output_dir):
@@ -428,7 +426,7 @@ def _run_fireworks_evaluation(args):
 
     if args.serving_mode not in (None, "existing", "sampler") or any(value is not None for value in (
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
-        args.accelerator, args.hf_token_secret,
+        args.accelerator,
     )) or args.deployment_timeout != 600:
         raise PipelineError("Fireworks evaluation uses the serverless sampler and --run-dir; omit endpoint and deployment options")
     model = best = None
@@ -469,7 +467,7 @@ def _run_baseten_sampler_evaluation(args):
 
     if any(value is not None for value in (
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
-        args.accelerator, args.hf_token_secret,
+        args.accelerator,
     )) or args.deployment_timeout != 600:
         raise PipelineError("Baseten sampler replay uses --run-dir; omit endpoint and deployment options")
     dataset._require_prepared_provider(_load_json(args.data_dir / "prepared" / "manifest.json"), "baseten")
@@ -657,13 +655,12 @@ def main(argv: list[str] | None = None) -> None:
                     raise PipelineError("Baseten deploy requires --accelerator and --max-seq-len")
                 value = baseten_deployment.deploy(
                     args.run_dir, accelerator=args.accelerator, max_seq_len=args.max_seq_len,
-                    hf_token_secret=args.hf_token_secret if args.hf_token_secret is not None else "hf_access_token",
                     timeout=args.deployment_timeout if args.deployment_timeout is not None else 1800,
                     confirm=args.confirm,
                 )
             else:
-                if any(value is not None for value in (args.accelerator, args.max_seq_len, args.hf_token_secret, args.deployment_timeout)):
-                    raise PipelineError("--accelerator, --max-seq-len, --hf-token-secret, and --deployment-timeout require --provider baseten")
+                if any(value is not None for value in (args.accelerator, args.max_seq_len, args.deployment_timeout)):
+                    raise PipelineError("--accelerator, --max-seq-len, and --deployment-timeout require --provider baseten")
                 if not all(fireworks_options):
                     raise PipelineError("Fireworks deploy requires --account-id, --output-model-id, --deployment-id, and --deployment-shape")
                 value = FireworksProvider().deploy(args.run_dir, *fireworks_options, confirm=args.confirm)

@@ -85,7 +85,7 @@ def test_create_records_intent_before_provider_call_and_finishes_ready(run, back
     assert "undeploy --provider baseten" in receipt["cleanup_command"]
     assert backend.prepare.call_args.kwargs == {
         "checkpoint_id": "checkpoint123", "model_name": receipt["model_name"],
-        "accelerator": "H200:1", "hf_token_secret": "hf_access_token",
+        "accelerator": "H200:1",
     }
     backend.create.assert_called_once_with()
     backend.smoke.assert_called_once_with(ENDPOINT, "checkpoint-7")
@@ -184,8 +184,7 @@ def test_unknown_create_is_durable_and_never_retried(run, backend, failure):
     backend.prepare.assert_called_once()
 
 
-@pytest.mark.parametrize("change", [{"accelerator": "H200:2"}, {"max_seq_len": 4096},
-                                     {"hf_token_secret": "different-secret"}])
+@pytest.mark.parametrize("change", [{"accelerator": "H200:2"}, {"max_seq_len": 4096}])
 def test_changed_settings_preserve_existing_receipt(run, backend, change):
     deploy(run)
     before = (run / "endpoint.json").read_bytes()
@@ -486,8 +485,7 @@ def test_temporary_cleanup_failure_keeps_recoverable_receipt(run, backend):
 def test_temporary_plan_is_offline_and_reuses_saved_settings(run, backend):
     explicit = deployment.plan(run, accelerator="H200:1", max_seq_len=8192)
     assert explicit["checkpoint"] == IDENTITY
-    assert explicit["settings"] == {"accelerator": "H200:1", "max_seq_len": 8192,
-                                    "hf_token_secret": "hf_access_token"}
+    assert explicit["settings"] == {"accelerator": "H200:1", "max_seq_len": 8192}
     assert explicit["serving_mode"] == "temporary"
     backend.api.assert_not_called()
     backend.prepare.assert_not_called()

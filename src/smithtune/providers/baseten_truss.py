@@ -50,7 +50,6 @@ def prepare_deployment(
     checkpoint_id: str,
     model_name: str,
     accelerator: str,
-    hf_token_secret: str,
 ) -> Callable[[], dict[str, Any]]:
     """Read instance availability now; return a single-use create operation.
 
@@ -74,8 +73,8 @@ automatically. Credentials are read from BASETEN_API_KEY without using .trussrc.
     api_key = os.environ.get("BASETEN_API_KEY")
     if not api_key:
         raise PipelineError("BASETEN_API_KEY is not set")
-    if not all(value.strip() for value in (checkpoint_id, model_name, accelerator, hf_token_secret)):
-        raise PipelineError("Checkpoint, model name, accelerator, and HF token secret are required")
+    if not all(value.strip() for value in (checkpoint_id, model_name, accelerator)):
+        raise PipelineError("Checkpoint, model name, and accelerator are required")
     parts = accelerator.split(":")
     if len(parts) > 2 or (len(parts) == 2 and (not parts[1].isdigit() or int(parts[1]) < 1)):
         raise PipelineError("Accelerator must be a GPU type with an optional positive count, e.g. H200:1")
@@ -90,7 +89,6 @@ automatically. Credentials are read from BASETEN_API_KEY without using .trussrc.
             CheckpointList,
             Compute,
             DeployCheckpointsRuntime,
-            SecretReference,
         )
 
         remote = BasetenRemote("https://app.baseten.co", api_key=api_key)
@@ -103,9 +101,7 @@ automatically. Credentials are read from BASETEN_API_KEY without using .trussrc.
                     count=int(parts[1]) if len(parts) == 2 else 1,
                 )
             ),
-            runtime=DeployCheckpointsRuntime(
-                environment_variables={"HF_TOKEN": SecretReference(name=hf_token_secret)}
-            ),
+            runtime=DeployCheckpointsRuntime(environment_variables={}),
         )
         with _suppress_provider_response_logs():
             request = _build_inference_template_request(config, remote, dry_run=False)
