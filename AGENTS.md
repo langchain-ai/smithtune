@@ -30,6 +30,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - Use credentials through environment variables; keep their values out of messages, logs, and committed files.
 - Report any provisioned deployment and its cleanup command; deployment charges continue until it is removed.
 - Fireworks replay always uses the official serverless Training API sampler. Use `train --evaluate` to train and replay in one session, or `eval-plan --run-dir` and `evaluate --run-dir` to restore a completed run's best training checkpoint. Both compare the matching base model and tuned checkpoint. No evaluation deployment is created. Keep the same data, checkpoint, and sampling settings when resuming; generated responses are saved before judging. A promoted model ID alone cannot be sampled.
+- Fireworks `train --validation-replay` optionally scores frozen validation replay cases after every epoch. Highest pass rate selects the checkpoint, with lower validation loss breaking ties; replay improvement controls patience. Sample current weights without loading a checkpoint or resetting the optimizer between epochs. Add `--evaluate` for final test replay. Keep test scores out of selection. Failed validation replay stops training while preserving checkpoints and completed responses.
 
 ## Preserve the data behavior
 

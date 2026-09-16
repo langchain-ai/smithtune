@@ -276,3 +276,144 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
     else:
         assert events == ["calibration", "create", "complete", "close"]
         assert "phase: replay_incomplete" in (run / "run.md").read_text()
+
+
+@pytest.mark.parametrize("flags,keys", [([], set()), (["--evaluate"], {"replay"}),
+    (["--validation-replay"], {"validation_replay"}),
+    (["--validation-replay", "--evaluate"], {"validation_replay", "replay"})])
+def test_training_replay_flags(flags, keys):
+    args = cli._parser().parse_args(["train", *flags])
+    assert set(cli._training_replay(args)) == keys
+    if flags:
+        args.provider = "baseten"
+        with pytest.raises(PipelineError, match="fireworks"):
+            cli._training_replay(args)
+
+
+@pytest.mark.parametrize("scores,losses,delta,patience,best,epochs", [
+    ([0.8, 0.7, 0.6], [1.0, 0.8, 0.6], 0, 1, 1, 2),
+    ([0.5, 0.5, 0.5], [1.0, 0.8, 0.6], 0, 1, 2, 2),
+    ([0.5, 0.5, 0.5], [1.0, 1.0, 1.0], 0, 1, 1, 2),
+    ([0.5, 0.55, 0.65, 0.66, 0.67], [1.0] * 5, 0.1, 2, 5, 5),
+])
+def test_replay_selection_and_patience(scores, losses, delta, patience, best, epochs):
+    from smithtune.providers.fireworks import SFTSettings, run_early_stopping
+
+    seen = []
+
+    def run(epoch, checkpoint):
+        seen.append(checkpoint)
+        return {"eval_loss": losses[epoch - 1], "resume_checkpoint": f"cp-{epoch}",
+                "validation_replay_pass_rate": scores[epoch - 1]}
+
+    result = run_early_stopping(SFTSettings(max_epochs=len(scores), early_stopping_patience=patience,
+                                           early_stopping_min_delta=delta), run, validation_replay=True)
+    assert result["selection_metric"] == "validation_replay_pass_rate"
+    assert result["best"]["epoch"] == best
+    assert len(result["epochs"]) == epochs
+    assert seen == [None] + [f"cp-{e}" for e in range(1, epochs)]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_validation_replay_freezes_cases_preserves_training_and_selects_test_checkpoint(tmp_path, monkeypatch, fail):
+    from smithtune import fireworks_training as runtime, inference
+    from smithtune.providers import fireworks
+
+    data = replay_data(tmp_path, monkeypatch)
+    validation_file = data / "prepared/validation.jsonl"
+    row = json.loads((data / "prepared/test.jsonl").read_text())
+    row["_source"].update(example_id="validation", source_scope_id="validation")
+    validation_file.write_text(json.dumps(row) + "\n")
+    run = tmp_path / "run"
+    events, judge_calls = [], []
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
+    monkeypatch.setattr(fireworks, "preflight_model", lambda _: None)
+    monkeypatch.setattr(fireworks, "load_training_renderer", lambda _: None)
+    monkeypatch.setattr(evaluation, "validate_judge_credentials", lambda _: None)
+
+    def chat(model, messages, *_):
+        evidence = json.loads(messages[1]["content"])
+        judge_calls.append(evidence)
+        return {"content": json.dumps({"pass": evidence["candidate_next_action"]["content"] == "answer", "reason": "check"})}
+
+    monkeypatch.setattr(inference, "_chat_completion", chat)
+    monkeypatch.setattr(evaluation, "_chat_completion", chat)
+
+    class Session:
+        service = object()
+        snapshot_current = runtime.ServerlessTraining.snapshot_current
+        snapshot = runtime.ServerlessTraining.snapshot
+
+        def __init__(self, *args):
+            self.client = SimpleNamespace(
+                save_weights_for_sampler=lambda name: events.append(("snapshot", name)) or SimpleNamespace(path=name),
+                load_state=lambda cp: events.append(("load", cp)),
+            )
+
+        def __enter__(self):
+            events.append("open")
+            return self
+
+        def __exit__(self, *args):
+            events.append("close")
+
+        def run_epoch(self, epoch, checkpoint):
+            events.append(("train", epoch))
+            # Later file changes must not change the frozen validation cases.
+            validation_file.write_text("")
+            return {"eval_loss": 1 / epoch, "resume_checkpoint": f"cp-{epoch}"}
+
+        def complete(self):
+            events.append("complete")
+
+    class Sampler:
+        def __init__(self, model, checkpoint, directory, **kwargs):
+            assert kwargs["service"] is Session.service
+            self.checkpoint = checkpoint
+            self.config = {"checkpoint": checkpoint}
+            self.validation = "epoch-" in directory.name
+
+        def __enter__(self):
+            events.append("sampler-open")
+            return self.checkpoint
+
+        def __exit__(self, *args):
+            events.append("sampler-close")
+
+        def generate(self, model, *args):
+            if self.validation and self.checkpoint == "cp-2" and fail:
+                raise PipelineError("sampler unavailable")
+            return {"role": "assistant", "content": "wrong" if model == "cp-2" else "answer"}
+
+    monkeypatch.setattr(runtime, "ServerlessTraining", Session)
+    monkeypatch.setattr(sampling, "FireworksReplaySampler", Sampler)
+    options = {"judge_model": "judge", "concurrency": 4, "max_points_per_trajectory": None, "max_output_tokens": 256}
+
+    def train():
+        return fireworks.FireworksProvider().train(data, run, "run", fireworks.SFTSettings(max_epochs=2),
+            confirm=True, init_from_checkpoint=None, validation_replay=options, replay=options)
+
+    if fail:
+        with pytest.raises(PipelineError, match="interrupted"):
+            train()
+        epochs = json.loads((run / "epochs.json").read_text())
+        assert epochs[0]["validation_replay_pass_rate"] == 1
+        assert epochs[1]["resume_checkpoint"] == "cp-2"
+        assert epochs[1]["validation_replay"]["status"] == "interrupted"
+        assert "validation_replay_pass_rate" not in epochs[1]
+        assert "complete" not in events
+        assert not (run / "result.json").exists()
+    else:
+        result = train()
+        assert result["best"]["resume_checkpoint"] == "cp-1"
+        assert result["replay"]["tuned_model"] == "cp-1"
+        assert result["replay"]["evaluated_models"] == 2
+        assert len(judge_calls) == 10  # Two calibrations of three controls, four scored candidates.
+        assert events.index("complete") < events.index(("load", "cp-1"))
+        assert events.count(("load", "cp-1")) == 1
+    assert events[0] == "open" and events[-1] == "close"
+    assert events.index(("train", 1)) < events.index(("snapshot", "validation-epoch-1")) < events.index(("train", 2))
+    frozen = (run / "validation-replay/cases.jsonl").read_bytes()
+    assert (run / "validation-replay/epoch-1/cases.jsonl").read_bytes() == frozen
+    assert (run / "validation-replay/epoch-2/cases.jsonl").read_bytes() == frozen
+    assert (run / "replay/cases.jsonl").read_bytes() != frozen
