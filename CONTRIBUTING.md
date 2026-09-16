@@ -51,6 +51,15 @@ To install your checkout as an isolated CLI:
 sfw uv tool install --python 3.12 .
 ```
 
+For Baseten checkpoint deployment, install the optional `baseten-deploy` extra.
+It pins Truss 0.18.30 because the adapter uses its internal request builder and
+raw creation response to save deployment IDs before parsing generated config.
+Distribution checks exercise the released builder with mocked provider I/O.
+When updating Truss, verify request shape, exact GPU allocation, error logging,
+and receipt persistence. No model/GPU serving profile has been validated by
+these offline tests; deployment runs text and tool-call smoke tests before
+marking an endpoint ready.
+
 ## Dependency compatibility
 
 Transformers is pinned to `5.5.4`, matching the upstream Fireworks cookbook and

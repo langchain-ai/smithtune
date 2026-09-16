@@ -1,8 +1,8 @@
 <h1 align="center">smithtune</h1>
 
 Fine-tune models on LangSmith trajectories with Fireworks or Baseten.
-Fireworks supports training, deployment, and replay evaluation. Baseten supports
-SFT checkpoints and replay evaluation through an existing dedicated endpoint.
+Both providers support training, deployment, and replay evaluation. Baseten
+serves Loops checkpoints through dedicated endpoints.
 
 ## Setup
 
@@ -46,7 +46,7 @@ Configure credentials in your environment:
 | --- | --- |
 | Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
-| Baseten preparation, training, and inference | `BASETEN_API_KEY` |
+| Baseten preparation, training, deployment, and inference | `BASETEN_API_KEY` |
 | Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
 | Optional LangSmith gateway judging | `LANGSMITH_GATEWAY_API_KEY` |
 
@@ -320,7 +320,58 @@ Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json`
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
-## Evaluate an existing Baseten endpoint
+## Deploy and evaluate a Baseten checkpoint
+
+Install the optional deployment tools:
+
+```bash
+uv tool install --upgrade --python 3.12 \
+  'smithtune[baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
+```
+
+Set `BASETEN_API_KEY`, `ANTHROPIC_API_KEY` for the default judge, and a Baseten
+secret named `hf_access_token` with access to the base model on Hugging Face
+(override its name with `--hf-token-secret`). Choose GPUs explicitly: `H200:1`
+below is an example, not a verified allocation for every model.
+
+Preview cases and deployment settings, then run a temporary evaluation:
+
+```bash
+run_dir='<run-dir printed by train>'
+smithtune eval-plan --provider baseten --serving-mode temporary \
+  --run-dir "$run_dir" --data-dir data/qwen3p8-27b --output-dir "$run_dir/replay" \
+  --accelerator H200:1 --max-seq-len 32768
+smithtune evaluate --provider baseten --serving-mode temporary \
+  --run-dir "$run_dir" --data-dir data/qwen3p8-27b --output-dir "$run_dir/replay" \
+  --accelerator H200:1 --max-seq-len 32768 --deployment-timeout 1800 --confirm
+```
+
+The plan makes no deployment or inference calls. Evaluation creates or activates
+an endpoint from Baseten's official generated Loops serving template, checks it,
+runs replay, and deactivates serving replicas on completion or failure. It preserves
+the model and checkpoint. Repeat with the same directories to resume; hardware,
+context, and secret flags can be omitted once the deployment receipt exists.
+Temporary mode does not support `--base-model`. Use a separate output directory.
+
+For an endpoint that stays running, deploy and evaluate using its saved receipt:
+
+```bash
+smithtune deploy --provider baseten --run-dir "$run_dir" \
+  --accelerator H200:1 --max-seq-len 32768 --confirm
+smithtune evaluate --provider baseten --run-dir "$run_dir" \
+  --data-dir data/qwen3p8-27b --output-dir "$run_dir/replay" --confirm
+smithtune undeploy --provider baseten --run-dir "$run_dir" --confirm
+```
+
+`--max-seq-len` is an evaluation cap verified against the live server; it does
+not configure serving context. Replay also respects the prepared-data limit.
+`deploy` waits up to 1800 seconds; temporary evaluation defaults to 600, adjustable
+with `--deployment-timeout`. Endpoint IDs are saved even if smoke checks fail.
+A killed process or cleanup failure may leave paid capacity running; use the
+`undeploy` command above to deactivate its replicas. If creation has an unknown
+outcome without saved IDs, inspect Baseten before retrying. Keep the receipt.
+
+### Evaluate an existing Baseten endpoint
 
 After [deploying your Loops checkpoint](https://docs.baseten.co/loops/deploy-checkpoints),
 evaluate its dedicated chat endpoint using `BASETEN_API_KEY` and, for the default
@@ -348,8 +399,9 @@ Use `eval-plan` with the same data and endpoint options, without `--confirm`, to
 preview cases. Add `--base-model '<served-base-model-name>'` to compare a base
 route available on the **same endpoint**. Results go to `summary.json`; rerun
 the same command to resume. No Fireworks key is needed with an Anthropic judge.
-This path uses an existing deployment and leaves it running; manage its lifecycle
-in Baseten. Training support alone does not verify a model's serving configuration.
+This path uses an existing deployment and leaves it running; manage externally
+created deployments in Baseten. Training support alone does not verify a model's
+serving configuration.
 
 ## Evaluate a trained model (Fireworks)
 
