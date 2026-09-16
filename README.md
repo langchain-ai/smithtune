@@ -46,7 +46,7 @@ Configure credentials in your environment:
 | --- | --- |
 | Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
-| Baseten preparation, training, and council judging | `BASETEN_API_KEY` |
+| Baseten preparation, training, deployment, inference, and council judging | `BASETEN_API_KEY` |
 | Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
 | Optional LangSmith gateway judging | `LANGSMITH_GATEWAY_API_KEY` |
 
