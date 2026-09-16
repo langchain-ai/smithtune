@@ -129,7 +129,7 @@ class HFRenderer:
         try:
             return self.tokenizer.apply_chat_template(
                 _normalize_messages(messages), tools=tools, chat_template=self.template,
-                tokenize=True, add_generation_prompt=True, preserve_thinking=True,
+                tokenize=True, return_dict=False, add_generation_prompt=True, preserve_thinking=True,
             )
         except Exception as exc:
             raise PipelineError("the selected tokenizer could not render the replay prompt") from exc

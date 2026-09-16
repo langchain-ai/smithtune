@@ -63,6 +63,23 @@ def _loss_spans(datum, tokenizer=None):
     return spans
 
 
+@pytest.mark.parametrize("tools", [None, TOOLS])
+def test_replay_prompt_is_a_token_list_accepted_by_baseten(tools):
+    from baseten.loops import ModelInput
+
+    tokenizer = _tokenizer()
+    renderer = HFRenderer(baseten.DEFAULT_MODEL, tokenizer)
+    tokens = renderer.prompt_tokens(MESSAGES[:2], tools=tools)
+
+    assert isinstance(tokens, list) and tokens
+    assert ModelInput.from_ints(tokens).to_ints() == tokens
+    expected = tokenizer.apply_chat_template(
+        MESSAGES[:2], tools=tools, chat_template=renderer.template,
+        tokenize=False, add_generation_prompt=True, preserve_thinking=True,
+    )
+    assert tokenizer.decode(tokens) == expected
+
+
 def test_tools_reasoning_and_all_assistant_turns_use_upstream_loss_policy():
     original = copy.deepcopy(MESSAGES)
     renderer = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer())
