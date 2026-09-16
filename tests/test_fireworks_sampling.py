@@ -187,7 +187,8 @@ def test_saved_generations_resume_judging_without_reopening_session(tmp_path, mo
         evaluation.run_replay_evaluation(**options, max_output_tokens=12)
 
 
-def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("publish", [False, True])
+def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypatch, capsys, publish):
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"
     run.mkdir()
@@ -197,10 +198,11 @@ def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypa
     calls = []
     monkeypatch.setattr(evaluation, "validate_judge_credentials", lambda _: None)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", lambda *args, **kwargs: calls.append((args, kwargs)) or {})
-    cli.main(["evaluate", "--data-dir", str(data), "--run-dir", str(run), "--confirm"])
+    cli.main(["evaluate", "--data-dir", str(data), "--run-dir", str(run), "--confirm", *([] if publish else ["--no-langsmith"])])
     _, options = calls[0]
     assert calls[0][0][1] == run / "replay"
     assert options["base_model"] == DEFAULT_MODEL.base_model
+    assert options["publish"] is publish
     assert options["replay_sampler"].config["lora_alpha"] == 16
     assert options["replay_sampler"].config["lora_rank"] == 4
     with pytest.raises(SystemExit):
@@ -218,7 +220,7 @@ def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
     assert not (tmp_path / "replay" / "cases.jsonl").exists()
 
 
-@pytest.mark.parametrize("failure", ["calibration", "replay"])
+@pytest.mark.parametrize("failure", ["calibration", "replay", "langsmith"])
 def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_path, monkeypatch, failure):
     from smithtune.providers import fireworks_training as runtime
     from smithtune.providers import fireworks
@@ -230,6 +232,12 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
     monkeypatch.setattr(fireworks, "preflight_model", lambda _: None)
     monkeypatch.setattr(fireworks, "load_training_renderer", lambda _: None)
     monkeypatch.setattr(evaluation, "validate_judge_credentials", lambda _: None)
+
+    def preflight(*args, **kwargs):
+        if failure == "langsmith":
+            raise PipelineError("LangSmith snapshot mismatch")
+
+    monkeypatch.setattr(evaluation, "preflight_langsmith", preflight)
 
     def calibrate(*args):
         events.append("calibration")
@@ -266,12 +274,14 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
     monkeypatch.setattr(sampling, "FireworksReplaySampler", lambda *args, **kwargs: object())
     monkeypatch.setattr(evaluation, "ensure_judge_calibration", calibrate)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", replay)
-    with pytest.raises(PipelineError, match="judge unavailable"):
+    with pytest.raises(PipelineError, match="judge unavailable|snapshot"):
         fireworks.FireworksProvider().train(
             data, run, "run", fireworks.SFTSettings(max_epochs=1), confirm=True, init_from_checkpoint=None,
             replay={"judge_model": "judge", "concurrency": 4, "max_points_per_trajectory": None, "max_output_tokens": 256},
         )
-    if failure == "calibration":
+    if failure == "langsmith":
+        assert events == []
+    elif failure == "calibration":
         assert events == ["calibration"]
         assert not (run / "result.json").exists()
     else:

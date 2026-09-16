@@ -637,6 +637,7 @@ class BasetenProvider:
         test_fraction: float | None = None,
         fetch: bool = True,
         check_render: bool = True,
+        sync_splits: bool = True,
     ) -> dict[str, Any]:
         """Prepare canonical rows with the Baseten model and shared split defaults."""
         from smithtune.dataset import DEFAULT_TEST_FRACTION, DEFAULT_VALIDATION_FRACTION, prepare_dataset
@@ -660,6 +661,7 @@ class BasetenProvider:
             test_fraction=DEFAULT_TEST_FRACTION if test_fraction is None else test_fraction,
             fetch=fetch,
             check_render=check_render,
+            sync_splits=sync_splits,
         )
 
     def plan(self, data_dir: Path, run_id: str, settings: Any, *,
@@ -854,9 +856,10 @@ class BasetenProvider:
         _atomic_json(run_dir / "plan.json", plan)
         if replay is not None:
             from smithtune.artifacts import _load_jsonl
-            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation
+            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
             from smithtune.inference import _chat_completion
 
+            preflight_langsmith(data_dir, publish=replay.get("publish", True))
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
             )

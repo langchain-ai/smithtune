@@ -15,7 +15,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl, _utc_now
+from smithtune import langsmith_evaluation as reporting
 from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
     _prepared_example_contracts, _prepared_split,
@@ -66,6 +67,13 @@ def validate_judge_credentials(judge_model: str) -> None:
         anthropic_connection(provider)
     elif not os.environ.get("FIREWORKS_API_KEY", "").strip():
         raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
+
+
+def preflight_langsmith(data_dir: Path, *, publish: bool = True):
+    """Verify the pinned test cohort before training, judging, or sampling."""
+    if publish:
+        return reporting.verify_test_split(data_dir, _load_json(data_dir / "prepared" / "manifest.json"))
+    return None
 
 
 JUDGE_INSTRUCTIONS = """You judge the next assistant message against a recorded trajectory.
@@ -547,6 +555,7 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
+    publish: bool = True,
     replay_sampler: Any | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_lifecycle: AbstractContextManager[str] | None = None,
@@ -662,6 +671,9 @@ def run_replay_evaluation(
         raise PipelineError("existing replay results contain duplicate cases")
     if results and not config_path.exists() and max_output_tokens != DEFAULT_REPLAY_MAX_TOKENS:
         raise PipelineError("legacy replay results do not record generation settings; use a new output directory")
+    langsmith_context = preflight_langsmith(data_dir, publish=publish)
+    if langsmith_context is not None:
+        reporting.bind_evaluation_snapshot(output_dir, config, cases, langsmith_context)
     _json_dump(config_path, config)
     # Keep successful samples even if judging fails or the session expires.
     generations_path = output_dir / "generations.jsonl"
@@ -677,7 +689,7 @@ def run_replay_evaluation(
         key = (case["id"], label)
         if key in generated:
             raise PipelineError("saved generations contain duplicate candidates")
-        generated[key] = generation["candidate"]
+        generated[key] = generation
     generation_lock = Lock()
     pending = [case for case in cases if case["id"] not in completed]
     if baseten_cleanup is not None and not pending:
@@ -701,12 +713,16 @@ def run_replay_evaluation(
         }
         for label, model in models:
             route = tuned_route if label == "tuned" else model
-            candidate = generated.get((case["id"], label))
-            if candidate is None:
+            generation = generated.get((case["id"], label))
+            if generation is None:
+                started_at = _utc_now()
                 candidate = candidate_fn(route, case["messages"], max_output_tokens, False, request_contract)
+                generation = {"case": case, "label": label, "model": model, "candidate": candidate,
+                              "started_at": started_at, "ended_at": _utc_now()}
                 with generation_lock:
-                    generations.append({"case": case, "label": label, "model": model, "candidate": candidate})
+                    generations.append(generation)
                     _jsonl_dump(generations_path, generations)
+            candidate = generation["candidate"]
             judgment = judge_replay_candidate(case, candidate, judge_model, chat_fn)
             if candidate.get("sampling", {}).get("format_valid") is False:
                 judgment = {"pass": False, "reason": "Response was truncated or contained a malformed tool call."}
@@ -714,6 +730,7 @@ def run_replay_evaluation(
                 "model": model,
                 "serving_route": baseten_endpoint.url if baseten_endpoint else route,
                 "candidate": candidate,
+                **{key: generation[key] for key in ("started_at", "ended_at") if key in generation},
                 "deterministic_metrics": score_replay_candidate(
                     case,
                     candidate,
@@ -837,6 +854,16 @@ def run_replay_evaluation(
     summary["serving_mode"] = config["serving_mode"]
     if baseten_endpoint is not None:
         summary["baseten_endpoint"] = baseten_endpoint.to_dict()
+    # Persist the local summary even if LangSmith is temporarily unavailable.
     _json_dump(output_dir / "summary.json", summary)
+    if publish:
+        _json_dump(state_path, {"status": "publishing", "completed": len(results), "total": len(cases)})
+        try:
+            summary["langsmith"] = reporting.publish_evaluation(output_dir, config, results, cases, langsmith_context)
+        except BaseException:
+            _json_dump(state_path, {"status": "interrupted", "phase": "langsmith_publication",
+                                   "completed": len(results), "total": len(cases)})
+            raise
+        _json_dump(output_dir / "summary.json", summary)
     _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
     return summary

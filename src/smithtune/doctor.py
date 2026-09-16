@@ -14,7 +14,7 @@ INSTALL_HELP = {
 
 def diagnose() -> dict:
     packages = {}
-    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "transformers", "trl", "torch", "deepagents", "langchain-openai", "pydantic-monty"):
+    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "langsmith", "transformers", "trl", "torch", "deepagents", "langchain-openai", "pydantic-monty"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:

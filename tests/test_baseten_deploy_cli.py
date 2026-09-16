@@ -244,6 +244,31 @@ def test_temporary_evaluation_does_not_provision_when_data_preflight_fails(tmp_p
     evaluate.assert_not_called()
 
 
+def test_temporary_evaluation_verifies_langsmith_before_provisioning(tmp_path, temporary_baseten, monkeypatch):
+    _, events, _, _, evaluate = temporary_baseten
+    monkeypatch.setattr(cli.replay_evaluation, "preflight_langsmith", Mock(side_effect=cli.PipelineError("snapshot mismatch")))
+    with pytest.raises(SystemExit):
+        cli.main([*temporary_args(tmp_path), "--confirm"])
+    assert events == []
+    evaluate.assert_not_called()
+
+
+def test_first_temporary_evaluation_closes_serving_before_publication(tmp_path, temporary_baseten):
+    _, events, _, _, evaluate = temporary_baseten
+
+    def replay(*args, **kwargs):
+        assert kwargs["publish"] is True
+        with kwargs["baseten_lifecycle"]:
+            events.append(("sample",))
+        assert events[-1] == ("exit",)
+        events.append(("publish",))
+        return {"status": "complete"}
+
+    evaluate.side_effect = replay
+    cli.main([*temporary_args(tmp_path), "--confirm"])
+    assert [event[0] for event in events] == ["enter", "sample", "exit", "publish"]
+
+
 def test_temporary_evaluation_requires_confirmation_before_preflight(tmp_path, temporary_baseten, capsys):
     _, events, plan, prepare, _ = temporary_baseten
     with pytest.raises(SystemExit):

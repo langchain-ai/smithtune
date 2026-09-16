@@ -335,6 +335,7 @@ def test_preparation_delegates_with_baseten_policy(
                 "test_fraction": expected_test,
                 "fetch": False,
                 "check_render": False,
+                "sync_splits": True,
             },
         )
     ]

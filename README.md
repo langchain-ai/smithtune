@@ -43,7 +43,7 @@ Configure credentials in your environment:
 
 | Task | Variable |
 | --- | --- |
-| Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
+| Read LangSmith data and publish splits and evaluation experiments | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
 | Baseten preparation, training, deployment, inference, and council judging | `BASETEN_API_KEY` |
 | Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
@@ -286,6 +286,12 @@ When continuing training in a new data directory, add
 `--split-from <previous-data-dir>` to `prepare` to preserve prior assignments.
 Keep the assignments file, including entries for removed conversations.
 
+Preparation also publishes these splits onto the original LangSmith dataset and
+records its version for evaluation. Existing conflicting assignments stop
+preparation. If split publication fails, rerun `prepare --no-fetch` with the same
+settings to finish. `--no-fetch` still contacts LangSmith for this step; use
+`--no-sync-splits` for local-only preparation.
+
 If source traces live in another workspace, add
 `--source-workspace-id '<traces-workspace-id>'` to `prepare`; `--workspace-id`
 still identifies the dataset workspace. Per-example `metadata.source_workspace_id`
@@ -455,6 +461,7 @@ train --evaluate
   +-- sample base and tuned responses to the same test cases
   +-- score and save results
   +-- clean up sampler resources
+  +-- publish results and return LangSmith experiment links
 ```
 
 You do not write separate replay examples. The CLI makes a case before each
@@ -516,6 +523,38 @@ To use the internal Anthropic gateway, explicitly select
 `--judge-model anthropic-gateway/claude-sonnet-5` and set
 `LANGSMITH_GATEWAY_API_KEY`. Fireworks training and sampling always use the
 official Fireworks API.
+
+### Review replay results in LangSmith
+
+`train --evaluate` and standalone `evaluate` publish a base and tuned experiment
+when comparing both models, or one experiment when evaluating only a tuned endpoint.
+Open the returned `langsmith.experiments` links to compare results on the original
+dataset's test split. Each conversation has a root run, with a child LLM run for
+each generated action. Experiment metadata identifies the provider and whether
+predictions came from a sampler or deployed endpoint.
+
+- `teacher_agreement`: each action's judge pass/fail, with its explanation.
+- `trajectory_teacher_agreement`: fraction of evaluated actions that passed in a
+  conversation. Averaging this score weights conversations equally; local summary
+  rates weight individual actions equally.
+
+These scores measure agreement with the recorded response, not independently
+verified task success. Tool-validation metrics remain in the saved run outputs
+and local replay files rather than separate feedback columns.
+
+LangSmith's pinned dataset version is verified before paid work. For older
+prepared data, rerun `prepare --no-fetch` with its original settings to register
+the splits first. `plan` and `eval-plan` remain local previews.
+
+Results are saved before upload, and owned samplers or temporary serving are
+closed before publication. If uploading fails, repeat standalone `evaluate` with
+the same directories and settings to publish saved results without repeating
+inference. Keep the local files for recovery.
+
+Use `--no-langsmith` with `evaluate` or `train --evaluate` for local results only.
+To publish those results later, register the matching splits and rerun standalone
+`evaluate` without that flag. Repeat the flag on `plan --evaluate` when previewing
+a local-only training workflow.
 
 ### Keep an endpoint running with `deploy`
 

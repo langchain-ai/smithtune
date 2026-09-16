@@ -52,7 +52,8 @@ def test_sampler_preview_is_offline_and_defaults_to_base_comparison(tmp_path, mo
     constructor.assert_not_called()
 
 
-def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("publish", [False, True])
+def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_path, monkeypatch, capsys, publish):
     data = replay_data(tmp_path, monkeypatch)
     run = saved_run(tmp_path)
     sampler = object()
@@ -63,13 +64,14 @@ def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_pat
     monkeypatch.setattr(evaluation, "run_replay_evaluation", evaluate)
     monkeypatch.setattr(cli.baseten_deployment, "load_endpoint", Mock(side_effect=AssertionError("unexpected endpoint")))
     cli.main(["evaluate", "--provider", "baseten", "--run-dir", str(run),
-              "--data-dir", str(data), "--confirm"])
+              "--data-dir", str(data), "--confirm", *([] if publish else ["--no-langsmith"])])
     assert json.loads(capsys.readouterr().out)["serving_mode"] == "sampler"
     model, checkpoint, output = constructor.call_args.args
     assert (model.base_model, checkpoint, output) == (baseten.DEFAULT_MODEL.base_model, CHECKPOINT, run / "replay")
     assert evaluate.call_args.args[2] == CHECKPOINT
     assert evaluate.call_args.kwargs["base_model"] == model.base_model
     assert evaluate.call_args.kwargs["replay_sampler"] is sampler
+    assert evaluate.call_args.kwargs["publish"] is publish
 
 
 @pytest.mark.parametrize("failure", ["unconfirmed", "missing_judge"])
@@ -138,7 +140,8 @@ def test_training_replay_plan_is_offline_and_records_separate_sampler_cost(tmp_p
 
 
 @pytest.mark.parametrize("command", ["plan", "train"])
-def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, capsys, command):
+@pytest.mark.parametrize("publish", [False, True])
+def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, capsys, command, publish):
     provider = Mock()
     provider.plan.return_value = {"status": "planned"}
     provider.train.return_value = {"status": "completed"}
@@ -148,10 +151,12 @@ def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, 
             "--concurrency", "1", "--max-output-tokens", "128"]
     if command == "train":
         args += ["--run-dir", str(tmp_path / "run")]
+    if not publish:
+        args.append("--no-langsmith")
     cli.main(args)
     capsys.readouterr()
     called = provider.plan if command == "plan" else provider.train
-    assert called.call_args.kwargs["replay"] == REPLAY
+    assert called.call_args.kwargs["replay"] == {**REPLAY, "publish": publish}
 
 
 @pytest.mark.parametrize("replay_fails", [False, True])
@@ -204,17 +209,21 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
     assert events == ["calibrate", "sampler", "replay"]
 
 
-@pytest.mark.parametrize("failure", ["credentials", "calibration"])
+@pytest.mark.parametrize("failure", ["credentials", "calibration", "langsmith"])
 def test_training_judge_preflight_failure_never_allocates_trainer(tmp_path, monkeypatch, failure):
     data = training_data(tmp_path, monkeypatch)
     service = FakeService(FakeTrainer())
     provider = _provider(service, FakeManagement())
     if failure == "credentials":
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    else:
+    elif failure == "calibration":
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
         monkeypatch.setattr(evaluation, "calibrate_judge", lambda *_: [{"actual": False, "expected": True}])
-    with pytest.raises(PipelineError, match="ANTHROPIC_API_KEY|calibration"):
+    else:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+        monkeypatch.setattr(evaluation, "preflight_langsmith", Mock(side_effect=PipelineError("LangSmith snapshot mismatch")))
+        monkeypatch.setattr(evaluation, "ensure_judge_calibration", Mock(side_effect=AssertionError("must verify before judge")))
+    with pytest.raises(PipelineError, match="ANTHROPIC_API_KEY|calibration|snapshot"):
         provider.train(data, tmp_path / "run", "approved-run", baseten.BasetenSFTSettings(),
                        confirm=True, init_from_checkpoint=None, replay=REPLAY)
     assert service.service_client_calls == []

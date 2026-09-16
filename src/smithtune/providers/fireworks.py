@@ -326,6 +326,7 @@ class FireworksProvider:
         test_fraction: float | None = None,
         fetch: bool = True,
         check_render: bool = True,
+        sync_splits: bool = True,
     ) -> dict[str, Any]:
         model = resolve_rendering_model(preflight_model(self.model_from_options(model_options)))
         return prepare_dataset(
@@ -343,6 +344,7 @@ class FireworksProvider:
             test_fraction=DEFAULT_TEST_FRACTION if test_fraction is None else test_fraction,
             fetch=fetch,
             check_render=check_render,
+            sync_splits=sync_splits,
         )
 
     def plan(
@@ -443,10 +445,11 @@ class FireworksProvider:
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
         _json_dump(run_dir / "plan.json", plan)
         if replay is not None:
-            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials
+            from smithtune.evaluation import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials, preflight_langsmith
             from smithtune.inference import _chat_completion
 
             validate_judge_credentials(replay["judge_model"])
+            preflight_langsmith(data_dir, publish=replay.get("publish", True))
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
             )

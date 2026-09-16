@@ -151,6 +151,7 @@ class TrainingProvider(Protocol):
         test_fraction: float | None = None,
         fetch: bool = True,
         check_render: bool = True,
+        sync_splits: bool = True,
     ) -> dict[str, Any]:
         """Apply provider preparation policy to shared trajectory preparation."""
 
