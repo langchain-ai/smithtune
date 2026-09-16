@@ -372,6 +372,36 @@ def test_smoke_exercises_text_tool_call_and_tool_result_context(smoke_backend):
     assert tool.kwargs["request_contract"].tools[0]["function"]["name"] == "lookup_number"
 
 
+@pytest.mark.parametrize("checkpoint_context", [{}, {"max_model_len": None}])
+def test_smoke_uses_named_parent_context_for_lora(smoke_backend, checkpoint_context):
+    smoke_backend.api.return_value = {"data": [
+        {"id": "baseten-model", "max_model_len": 262144},
+        {"id": "checkpoint-7", "parent": "baseten-model", **checkpoint_context},
+    ]}
+    assert deployment._smoke(ENDPOINT, "checkpoint-7") == 262144
+    assert smoke_backend.chat.call_count == 3
+    assert all(call.args[0] == "checkpoint-7" for call in smoke_backend.chat.call_args_list)
+
+
+@pytest.mark.parametrize("context,parents", [
+    (None, []),
+    (None, [{"id": "unrelated", "max_model_len": 262144}]),
+    (None, [{"id": "baseten-model", "max_model_len": 262144}] * 2),
+    (None, [{"id": "baseten-model", "max_model_len": None}]),
+    (None, [{"id": "baseten-model", "max_model_len": True}]),
+    (None, [{"id": "baseten-model", "max_model_len": 4096}]),
+    (4096, [{"id": "baseten-model", "max_model_len": 262144}]),
+    (True, [{"id": "baseten-model", "max_model_len": 262144}]),
+])
+def test_smoke_parent_fallback_requires_unique_valid_context(smoke_backend, context, parents):
+    smoke_backend.api.return_value = {"data": [
+        {"id": "checkpoint-7", "parent": "baseten-model", "max_model_len": context}, *parents,
+    ]}
+    with pytest.raises(PipelineError, match="context"):
+        deployment._smoke(ENDPOINT, "checkpoint-7")
+    smoke_backend.chat.assert_not_called()
+
+
 @pytest.mark.parametrize("catalog", [
     {}, {"data": []}, {"data": [{"id": "other", "max_model_len": 16384}]},
     {"data": [{"id": "checkpoint-7", "max_model_len": 4096}]},
