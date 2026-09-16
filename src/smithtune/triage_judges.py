@@ -15,9 +15,12 @@ from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL, _set_skill_session
 
 
-PROVIDERS = ("fireworks", "openai", "anthropic", "anthropic-gateway")
+PROVIDERS = ("fireworks", "baseten", "openai", "anthropic", "anthropic-gateway")
 # GLM-5.3 rejects requests that disable reasoning.
 FIREWORKS_REASONING = {"accounts/fireworks/models/glm-5p3-flash": "low"}
+BASETEN_REASONING = {model: "low" for model in ("zai-org/GLM-5.3", "zai-org/GLM-5.3-Fast", "zai-org/GLM-5.3-Flash")}
+CHAT_ENDPOINTS = {"fireworks": INFERENCE_URL.removesuffix("/chat/completions"),
+                  "baseten": "https://inference.baseten.co/v1", "openai": "https://api.openai.com/v1"}
 RESULT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["keep", "reason"],
@@ -63,10 +66,15 @@ def context_window_exceeded(exc: Exception) -> bool:
     ))
 
 
+def reasoning_effort(provider: str, model: str) -> str:
+    overrides = {"fireworks": FIREWORKS_REASONING, "baseten": BASETEN_REASONING}
+    return overrides.get(provider, {}).get(model, "none")
+
+
 def credential_name(provider: str) -> str:
     if provider in ANTHROPIC_ENDPOINTS:
         return ANTHROPIC_ENDPOINTS[provider][1]
-    return {"fireworks": "FIREWORKS_API_KEY", "openai": "OPENAI_API_KEY"}[provider]
+    return {"fireworks": "FIREWORKS_API_KEY", "baseten": "BASETEN_API_KEY", "openai": "OPENAI_API_KEY"}[provider]
 
 
 def check_credentials(judges: list[dict]) -> None:
@@ -89,12 +97,12 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
         text = response["content"]
     else:
         headers = {"Content-Type": "application/json"}
-        url = INFERENCE_URL if provider == "fireworks" else "https://api.openai.com/v1/chat/completions"
+        url = CHAT_ENDPOINTS[provider] + "/chat/completions"
         headers["Authorization"] = f"Bearer {os.environ[credential_name(provider)]}"
         body = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
-                "max_tokens" if provider == "fireworks" else "max_completion_tokens": max_tokens}
-        if provider == "fireworks" or model == "gpt-5.6-terra":
-            body["reasoning_effort"] = FIREWORKS_REASONING.get(model, "none") if provider == "fireworks" else "none"
+                "max_tokens" if provider in {"fireworks", "baseten"} else "max_completion_tokens": max_tokens}
+        if provider in {"fireworks", "baseten"} or model == "gpt-5.6-terra":
+            body["reasoning_effort"] = reasoning_effort(provider, model)
         if provider == "fireworks":
             _set_skill_session()
             headers.update({"X-Fireworks-Client-Source": CLIENT_SOURCE, "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})
@@ -114,7 +122,7 @@ def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagn
     """One model request per subagent, with full messages and no tool loop."""
     from smithtune.triage_agent import _model
     model = _model(judge, max_tokens)
-    if judge["provider"] in {"fireworks", "openai"}:
+    if judge["provider"] in CHAT_ENDPOINTS:
         model = model.bind(response_format={"type": "json_object"})
     result = model.invoke(messages)
     if diagnostics is not None:
