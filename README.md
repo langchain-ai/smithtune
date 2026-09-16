@@ -44,7 +44,7 @@ Configure credentials in your environment:
 
 | Task | Variable |
 | --- | --- |
-| Read LangSmith datasets and runs | `LANGSMITH_API_KEY` |
+| Read LangSmith data, publish dataset splits and evaluation experiments | `LANGSMITH_API_KEY` |
 | Fireworks preparation, training, and inference | `FIREWORKS_API_KEY` |
 | Baseten preparation, training, deployment, and inference | `BASETEN_API_KEY` |
 | Direct Anthropic judging (triage and replay) | `ANTHROPIC_API_KEY` |
@@ -274,6 +274,20 @@ When continuing training in a new data directory, add
 `--split-from <previous-data-dir>` to `prepare` to preserve prior assignments.
 Keep the assignments file, including entries for removed conversations.
 
+Preparation also registers `train`, `validation`, and `test` splits on the same
+LangSmith dataset, using the original example IDs of the accepted conversations.
+It verifies exact membership and records a dataset version in
+`prepared/langsmith-splits.json` and the manifest. Existing conflicting split
+assignments stop preparation; unrelated dataset splits are preserved. Previously
+published examples that are now rejected are removed from Smithtune's splits.
+Run one preparation into a dataset at a time.
+
+If synchronization fails, local artifacts remain saved. Rerun `prepare --no-fetch`
+with the same settings to finish publication. `--no-fetch` reuses messages and tool
+schemas but still contacts LangSmith to synchronize splits. Use
+`--no-sync-splits` for local-only preparation; LangSmith evaluation requires a
+verified matching snapshot. The Python LangSmith SDK is included with Smithtune.
+
 If source traces live in another workspace, add
 `--source-workspace-id '<traces-workspace-id>'` to `prepare`; `--workspace-id`
 still identifies the dataset workspace. Per-example `metadata.source_workspace_id`
@@ -481,6 +495,43 @@ are saved to `<run-dir>/replay/summary.json`.
 Add `--base-model '<deployed-base-model-route>'` for a before/after comparison.
 The base route must already be available; the temporary deployment serves only
 the tuned model. Model and judge inference use current provider rates.
+
+### LangSmith evaluation experiments
+
+For either provider, `evaluate` verifies the registered `test` split at the
+prepared dataset version before any model calls or temporary deployment. Both
+base and tuned evaluations use those same examples and the saved tool contracts.
+Older prepared data needs `prepare --no-fetch` with its original settings to
+publish the splits first. `eval-plan` remains a local preview.
+
+After inference and deployment cleanup, the LangSmith SDK's `evaluate()` scores
+the saved experiment runs using the checkpointed judge results.
+Each model gets one experiment, with a root run per test trajectory and
+one child LLM run per generated assistant action. These are independent
+predictions against recorded prefixes; generated tool calls are not executed or
+inserted into later prefixes.
+
+The only published feedback is `teacher_agreement` on child LLM runs, with the
+judge's explanation, and `trajectory_teacher_agreement` on trajectory root runs.
+Tool-validation metrics remain in the saved replay results, not as feedback.
+The root agreement rate weights each trajectory equally when averaged; local
+summary rates weight each evaluated message equally. These scores measure
+agreement with the recorded teacher, not independently verified task success.
+Runs are marked as cached predictions and retain their original inference times.
+
+`summary.json` includes experiment links. `langsmith-evaluation-input.json`
+records the pinned snapshot and `langsmith-experiments.json` records experiment
+ownership and upload progress. If publication is interrupted, rerun the same
+evaluation command and output directory: completed model calls are reused,
+existing run IDs are retained, and only missing feedback is posted. Publication
+is complete only after feedback is read back successfully. Reporting happens
+after temporary serving cleanup, so an upload failure does not keep compute alive.
+
+Use `evaluate --no-langsmith` to retain only the local replay artifacts. A later
+run without that flag can publish the saved results once matching splits are
+registered; it does not require another model deployment when all cases are saved.
+
+### Judge routing and deployment recovery
 
 Replay judging calls Anthropic directly by default, using `ANTHROPIC_API_KEY`.
 For internal LangSmith gateway testing, set `LANGSMITH_GATEWAY_API_KEY` and add

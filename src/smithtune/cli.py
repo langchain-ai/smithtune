@@ -143,7 +143,8 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--split-from", type=Path, help="reuse split assignments from a previous data directory")
     prep.add_argument("--model", required=True, help="provider model ID or supported model alias")
     prep.add_argument("--max-seq-len", type=int, help="lower the selected model's preparation and training context limit")
-    prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached per-example tool schemas without querying LangSmith")
+    prep.add_argument("--no-fetch", action="store_true", help="reuse the raw export and cached tool schemas; split synchronization still contacts LangSmith")
+    prep.add_argument("--no-sync-splits", action="store_true", help="prepare locally without publishing LangSmith splits; evaluation requires a matching synchronized snapshot")
     prep.add_argument("--skip-render-check", action="store_true", help=argparse.SUPPRESS)
 
     plan = sub.add_parser("plan", help="print the resolved training plan without provisioning resources")
@@ -290,6 +291,7 @@ def _parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
                             help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway")
     evaluation.add_argument("--confirm", action="store_true")
+    evaluation.add_argument("--no-langsmith", action="store_true", help="save replay results locally without LangSmith experiments")
 
     remove = sub.add_parser("undeploy", help="stop serving capacity for a deployment")
     remove.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
@@ -363,6 +365,7 @@ def _run_evaluation(args, endpoint: BasetenEndpoint | None, tuned_model: str, *,
         base_model=args.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory,
         max_output_tokens=args.max_output_tokens, confirm=args.confirm,
+        publish=not args.no_langsmith,
         deployment=_eval_deployment(args), baseten_endpoint=endpoint, **lifecycle_options,
     )
 
@@ -537,6 +540,7 @@ def main(argv: list[str] | None = None) -> None:
                 test_fraction=args.test_fraction,
                 fetch=not args.no_fetch,
                 check_render=not args.skip_render_check,
+                sync_splits=not args.no_sync_splits,
             )
         elif args.command == "plan":
             provider = get_provider(args.provider)

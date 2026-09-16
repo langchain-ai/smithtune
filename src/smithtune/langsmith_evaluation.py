@@ -1,0 +1,346 @@
+"""Versioned dataset splits and resumable LangSmith replay experiments.
+
+Inference and judging are checkpointed by evaluation.py. The SDK evaluates those
+saved predictions so a reporting failure never requires another paid model call.
+"""
+
+from __future__ import annotations
+
+import copy
+import sys
+import time
+from contextlib import redirect_stdout
+from datetime import datetime
+from pathlib import Path
+from uuid import UUID, uuid4, uuid5
+
+from langsmith import Client
+from langsmith.evaluation import evaluate, run_evaluator
+from langsmith.utils import LangSmithNotFoundError
+
+from smithtune.artifacts import _json_dump, _load_json, _load_jsonl, _utc_now
+from smithtune.inference_contract import json_sha256
+from smithtune.providers.base import PipelineError
+
+
+SPLITS = ("train", "validation", "test")
+SPLIT_RECEIPT = "langsmith-splits.json"
+
+
+def make_client(workspace_id: str) -> Client:
+    """Use environment credentials, explicitly scoped to the dataset workspace."""
+    return Client(workspace_id=workspace_id, auto_batch_tracing=False)
+
+
+def _example_hash(example) -> str:
+    value = example if isinstance(example, dict) else example.model_dump(mode="json")
+    metadata = {key: value for key, value in (value.get("metadata") or {}).items() if key != "dataset_split"}
+    return json_sha256({"inputs": value["inputs"], "outputs": value.get("outputs"), "metadata": metadata})
+
+
+def split_snapshot(data_dir: Path, manifest: dict, examples: list[dict]) -> dict:
+    rows = {name: _load_jsonl(data_dir / "prepared" / f"{name}.jsonl") for name in SPLITS}
+    splits = {name: sorted(row["_source"]["example_id"] for row in values) for name, values in rows.items()}
+    ids = [example_id for members in splits.values() for example_id in members]
+    if len(ids) != len(set(ids)):
+        raise PipelineError("prepared LangSmith splits contain duplicate example IDs")
+    hashes = {str(example["id"]): _example_hash(example) for example in examples}
+    if not set(ids) <= hashes.keys():
+        raise PipelineError("prepared split refers to an example missing from the raw export")
+    for name in SPLITS:
+        if len(splits[name]) != manifest["split"][name]:
+            raise PipelineError(f"prepared {name} split differs from its manifest")
+        # Publishing splits adds this derived metadata to future exports. It
+        # must not change the identity of the messages that were prepared.
+        for row in rows[name]:
+            row["_source"].get("metadata", {}).pop("dataset_split", None)
+            row["_source"].pop("source_index", None)
+        rows[name].sort(key=lambda row: row["_source"]["example_id"])
+    identity = {
+        "workspace_id": manifest["langsmith"]["workspace_id"],
+        "dataset_id": manifest["langsmith"]["dataset_id"],
+        "assignments_sha256": manifest["split"].get("assignments_sha256"),
+        "prepared_sha256": json_sha256(rows),
+        "example_sha256": hashes,
+        "splits": splits,
+    }
+    return {**identity, "identity_sha256": json_sha256(identity)}
+
+
+def _check_examples(examples, expected: dict[str, str]) -> None:
+    actual = {str(example.id): _example_hash(example) for example in examples}
+    if actual != expected or len(examples) != len(expected):
+        changed = sorted(key for key in actual.keys() | expected.keys() if actual.get(key) != expected.get(key))
+        raise PipelineError(f"LangSmith examples differ from the prepared snapshot: {', '.join(changed[:10])}; prepare again")
+
+
+def synchronize_splits(data_dir: Path, manifest: dict, examples: list[dict], *, client=None, enabled=True) -> dict:
+    """Publish exact accepted membership without overwriting foreign assignments."""
+    desired = split_snapshot(data_dir, manifest, examples)
+    path = data_dir / "prepared" / SPLIT_RECEIPT
+    previous = _load_json(path) if path.exists() else {}
+    if previous and any(previous.get(key) != desired[key] for key in ("workspace_id", "dataset_id")):
+        raise PipelineError(f"LangSmith split receipt belongs to another dataset: {path}")
+    if not enabled:
+        if previous.get("status") == "complete" and previous.get("identity_sha256") == desired["identity_sha256"]:
+            return {"status": "complete", "dataset_version": previous["dataset_version"],
+                    "identity_sha256": desired["identity_sha256"]}
+        return {"status": "pending"}
+    client = client or make_client(desired["workspace_id"])
+    dataset_id = desired["dataset_id"]
+    try:
+        _check_examples(list(client.list_examples(dataset_id=dataset_id)), desired["example_sha256"])
+        actual = {name: {str(ex.id) for ex in client.list_examples(dataset_id=dataset_id, splits=[name])} for name in SPLITS}
+        owned = previous.get("managed_splits", previous.get("splits", {}))
+        for name in SPLITS:
+            wanted = set(desired["splits"][name])
+            foreign = actual[name] - wanted - set(owned.get(name, []))
+            conflicting = wanted & set().union(*(actual[other] for other in SPLITS if other != name))
+            if foreign or conflicting:
+                raise PipelineError(f"conflicting existing LangSmith {name} membership: {', '.join(sorted(foreign | conflicting)[:10])}")
+        receipt = {**desired, "status": "syncing", "managed_splits": {
+            name: sorted(set(owned.get(name, [])) | set(desired["splits"][name])) for name in SPLITS
+        }}
+        # Save ownership before writes; additions/removals are safe to repeat.
+        _json_dump(path, receipt)
+        for name in SPLITS:
+            wanted = set(desired["splits"][name])
+            for remove, ids in ((True, actual[name] - wanted), (False, wanted - actual[name])):
+                ordered = sorted(ids)
+                for offset in range(0, len(ordered), 100):
+                    client.update_dataset_splits(dataset_id=dataset_id, split_name=name,
+                                                 example_ids=ordered[offset:offset + 100], remove=remove)
+        version = client.read_dataset_version(dataset_id=dataset_id, tag="latest").as_of.isoformat()
+        frozen = list(client.list_examples(dataset_id=dataset_id, as_of=version))
+        _check_examples(frozen, desired["example_sha256"])
+        for name in SPLITS:
+            members = list(client.list_examples(dataset_id=dataset_id, splits=[name], as_of=version))
+            if sorted(str(ex.id) for ex in members) != desired["splits"][name]:
+                raise PipelineError(f"LangSmith {name} split verification failed; rerun prepare to resume: {path}")
+        receipt.update(status="complete", dataset_version=version, managed_splits=desired["splits"])
+        _json_dump(path, receipt)
+        return {"status": "complete", "dataset_version": version, "identity_sha256": desired["identity_sha256"]}
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(f"LangSmith split synchronization failed ({type(exc).__name__}); local data is saved; rerun prepare: {path}") from None
+
+
+def verify_test_split(data_dir: Path, manifest: dict, *, client=None):
+    """Resolve the registered test cohort and verify it before paid inference."""
+    path = data_dir / "prepared" / SPLIT_RECEIPT
+    if not path.exists() or manifest.get("langsmith", {}).get("split_sync", {}).get("status") != "complete":
+        raise PipelineError("LangSmith splits are not synchronized; run prepare (or prepare --no-fetch) before evaluation")
+    receipt = _load_json(path)
+    desired = split_snapshot(data_dir, manifest, _load_json(data_dir / "raw" / "examples.json"))
+    if (receipt.get("status") != "complete" or receipt.get("identity_sha256") != desired["identity_sha256"]
+            or any(receipt.get(key) != value for key, value in desired.items())
+            or manifest["langsmith"]["split_sync"].get("dataset_version") != receipt.get("dataset_version")):
+        raise PipelineError(f"prepared data differs from its LangSmith split receipt: {path}")
+    client = client or make_client(receipt["workspace_id"])
+    try:
+        examples = list(client.list_examples(dataset_id=receipt["dataset_id"], splits=["test"], as_of=receipt["dataset_version"]))
+        _check_examples(examples, {key: receipt["example_sha256"][key] for key in receipt["splits"]["test"]})
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(f"cannot verify the registered LangSmith test split ({type(exc).__name__}): {path}") from None
+    return client, examples, receipt
+
+
+def bind_evaluation_snapshot(output_dir: Path, config: dict, cases: list[dict], context) -> str:
+    """Pin the dataset version before inference, including interrupted evaluations."""
+    splits = context[2]
+    value = {"config": config, "cases_sha256": json_sha256(sorted(cases, key=lambda case: case["id"])), "split_identity": splits["identity_sha256"],
+             "dataset_id": splits["dataset_id"], "dataset_version": splits["dataset_version"]}
+    path = output_dir / "langsmith-evaluation-input.json"
+    if path.exists() and _load_json(path) != value:
+        raise PipelineError(f"LangSmith evaluation uses a different prepared snapshot; use a new output directory: {path}")
+    _json_dump(path, value)
+    return json_sha256(value)
+
+
+def _feedback(run_id: str, key: str, score, comment=None) -> dict:
+    result = {"key": key, "score": score, "target_run_id": run_id}
+    if comment is not None:
+        result["comment"] = comment
+    return result
+
+
+def _expected_feedback(root_id: str, steps: list[dict]) -> list[dict]:
+    feedback = []
+    for step in steps:
+        feedback.append(_feedback(step["run_id"], "teacher_agreement", int(step["judgment"]["pass"]), step["judgment"]["reason"]))
+    if steps:
+        feedback.append(_feedback(root_id, "trajectory_teacher_agreement", sum(step["judgment"]["pass"] for step in steps) / len(steps)))
+    return feedback
+
+
+def _saved_feedback(client, expected: list[dict]) -> set[tuple[str, str]]:
+    """Read back scores; a successful SDK return alone does not prove upload."""
+    wanted = {(item["target_run_id"], item["key"]): item for item in expected}
+    found = set()
+    ids = sorted({key[0] for key in wanted})
+    for offset in range(0, len(ids), 100):
+        for feedback in client.list_feedback(run_ids=ids[offset:offset + 100]):
+            key = (str(feedback.run_id), feedback.key)
+            if key in wanted:
+                item = wanted[key]
+                if feedback.score != item["score"] or (item.get("comment") is not None and feedback.comment != item["comment"]):
+                    raise PipelineError(f"conflicting LangSmith feedback for run {key[0]}, key {key[1]}")
+                found.add(key)
+    return found
+
+
+def _ensure_run(client, value: dict, project_id) -> bool:
+    try:
+        run = client.read_run(value["id"], project_id=project_id, start_time=value["start_time"])
+    except LangSmithNotFoundError:
+        client.create_run(**value)
+        return False
+    if (run.inputs != value["inputs"] or run.outputs != value["outputs"]
+            or str(run.trace_id) != value["trace_id"]
+            or str(run.parent_run_id or "") != str(value.get("parent_run_id") or "")
+            or run.extra.get("metadata", {}).get("smithtune_evaluation_id") != value["extra"]["metadata"]["smithtune_evaluation_id"]):
+        raise PipelineError(f"LangSmith run differs from saved replay: {value['id']}")
+    return True
+
+
+def _replay_evaluator(expected_by_root, found):
+    @run_evaluator
+    def replay_scores(run, example):
+        return {"results": [copy.deepcopy(item) for item in expected_by_root[str(run.id)]
+                            if (item["target_run_id"], item["key"]) not in found]}
+
+    return replay_scores
+
+
+def publish_evaluation(output_dir: Path, config: dict, results: list[dict], cases: list[dict], context) -> dict:
+    """Materialize stable run IDs and use SDK evaluate() on saved experiments."""
+    client, examples, splits = context
+    path = output_dir / "langsmith-experiments.json"
+    identity = bind_evaluation_snapshot(output_dir, config, cases, context)
+    inference_start = min((result[label].get("started_at", _utc_now()) for result in results for label in config["models"]), default=_utc_now())
+    receipt = _load_json(path) if path.exists() else {
+        "schema_version": 1, "evaluation_id": str(uuid4()), "created_at": inference_start,
+        "identity_sha256": identity, "experiments": {},
+    }
+    if receipt.get("identity_sha256") != identity:
+        raise PipelineError(f"LangSmith experiments use different evaluation settings: {path}")
+    receipt["status"] = "publishing"
+    _json_dump(path, receipt)
+    namespace = UUID(receipt["evaluation_id"])
+    started = datetime.fromisoformat(receipt["created_at"])
+    by_example = {str(example.id): [] for example in examples}
+    for result in results:
+        by_example[result["case"]["example_id"]].append(result)
+    phase = "experiment_creation"
+    try:
+        for label, model in config["models"].items():
+            phase = f"{label}:experiment_creation"
+            name = f"smithtune-{label}-{namespace}"
+            metadata = {"smithtune_evaluation_id": str(namespace), "model": model, "model_role": label,
+                        "judge_model": config["judge_model"], "evaluation_mode": "recorded_prefix",
+                        "dataset_version": splits["dataset_version"], "dataset_splits": ["test"],
+                        "smithtune_dataset_version": splits["dataset_version"],
+                        "prepared_identity": splits["identity_sha256"], "cached_predictions": True}
+            try:
+                project = client.read_project(project_name=name)
+            except LangSmithNotFoundError:
+                project = client.create_project(name, reference_dataset_id=splits["dataset_id"], metadata=metadata)
+            if (str(project.reference_dataset_id) != splits["dataset_id"]
+                    or any(project.metadata.get(key) != value for key, value in metadata.items() if key not in ("dataset_version", "dataset_splits"))):
+                raise PipelineError(f"LangSmith experiment ownership/settings conflict: {name}")
+            client.update_project(project.id, metadata=metadata)
+            url = project.url
+            if url:
+                url = url.replace(f"/projects/p/{project.id}", f"/datasets/{splits['dataset_id']}/compare?selectedSessions={project.id}")
+            receipt["experiments"][label] = {"id": str(project.id), "name": name, "url": url}
+            _json_dump(path, receipt)
+            expected_by_root = {}
+            run_times = {}
+            phase = f"{label}:run_upload"
+            for example in examples:
+                example_id = str(example.id)
+                root_id = str(uuid5(namespace, f"{label}:{example_id}"))
+                root_order = started.strftime("%Y%m%dT%H%M%S%fZ") + root_id
+                steps, children = [], []
+                for result in by_example[example_id]:
+                    case, value = result["case"], result[label]
+                    child_id = str(uuid5(UUID(root_id), case["id"]))
+                    step = {"case_id": case["id"], "message_index": case["message_index"], "run_id": child_id,
+                            "candidate": value["candidate"], "judgment": value["judgment"],
+                            "deterministic_metrics": value["deterministic_metrics"]}
+                    steps.append(step)
+                    begin = datetime.fromisoformat(value.get("started_at", receipt["created_at"]))
+                    end = datetime.fromisoformat(value.get("ended_at", value.get("started_at", receipt["created_at"])))
+                    children.append({"id": child_id, "name": "replay_assistant", "run_type": "llm",
+                        "inputs": {"messages": case["messages"], "tools": case["tools"]},
+                        "outputs": {"message": value["candidate"]}, "start_time": begin, "end_time": end,
+                        "parent_run_id": root_id, "trace_id": root_id,
+                        "dotted_order": root_order + "." + begin.strftime("%Y%m%dT%H%M%S%fZ") + child_id,
+                        "project_name": name, "extra": {"metadata": {**metadata, "case_id": case["id"],
+                            "message_index": case["message_index"], "serving_route": value["serving_route"]}}})
+                root = {"id": root_id, "name": "replay_trajectory", "run_type": "chain", "inputs": example.inputs,
+                        "outputs": {"steps": steps}, "reference_example_id": example.id, "trace_id": root_id,
+                        "dotted_order": root_order, "project_name": name, "start_time": started,
+                        "end_time": max((child["end_time"] for child in children), default=started),
+                        "extra": {"metadata": metadata}}
+                for value in [root, *children]:
+                    if not _ensure_run(client, value, project.id):
+                        run_times[value["id"]] = value["start_time"]
+                expected_by_root[root_id] = _expected_feedback(root_id, steps)
+            client.flush()
+            # Indexing may lag ingestion. Never let evaluate() silently score a subset.
+            for attempt in range(5):
+                try:
+                    for run_id, start_time in run_times.items():
+                        client.read_run(run_id, project_id=project.id, start_time=start_time)
+                    break
+                except LangSmithNotFoundError:
+                    pass
+                if attempt < 4:
+                    time.sleep(1)
+            else:
+                raise PipelineError(f"LangSmith runs are not fully indexed; rerun evaluate to resume: {path}")
+            expected = [item for items in expected_by_root.values() for item in items]
+            phase = f"{label}:feedback_readback"
+            found = _saved_feedback(client, expected)
+
+            if len(found) != len(expected):
+                phase = f"{label}:sdk_evaluation"
+                # Keep the CLI's stdout a single JSON result.
+                with redirect_stdout(sys.stderr):
+                    # Saved inference can predate project creation. Include that
+                    # history in the SDK's SmithDB query window on every resume.
+                    experiment = project.model_copy(update={"start_time": started})
+                    evaluated = evaluate(experiment, evaluators=[_replay_evaluator(expected_by_root, found)], client=client,
+                                         load_nested=True, max_concurrency=0)
+                    rows = list(evaluated)
+                if len(rows) != len(examples) or any(row["run"].error for row in rows):
+                    raise PipelineError(f"LangSmith did not evaluate every trajectory: {name}")
+                client.flush()
+                phase = f"{label}:feedback_verification"
+                for attempt in range(5):
+                    if len(_saved_feedback(client, expected)) == len(expected):
+                        break
+                    if attempt < 4:
+                        time.sleep(1)
+                else:
+                    raise PipelineError(f"LangSmith feedback upload is incomplete; rerun evaluate: {path}")
+            # SDK can infer a different version from a subset's modified_at values.
+            client.update_project(project.id, metadata=metadata)
+        receipt["status"] = "complete"
+        receipt.pop("failure_phase", None)
+        receipt.pop("error_type", None)
+        _json_dump(path, receipt)
+        return {"dataset_id": splits["dataset_id"], "dataset_version": splits["dataset_version"],
+                "split": "test", "experiments": receipt["experiments"]}
+    except PipelineError as exc:
+        receipt.update(status="interrupted", failure_phase=phase, error_type=type(exc).__name__)
+        _json_dump(path, receipt)
+        raise
+    except Exception as exc:
+        receipt.update(status="interrupted", failure_phase=phase, error_type=type(exc).__name__)
+        _json_dump(path, receipt)
+        raise PipelineError(f"LangSmith experiment publication failed during {phase} ({type(exc).__name__}); replay results are saved; rerun evaluate: {path}") from None

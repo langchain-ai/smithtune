@@ -343,6 +343,7 @@ class FireworksProvider:
         test_fraction: float | None = None,
         fetch: bool = True,
         check_render: bool = True,
+        sync_splits: bool = True,
     ) -> dict[str, Any]:
         model = resolve_rendering_model(preflight_model(self.model_from_options(model_options)))
         return prepare_dataset(
@@ -360,6 +361,7 @@ class FireworksProvider:
             test_fraction=DEFAULT_TEST_FRACTION if test_fraction is None else test_fraction,
             fetch=fetch,
             check_render=check_render,
+            sync_splits=sync_splits,
         )
 
     def plan(

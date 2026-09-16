@@ -45,6 +45,26 @@ operations; the automated tests do not provision training or deployments.
 CI runs `ruff check` with the rules in `pyproject.toml`; it does not enforce
 `ruff format`. Run `uv run --no-sync ruff check --fix` to apply the safe autofixes.
 
+LangSmith is pinned to `0.12.4`, already used by the optional agent dependency
+graph. The SDK is MIT-licensed; PyPI metadata and OSV returned no published
+advisories for this version when checked on 2026-09-15. The evaluation integration
+uses the real SDK `evaluate()` with a fake service client in
+`tests/test_langsmith_evaluation.py`; ordinary tests disable remote publication.
+The `sdk_integration` marker opts into the explicit fake client. Do not use the
+SDK's `langsmith` pytest marker for offline tests, because it enables live uploads.
+
+For an explicitly authorized live smoke test, run:
+
+```bash
+uv run --no-sync python scripts/smoke_langsmith.py \
+  --workspace-id '<workspace-id>' --output-dir '<new-toy-directory>'
+```
+
+This creates six synthetic examples (two per split), publishes base/tuned
+experiments and feedback, and verifies resume. Model responses, judging and
+tokenization are deterministic fixtures; no provider inference or deployment is
+performed. It retains the dataset, experiments and local receipts for inspection.
+
 To install your checkout as an isolated CLI:
 
 ```bash

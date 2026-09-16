@@ -15,7 +15,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl, _utc_now
 from smithtune.dataset import (
     _canonical, _model_from_manifest, _prepared_inference_contract,
     _prepared_example_contracts, _prepared_split,
@@ -28,6 +28,7 @@ from smithtune.inference import (
     _baseten_chat_completion, _chat_completion, _inference_messages,
 )
 from smithtune.inference_contract import ContractError, InferenceContract
+from smithtune.langsmith_evaluation import bind_evaluation_snapshot, publish_evaluation, verify_test_split
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import _require_confirm, _set_skill_session
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS, validate_reasoning_support, validate_replay_context
@@ -521,6 +522,7 @@ def run_replay_evaluation(
     max_points_per_trajectory: int | None = DEFAULT_REPLAY_POINTS,
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     confirm: bool,
+    publish: bool = True,
     deployment: EvalDeployment | None = None,
     baseten_endpoint: BasetenEndpoint | None = None,
     baseten_lifecycle: AbstractContextManager[str] | None = None,
@@ -636,6 +638,10 @@ def run_replay_evaluation(
         raise PipelineError("existing replay results contain duplicate cases")
     if results and not config_path.exists() and max_output_tokens != DEFAULT_REPLAY_MAX_TOKENS:
         raise PipelineError("legacy replay results do not record generation settings; use a new output directory")
+    # Resolve the pinned cohort before judge calls or provisioning compute.
+    langsmith_context = verify_test_split(data_dir, manifest) if publish else None
+    if langsmith_context is not None:
+        bind_evaluation_snapshot(output_dir, config, cases, langsmith_context)
     _json_dump(config_path, config)
     pending = [case for case in cases if case["id"] not in completed]
     if deployment and not pending:
@@ -662,6 +668,7 @@ def run_replay_evaluation(
         }
         for label, model in models:
             route = tuned_route if label == "tuned" else model
+            started_at = _utc_now()
             candidate = candidate_fn(
                 route,
                 case["messages"],
@@ -669,10 +676,13 @@ def run_replay_evaluation(
                 False,
                 request_contract,
             )
+            ended_at = _utc_now()
             scored[label] = {
                 "model": model,
                 "serving_route": baseten_endpoint.url if baseten_endpoint else route,
                 "candidate": candidate,
+                "started_at": started_at,
+                "ended_at": ended_at,
                 "deterministic_metrics": score_replay_candidate(
                     case,
                     candidate,
@@ -795,6 +805,13 @@ def run_replay_evaluation(
     summary["serving_mode"] = config["serving_mode"]
     if baseten_endpoint is not None:
         summary["baseten_endpoint"] = baseten_endpoint.to_dict()
+    if publish:
+        _json_dump(state_path, {"status": "publishing", "completed": len(results), "total": len(cases)})
+        try:
+            summary["langsmith"] = publish_evaluation(output_dir, config, results, cases, langsmith_context)
+        except BaseException:
+            _json_dump(state_path, {"status": "interrupted", "phase": "langsmith_publication", "completed": len(results), "total": len(cases)})
+            raise
     _json_dump(output_dir / "summary.json", summary)
     _json_dump(state_path, {"status": "complete", "completed": len(results), "total": len(cases)})
     return summary

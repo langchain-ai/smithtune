@@ -15,6 +15,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - To label full trajectories for SFT, preview with `dataset triage <directory>` and source flags. Then use `dataset triage <directory> --confirm` to label or resume with saved settings. The default is a Deep Agent coordinator and DeepSeek V4.1 Flash and GLM-5.3-Flash judge subagents on Fireworks, plus GPT-5.6 Terra on OpenAI, with Python code mode. Set models with one `--judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra` list; other models use `provider:model`. Use `--rule` for project rules. Each line in `labels.jsonl` has only `trajectory_id`, `keep` (1 or 0), and `reason`. Explain the counts and reasons to the user after dispatch. Detailed votes stay in `judgments.jsonl`. Import selected whole conversations with `dataset create --triage-dir`. Export the portable skill with `skill export`.
 - Existing dataset: start at `prepare`; each example's metadata needs `source_scope`, `source_scope_id`, and `source_project_id` for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
+- `prepare` publishes train/validation/test membership to the original LangSmith dataset and records a verified version. `--no-fetch` still synchronizes splits; add `--no-sync-splits` for local-only preparation. LangSmith evaluation requires the matching synchronized snapshot.
 - Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.
 - Use LangSmith API filter expressions from the README and linked syntax reference.
 
@@ -27,6 +28,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - `prepare --no-fetch` reuses the raw export and saved tool schemas; it still needs compatible tokenizer dependencies and cache access.
 - Report failures with the relevant example/run IDs and artifact paths. Preserve recorded data and validation while diagnosing the cause.
 - Paid training, evaluation, and deployment must be within the user's authorized scope. Honor authorization already given; obtain it before adding `--confirm` for an operation that has not been authorized.
+- `evaluate` publishes LangSmith experiments and per-message feedback after saving replay results and cleaning up temporary serving. Preserve `langsmith-evaluation-input.json` and `langsmith-experiments.json` when resuming an upload; completed inference is reused. `--no-langsmith` explicitly keeps results local.
 - Use credentials through environment variables; keep their values out of messages, logs, and committed files.
 - Report any provisioned deployment and its cleanup command; deployment charges continue until it is removed.
 - For a promoted Fireworks model, prefer `eval-plan` and `evaluate --serving-mode preemptible` for temporary evaluation. Use the same model, account, shape, deployment ID, and limits on resume. Check the deployment receipt after an interruption or cleanup failure. This path uses the official Fireworks REST API.
