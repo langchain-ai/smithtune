@@ -179,10 +179,10 @@ def test_cli_plans_evaluates_and_resumes_existing_baseten_endpoint(tmp_path, mon
         assert request.get_header("X-api-key") == "anthropic-test-key"
         evidence = json.loads(body["messages"][-1]["content"])
         if case_type == "tool_call":
-            assert evidence["reference_action_tool_results_not_visible_to_candidate"] == [
+            assert evidence["untrusted_trajectory"]["reference_action_tool_results_not_visible_to_candidate"] == [
                 {"role": "tool", "content": "x is 1", "tool_call_id": "call-1"},
             ]
-        passed = evidence["candidate_next_action"] == evidence["reference_next_action"]
+        passed = evidence["candidate_next_action"] == evidence["untrusted_trajectory"]["reference_next_action"]
         return response({"content": [{"type": "text", "text": json.dumps({"pass": passed, "reason": "compare actions"})}]})
 
     monkeypatch.setattr(inference, "open_without_redirects", open_request)
@@ -242,7 +242,7 @@ def test_missing_config_cannot_resume_baseten_results_through_fireworks(tmp_path
     def chat(model, messages, max_tokens, json_mode=False, request_contract=None):
         if model == judge:
             evidence = json.loads(messages[-1]["content"])
-            passed = evidence["candidate_next_action"] == evidence["reference_next_action"]
+            passed = evidence["candidate_next_action"] == evidence["untrusted_trajectory"]["reference_next_action"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "compare actions"})}
         return {"role": "assistant", "content": "x is 1"}
 

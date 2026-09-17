@@ -1163,7 +1163,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
             assert request_contract is None
             evidence = json.loads(messages[1]["content"])
             candidate = evidence["candidate_next_action"]["tool_calls"][0]["function"]
-            reference = evidence["reference_next_action"]["tool_calls"][0]["function"]
+            reference = evidence["untrusted_trajectory"]["reference_next_action"]["tool_calls"][0]["function"]
             passed = candidate["name"] == reference["name"] and candidate["arguments"] == reference["arguments"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "tool check"})}
         assert messages == expected_prefix
@@ -1216,7 +1216,7 @@ def test_replay_evaluation_reports_text_scores(tmp_path: Path, monkeypatch: pyte
     def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):
         if json_mode:
             evidence = json.loads(messages[1]["content"])
-            passed = evidence["candidate_next_action"]["content"] == evidence["reference_next_action"]["content"]
+            passed = evidence["candidate_next_action"]["content"] == evidence["untrusted_trajectory"]["reference_next_action"]["content"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "text check"})}
         return {"role": "assistant", "content": "x is 1" if model == "tuned-model" else "x is 2"}
 
@@ -1262,7 +1262,7 @@ def test_replay_resume_rejects_a_different_model_set(
     def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):
         if json_mode:
             evidence = json.loads(messages[1]["content"])
-            passed = evidence["candidate_next_action"]["content"] == evidence["reference_next_action"]["content"]
+            passed = evidence["candidate_next_action"]["content"] == evidence["untrusted_trajectory"]["reference_next_action"]["content"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "text check"})}
         return {"role": "assistant", "content": "x is 1"}
 
@@ -1613,8 +1613,8 @@ def test_judge_marks_reference_tool_results_as_future_evidence():
     instructions = captured["messages"][0]["content"]
     evidence = json.loads(captured["messages"][1]["content"])
     assert "not visible to the candidate" in instructions
-    assert evidence["trajectory_prefix_visible_to_candidate"] == case["messages"]
-    assert evidence["reference_action_tool_results_not_visible_to_candidate"] == case["tool_results"]
+    assert evidence["untrusted_trajectory"]["trajectory_prefix_visible_to_candidate"] == case["messages"]
+    assert evidence["untrusted_trajectory"]["reference_action_tool_results_not_visible_to_candidate"] == case["tool_results"]
     assert "trajectory_prefix" not in evidence
     assert "recorded_tool_results" not in evidence
 

@@ -272,7 +272,7 @@ def toy_chat(calls):
         calls.append(model)
         if json_mode:
             evidence = json.loads(messages[-1]["content"])
-            passed = evidence["reference_next_action"] == evidence["candidate_next_action"]
+            passed = evidence["untrusted_trajectory"]["reference_next_action"] == evidence["candidate_next_action"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "toy comparison"})}
         question = messages[-1]["content"]
         index = question.split()[-1]
