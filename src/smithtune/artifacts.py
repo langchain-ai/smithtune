@@ -84,7 +84,10 @@ def _load_json(path: Path) -> Any:
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        # JSON permits Unicode line and paragraph separators inside strings.
+        # str.splitlines() treats those characters as record boundaries, while
+        # JSONL written by _jsonl_dump uses only an ASCII newline delimiter.
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line]
     except (OSError, json.JSONDecodeError) as exc:
         raise PipelineError(f"cannot read valid JSONL from {path}: {exc}") from exc
 

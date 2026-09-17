@@ -206,6 +206,19 @@ def test_split_membership_is_exact_versioned_and_idempotent(prepared):
         reporting.synchronize_splits(data, manifest, _load_json(data / "raw/examples.json"), client=client)
 
 
+def test_publish_prepared_splits_updates_only_the_saved_manifest(prepared):
+    data, manifest, _client = prepared
+    manifest["langsmith"]["split_sync"] = {"status": "pending"}
+    _json_dump(data / "prepared/manifest.json", manifest)
+
+    result = reporting.publish_prepared_splits(data)
+
+    saved = _load_json(data / "prepared/manifest.json")
+    assert result["status"] == "complete"
+    assert result["split"] == saved["split"]
+    assert result["langsmith"] == saved["langsmith"]["split_sync"]
+
+
 def test_reprepare_after_publishing_splits_preserves_snapshot_identity(prepared):
     data, manifest, client = prepared
     # A subsequent SDK export includes metadata added by split publication.

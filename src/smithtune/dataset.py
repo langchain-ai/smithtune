@@ -618,6 +618,63 @@ def validate_trajectories(
     )
 
 
+def _malformed_trajectory_reason(example_id: str, error: PipelineError) -> str | None:
+    detail = str(error)
+    if detail.startswith(f"example {example_id} repeats tool call id "):
+        return "repeated_tool_call_id"
+    if detail == f"example {example_id} has a tool result without tool_call_id":
+        return "tool_result_without_tool_call_id"
+    if detail == f"example {example_id} has unmatched tool calls or results":
+        return "unmatched_tool_calls_or_results"
+    if detail.startswith(f"example {example_id} message "):
+        if "unsupported native content block type" in detail:
+            return "unsupported_native_content"
+        return "invalid_message"
+    if detail == f"example {example_id} has no messages":
+        return "missing_messages"
+    if detail == f"example {example_id} has no assistant training target":
+        return "missing_assistant_training_target"
+    if detail == f"example {example_id} has unexpected outputs":
+        return "unexpected_outputs"
+    return None
+
+
+def _exclude_malformed_trajectories(
+    examples: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Quarantine malformed whole trajectories while preserving every source message."""
+    accepted, warnings = [], []
+    for example in examples:
+        example_id = example.get("id")
+        try:
+            validate_trajectories([example], 1)
+        except PipelineError as exc:
+            reason = _malformed_trajectory_reason(example_id, exc) if isinstance(example_id, str) else None
+            if reason is None:
+                raise
+            identity = _source_identity(example)
+            tool_error = reason in {
+                "repeated_tool_call_id",
+                "tool_result_without_tool_call_id",
+                "unmatched_tool_calls_or_results",
+            }
+            warning = {
+                "code": "malformed_tool_trajectory_excluded" if tool_error else "malformed_trajectory_excluded",
+                "example_id": example_id,
+                **identity,
+                "reason": reason,
+            }
+            warnings.append(warning)
+            print(
+                f"Warning: excluding malformed{' tool' if tool_error else ''} trajectory {example_id} "
+                f"({identity['source_scope']} {identity['source_scope_id']}): {reason}",
+                file=sys.stderr,
+            )
+        else:
+            accepted.append(example)
+    return accepted, warnings
+
+
 def _source_workspace(
     example: dict[str, Any], workspace_id: str, source_workspace_id: str | None,
 ) -> str:
@@ -664,6 +721,7 @@ def capture_example_contracts(
     workspace_id: str, examples: list[dict[str, Any]], *,
     source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
     checkpoint_path: Path | None = None,
+    exclusion_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, InferenceContract]:
     """Collect a separate union of function tools for each source trajectory."""
     contracts: dict[str, InferenceContract] = {}
@@ -672,21 +730,49 @@ def capture_example_contracts(
         "source_workspace_id": source_workspace_id, "examples": examples,
         "tool_merge_policy": TOOL_MERGE_POLICY,
     })
+    excluded_ids: set[str] = set()
+
+    def save_checkpoint() -> None:
+        if checkpoint_path is None:
+            return
+        saved = {key: contract.to_dict() for key, contract in contracts.items()}
+        _json_dump(checkpoint_path, {
+            "identity": checkpoint_identity,
+            "contracts": saved,
+            "contracts_sha256": json_sha256(saved),
+            "exclusions": exclusion_warnings or [],
+        })
+
     if checkpoint_path is not None and checkpoint_path.exists():
         checkpoint = _load_json(checkpoint_path)
         if isinstance(checkpoint, dict) and checkpoint.get("identity") == checkpoint_identity:
             payload = checkpoint.get("contracts")
             if checkpoint.get("contracts_sha256") != json_sha256(payload):
                 raise PipelineError(f"capture checkpoint hash mismatch; remove {checkpoint_path} and retry")
-            contracts = _parse_example_contracts(payload)
-            if not set(contracts).issubset(example["id"] for example in examples):
+            contracts = {} if payload == {} else _parse_example_contracts(payload)
+            saved_exclusions = checkpoint.get("exclusions", [])
+            if not isinstance(saved_exclusions, list) or any(
+                not isinstance(warning, dict)
+                or warning.get("code") != "incompatible_inference_contract_excluded"
+                or not isinstance(warning.get("example_id"), str)
+                for warning in saved_exclusions
+            ):
+                raise PipelineError(f"capture checkpoint exclusions are invalid; remove {checkpoint_path} and retry")
+            if saved_exclusions and exclusion_warnings is None:
+                raise PipelineError(f"capture checkpoint excludes examples; remove {checkpoint_path} and retry")
+            if exclusion_warnings is not None:
+                exclusion_warnings.extend(copy.deepcopy(saved_exclusions))
+            excluded_ids = {warning["example_id"] for warning in saved_exclusions}
+            known_ids = {example["id"] for example in examples}
+            if not set(contracts).isdisjoint(excluded_ids) or not (set(contracts) | excluded_ids) <= known_ids:
                 raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
-            print(f"Resuming tool capture: {len(contracts)}/{len(examples)} examples already saved", file=sys.stderr)
+            complete = len(contracts) + len(excluded_ids)
+            print(f"Resuming tool capture: {complete}/{len(examples)} examples already saved", file=sys.stderr)
     sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     project_starts: dict[tuple[str, str], str] = {}
     for example in examples:
         example_id = example["id"]
-        if example_id in contracts:
+        if example_id in contracts or example_id in excluded_ids:
             continue
         try:
             saved_triage = (example.get("metadata") or {}).get("smithtune_triage")
@@ -720,11 +806,27 @@ def capture_example_contracts(
             payload = copy.deepcopy(sources[key])
             payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
             contracts[example_id] = parse_inference_contract(payload)
-            if checkpoint_path is not None:
-                saved = {key: contract.to_dict() for key, contract in contracts.items()}
-                _json_dump(checkpoint_path, {"identity": checkpoint_identity, "contracts": saved,
-                                            "contracts_sha256": json_sha256(saved)})
-        except (ContractError, PipelineError) as exc:
+            save_checkpoint()
+        except ContractError as exc:
+            if exclusion_warnings is not None and "conflicting definitions" in str(exc):
+                identity = _source_identity(example)
+                warning = {
+                    "code": "incompatible_inference_contract_excluded",
+                    "example_id": example_id,
+                    **identity,
+                    "reason": "conflicting_tool_definitions",
+                }
+                exclusion_warnings.append(warning)
+                excluded_ids.add(example_id)
+                print(
+                    f"Warning: excluding trajectory {example_id} "
+                    f"({identity['source_scope']} {identity['source_scope_id']}): conflicting_tool_definitions",
+                    file=sys.stderr,
+                )
+                save_checkpoint()
+                continue
+            raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
+        except PipelineError as exc:
             raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
     return contracts
 
@@ -745,6 +847,7 @@ def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
 def _example_contract_snapshot(
     workspace_id: str, dataset_id: str, examples: list[dict[str, Any]],
     source_sha: str, raw_dir: Path, *, fetch: bool, source_workspace_id: str | None = None,
+    exclusion_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, InferenceContract]:
     path = raw_dir / "example_contracts.json"
     identity = {"schema_version": 1, "workspace_id": workspace_id,
@@ -752,10 +855,13 @@ def _example_contract_snapshot(
                 "tool_merge_policy": TOOL_MERGE_POLICY}
     if fetch:
         checkpoint_path = raw_dir / "example_contracts.partial.json"
+        captured_exclusions: list[dict[str, Any]] = []
         contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id,
-                                             checkpoint_path=checkpoint_path)
+                                             checkpoint_path=checkpoint_path,
+                                             exclusion_warnings=captured_exclusions if exclusion_warnings is not None else None)
         payload = {key: contract.to_dict() for key, contract in contracts.items()}
-        _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload)})
+        _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload),
+                          "exclusions": captured_exclusions})
         checkpoint_path.unlink(missing_ok=True)
     if not path.exists():
         raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
@@ -765,10 +871,25 @@ def _example_contract_snapshot(
     payload = snapshot.get("contracts")
     if snapshot.get("contracts_sha256") != json_sha256(payload):
         raise PipelineError("cached example inference contracts hash mismatch; prepare again without --no-fetch")
-    contracts = _parse_example_contracts(payload)
-    if set(contracts) != {example["id"] for example in examples}:
+    contracts = {} if payload == {} else _parse_example_contracts(payload)
+    exclusions = snapshot.get("exclusions", [])
+    if not isinstance(exclusions, list) or any(
+        not isinstance(warning, dict)
+        or warning.get("code") != "incompatible_inference_contract_excluded"
+        or not isinstance(warning.get("example_id"), str)
+        for warning in exclusions
+    ):
+        raise PipelineError("cached inference contract exclusions are invalid; prepare again without --no-fetch")
+    if exclusions and exclusion_warnings is None:
+        raise PipelineError("cached inference contracts exclude examples; prepare again without --no-fetch")
+    if exclusion_warnings is not None:
+        exclusion_warnings.extend(copy.deepcopy(exclusions))
+    excluded_ids = {warning["example_id"] for warning in exclusions}
+    if set(contracts) != {example["id"] for example in examples} - excluded_ids:
         raise PipelineError("cached inference contracts do not cover every example")
     for example in examples:
+        if example["id"] in excluded_ids:
+            continue
         expected_workspace = _source_workspace(example, workspace_id, source_workspace_id)
         if contracts[example["id"]].provenance.get("source_workspace_id") != expected_workspace:
             raise PipelineError(
@@ -787,6 +908,7 @@ def prepare_sft_rows(
     model: ModelSpec | None = None,
     workspace_id: str | None = None,
     source_workspace_id: str | None = None,
+    exclusion_warnings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert validated LangSmith trajectories to provider-neutral SFT rows."""
     _validate_reasoning_policy(reasoning_policy)
@@ -827,7 +949,30 @@ def prepare_sft_rows(
             try:
                 contract.validate_messages(messages)
             except ContractError as exc:
-                raise PipelineError(f"example {example['id']} violates inference contract: {exc}") from exc
+                if exclusion_warnings is None:
+                    raise PipelineError(f"example {example['id']} violates inference contract: {exc}") from exc
+                detail = str(exc)
+                if detail.startswith("unknown tool "):
+                    reason = "unknown_tool"
+                elif " do not match its JSON Schema:" in detail:
+                    reason = "invalid_tool_arguments"
+                elif " are not valid JSON" in detail:
+                    reason = "invalid_tool_arguments_json"
+                else:
+                    reason = "recorded_tool_call_incompatible"
+                warning = {
+                    "code": "incompatible_inference_contract_excluded",
+                    "example_id": example["id"],
+                    **identity,
+                    "reason": reason,
+                }
+                exclusion_warnings.append(warning)
+                print(
+                    f"Warning: excluding trajectory {example['id']} "
+                    f"({identity['source_scope']} {identity['source_scope_id']}): {reason}",
+                    file=sys.stderr,
+                )
+                continue
             row["tools"] = copy.deepcopy(list(contract.tools))
             row["_source"]["contract_sha256"] = contract.contract_sha256
         rows.append(row)
@@ -1039,21 +1184,35 @@ def prepare_dataset(
         if any(key in assignments and assignments[key] != value for key, value in previous.items()):
             raise PipelineError("--split-from conflicts with this directory's saved split assignments")
         assignments.update(previous)
-    dataset, examples, source_sha = _load_dataset_source(
+    dataset, source_examples, source_sha = _load_dataset_source(
         workspace_id,
         dataset_id,
         data_dir / "raw",
         fetch=fetch,
     )
-    expected_count = len(examples)
-    audit = validate_trajectories(examples, expected_count)
+    expected_count = len(source_examples)
+    examples, malformed_warnings = _exclude_malformed_trajectories(source_examples)
     _validate_unique_sources(examples, workspace_id, source_workspace_id)
     example_contracts = None
+    contract_warnings: list[dict[str, Any]] = []
     if inference_contract is None:
         example_contracts = _example_contract_snapshot(
             workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
-            source_workspace_id=source_workspace_id,
+            source_workspace_id=source_workspace_id, exclusion_warnings=contract_warnings,
         )
+        excluded_contract_ids = {warning["example_id"] for warning in contract_warnings}
+        examples = [example for example in examples if example["id"] not in excluded_contract_ids]
+    rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
+                            reasoning_policy=reasoning_policy, model=model, workspace_id=workspace_id,
+                            source_workspace_id=source_workspace_id, exclusion_warnings=contract_warnings)
+    excluded_contract_ids = {warning["example_id"] for warning in contract_warnings}
+    examples = [example for example in examples if example["id"] not in excluded_contract_ids]
+    if example_contracts is not None:
+        example_contracts = {
+            example_id: contract for example_id, contract in example_contracts.items()
+            if example_id not in excluded_contract_ids
+        }
+    audit = validate_trajectories(examples, len(examples))
     description_replacements = []
     captured_contracts = example_contracts or ({"global": inference_contract} if inference_contract else {})
     for example_id, contract in captured_contracts.items():
@@ -1064,20 +1223,35 @@ def prepare_dataset(
                 "source_workspace_id": contract.provenance.get("source_workspace_id"),
                 "source_thread_id": contract.provenance.get("source_thread_id"),
             })
-    rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
-                            reasoning_policy=reasoning_policy, model=model, workspace_id=workspace_id,
-                            source_workspace_id=source_workspace_id)
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
     reasoning_preserved = audit.readable_reasoning_blocks if reasoning_policy == "preserve" else 0
-    rejected: list[dict[str, Any]] = []
+    context_rejected: list[dict[str, Any]] = []
     if check_render:
-        rows, rejected, rendered = validate_model_context(rows, model)
+        rows, context_rejected, rendered = validate_model_context(rows, model)
     else:
         rendered = {}
+    renderer_warnings = [
+        warning for warning in context_rejected
+        if warning.get("code") == "renderer_incompatible_trajectory_excluded"
+    ]
+    for warning in renderer_warnings:
+        print(
+            f"Warning: excluding trajectory {warning['example_id']} "
+            f"({warning['source_scope']} {warning['source_scope_id']}): {warning['reason']}",
+            file=sys.stderr,
+        )
+    preparation_warnings = [*malformed_warnings, *contract_warnings, *renderer_warnings]
+    rejected = [*malformed_warnings, *contract_warnings, *context_rejected]
     train, validation, test = split_rows(rows, validation_fraction, test_fraction, assignments=assignments)
     _validate_split_isolation(train, validation, test)
     audit_value = {
         **asdict(audit), **rendered,
+        "malformed_trajectories": len(malformed_warnings),
+        "malformed_tool_trajectories": sum(
+            warning["code"] == "malformed_tool_trajectory_excluded" for warning in malformed_warnings
+        ),
+        "incompatible_inference_contracts": len(contract_warnings),
+        "renderer_incompatible_trajectories": len(renderer_warnings),
         "tool_description_replacements": len(description_replacements),
     }
     manifest = {
@@ -1137,7 +1311,10 @@ def prepare_dataset(
     _jsonl_dump(data_dir / "prepared" / "validation.jsonl", validation)
     _jsonl_dump(data_dir / "prepared" / "test.jsonl", test)
     _json_dump(data_dir / "prepared" / "manifest.json", manifest)
-    _json_dump(data_dir / "prepared" / "warnings.json", audit.duplicate_message_warnings)
+    _json_dump(
+        data_dir / "prepared" / "warnings.json",
+        [*audit.duplicate_message_warnings, *preparation_warnings],
+    )
     _json_dump(data_dir / "prepared" / "tool_description_replacements.json", description_replacements)
     _json_dump(data_dir / "prepared" / "rejected.json", rejected)
     if inference_contract is not None:
@@ -1148,7 +1325,7 @@ def prepare_dataset(
     from smithtune.evaluation.langsmith import synchronize_splits
 
     manifest["langsmith"]["split_sync"] = synchronize_splits(
-        data_dir, manifest, examples, enabled=sync_splits,
+        data_dir, manifest, source_examples, enabled=sync_splits,
     )
     _json_dump(data_dir / "prepared" / "manifest.json", manifest)
     return manifest

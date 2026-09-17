@@ -162,6 +162,82 @@ def test_builtin_in_second_example_aborts_before_publishing_artifacts(tmp_path, 
     assert not (tmp_path / "prepared").exists()
 
 
+def test_prepare_excludes_conflicting_per_example_contract(tmp_path, monkeypatch, capsys):
+    collect = dataset.capture_example_contracts
+    setup_preparation(tmp_path, monkeypatch)
+    changed = tool("weather")
+    changed["function"]["parameters"]["required"] = ["query"]
+    runner, _ = source_runner({
+        ("project-1", "thread-1"): [llm("run-1", [tool("weather")]), llm("run-2", [changed])],
+        ("project-1", "thread-2"): [llm("run-3", [tool("swell")])],
+    })
+    monkeypatch.setattr(
+        dataset,
+        "capture_example_contracts",
+        lambda workspace, examples, **kwargs: collect(workspace, examples, runner=runner, **kwargs),
+    )
+
+    manifest = prepare(tmp_path)
+
+    expected = {
+        "code": "incompatible_inference_contract_excluded",
+        "example_id": "example-1",
+        "source_scope": "thread",
+        "source_scope_id": "thread-1",
+        "reason": "conflicting_tool_definitions",
+    }
+    rows = _load_jsonl(tmp_path / "prepared" / "test.jsonl")
+    assert [row["_source"]["example_id"] for row in rows] == ["example-2"]
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert manifest["audit"]["incompatible_inference_contracts"] == 1
+    assert manifest["example_contracts"]["count"] == 1
+    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
+    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
+    assert "Warning: excluding trajectory example-1 (thread thread-1): conflicting_tool_definitions" in capsys.readouterr().err
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("offline preparation attempted contract capture")
+
+    monkeypatch.setattr(dataset, "capture_example_contracts", unexpected)
+    offline = prepare(tmp_path, fetch=False)
+    assert offline["prepared"] == {"accepted": 1, "rejected": 1}
+    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
+
+
+def test_prepare_excludes_recorded_tool_call_missing_from_captured_contract(tmp_path, monkeypatch, capsys):
+    examples = setup_preparation(tmp_path, monkeypatch)
+    examples[0]["inputs"]["messages"] = [
+        {"role": "human", "content": "question"},
+        {
+            "role": "ai",
+            "content": [
+                {"type": "tool_call", "id": "call-1", "name": "missing_tool", "args": {}}
+            ],
+        },
+        {"role": "tool", "content": "result", "tool_call_id": "call-1"},
+    ]
+    _json_dump(tmp_path / "raw" / "examples.json", examples)
+    _json_dump(tmp_path / "raw" / "dataset-export.json", [{"inputs": ex["inputs"]} for ex in examples])
+
+    manifest = prepare(tmp_path, sync_splits=False)
+
+    expected = {
+        "code": "incompatible_inference_contract_excluded",
+        "example_id": "example-1",
+        "source_scope": "thread",
+        "source_scope_id": "thread-1",
+        "reason": "unknown_tool",
+    }
+    rows = _load_jsonl(tmp_path / "prepared" / "test.jsonl")
+    assert [row["_source"]["example_id"] for row in rows] == ["example-2"]
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert manifest["audit"]["incompatible_inference_contracts"] == 1
+    assert manifest["example_contracts"]["count"] == 1
+    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
+    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
+    assert "Warning: excluding trajectory example-1 (thread thread-1): unknown_tool" in capsys.readouterr().err
+
+
 def test_per_example_capture_roundtrips_offline_without_network(tmp_path, monkeypatch):
     setup_preparation(tmp_path, monkeypatch)
     manifest = prepare(tmp_path)

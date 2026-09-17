@@ -226,8 +226,9 @@ for detailed behavior and limitations.
 Preparation collects each conversation's tools, including tools that were never
 called. Tools added mid-run appear from the start of the training example.
 Optional top-level arguments are combined when the rest of the tool definition
-matches; the expanded schema applies to the whole conversation. Provider built-ins
-(such as tool search) and incompatible tool definitions remain unsupported.
+matches; the expanded schema applies to the whole conversation. Conflicting
+definitions for the same tool exclude that whole conversation with a warning.
+Provider built-ins (such as tool search) and other incompatible definitions remain unsupported.
 
 Existing datasets need `source_scope` (thread or trace), `source_scope_id`, and
 `source_project_id` in each example's metadata; CLI-created datasets
@@ -279,6 +280,18 @@ Preparation uses these defaults:
 - Approximately 80% training, 10% validation, and 10% replay test, keeping each source conversation in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
+- Whole trajectories with malformed messages, unsupported content such as images, unmatched tool calls/results, repeated tool-call IDs, recorded calls that violate their captured tool contract, renderer-incompatible system-message placement, or conflicting definitions for the same captured tool are excluded unchanged; `prepare` prints a warning and records each exclusion in `prepared/warnings.json` and `prepared/rejected.json`
+
+If local preparation completed but LangSmith split publication did not, publish
+and verify only the existing saved memberships without rerunning preparation:
+
+```bash
+smithtune dataset publish-splits --data-dir data/prepared/my-sft
+```
+
+This reads the pinned raw examples, prepared manifest, and existing JSONL split
+files. It does not fetch trajectories, capture tools, render examples, or change
+split assignments.
 - Examples over the context limit are rejected without truncation; use `--max-seq-len 32768` to lower the limit
 
 Preparation saves conversation assignments in `prepared/split_assignments.json`
