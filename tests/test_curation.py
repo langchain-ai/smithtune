@@ -121,6 +121,19 @@ def saved_selection(tmp_path):
     return json.loads((tmp_path / "selection.json").read_text())
 
 
+def test_source_time_window_defaults_to_the_day_ending_at_the_resolved_end(monkeypatch):
+    monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-08T12:34:56+00:00")
+    assert curation.resolve_time_window(None, None) == (
+        "2026-09-07T12:34:56+00:00", "2026-09-08T12:34:56+00:00",
+    )
+    assert curation.resolve_time_window(None, "2026-09-02T05:00:00-07:00") == (
+        "2026-09-01T12:00:00+00:00", "2026-09-02T12:00:00+00:00",
+    )
+    assert curation.resolve_time_window("2026-09-08T00:00:00Z", None) == (
+        "2026-09-08T00:00:00+00:00", "2026-09-08T12:34:56+00:00",
+    )
+
+
 def test_selection_keys_roots_by_thread_then_trace(tmp_path):
     roots = [root(1, "a"), root(2, "a"), root(3, "b"), root(4)]
     api = API([roots[:2], roots[2:]])
@@ -356,14 +369,14 @@ def test_api_uses_stdin_and_run_passes_it_to_subprocess(monkeypatch):
 
 def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
     args = ["dataset", "create", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--name", "new", "--start-time", "2026-09-01T00:00:00Z", "--end-time", "2026-09-08T00:00:00Z",
-            "--limit", "100"]
+            "--name", "new", "--limit", "100"]
     parsed = pipeline._parser().parse_args(args)
     assert parsed.limit == 100 and parsed.output is None and not hasattr(parsed, "seed")
     assert parsed.concurrency == 4 and pipeline._parser().parse_args([*args, "--concurrency", "2"]).concurrency == 2
     api = API([[root(1, "a"), root(2, "a"), root(3, "b")]])
     create_dataset = curation.create_dataset
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
     monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: create_dataset(**kwargs, runner=api))
     monkeypatch.setattr(sys, "argv", ["pipeline.py", *args, "--filter", 'has(tags, "reviewed")', "--limit", "1"])
     pipeline.main()
@@ -376,6 +389,8 @@ def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
     assert "preview" not in result
     saved = json.loads(Path(result["selection"]).read_text())
     assert saved["query"]["limit"] == 1 and saved["query"]["filter"] == 'has(tags, "reviewed")'
+    assert saved["query"]["start_time"] == "2026-09-02T00:00:00+00:00"
+    assert saved["query"]["end_time"] == "2026-09-03T00:00:00+00:00"
     assert saved["selected"] == [thread("a")]
     assert api.trajectory_calls() == [{"thread_id": "a"}]
     assert Path(result["receipt"]).exists()

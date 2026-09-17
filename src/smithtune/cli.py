@@ -90,8 +90,8 @@ def _parser() -> argparse.ArgumentParser:
     destination = create.add_mutually_exclusive_group(required=True)
     destination.add_argument("--name", help="name for a new LangSmith dataset")
     destination.add_argument("--dataset-id", help="add or extend conversations in an existing dataset in this workspace")
-    create.add_argument("--start-time", help="inclusive root start time, with timezone")
-    create.add_argument("--end-time", help="exclusive root start time, with timezone")
+    create.add_argument("--start-time", help="inclusive root start time, with timezone (default: 24 hours before end time)")
+    create.add_argument("--end-time", help="exclusive root start time, with timezone (default: now)")
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
     create.add_argument("--limit", type=int, help=f"number of distinct conversations to select before validation, at most {curation.MAX_LIMIT}; rejected trajectories are not replaced")
     create.add_argument("--concurrency", type=int, default=curation.DEFAULT_CONCURRENCY, help=f"conversations fetched and written at once, 1 to {curation.MAX_CONCURRENCY} (default: %(default)s)")
@@ -109,8 +109,8 @@ def _parser() -> argparse.ArgumentParser:
     source = triage_cmd.add_argument_group("Source (first run only)")
     source.add_argument("--workspace-id")
     source.add_argument("--project-id")
-    source.add_argument("--start-time")
-    source.add_argument("--end-time")
+    source.add_argument("--start-time", help="inclusive root start time, with timezone (default: 24 hours before end time)")
+    source.add_argument("--end-time", help="exclusive root start time, with timezone (default: now)")
     source.add_argument("--filter", help="optional root trace filter")
     source.add_argument("--limit", type=int, help="roots to select; each distinct full conversation is judged once (default: 100)")
     council = triage_cmd.add_mutually_exclusive_group()
@@ -582,22 +582,22 @@ def main(argv: list[str] | None = None) -> None:
                 directory = args.directory or args.output_dir
                 if args.directory is not None and args.output_dir is not None:
                     raise PipelineError("use a directory argument or --output-dir, not both")
-                source_fields = (args.workspace_id, args.project_id, args.start_time, args.end_time)
+                source_ids = (args.workspace_id, args.project_id)
                 if directory is None:
-                    if not all(source_fields):
-                        raise PipelineError("supply a saved run directory to resume, or all source IDs and times to start a new run")
+                    if not all(source_ids):
+                        raise PipelineError("supply a saved run directory to resume, or both source IDs to start a new run")
                     directory = new_run_directory()
                 print(f"Dataset run directory: {directory}", file=sys.stderr)
-                if all(source_fields):
-                    source = source_options(*source_fields, filter=args.filter,
+                if all(source_ids):
+                    source = source_options(*source_ids, args.start_time, args.end_time, filter=args.filter,
                                             limit=100 if args.limit is None else args.limit,
                                             seed=42 if args.seed is None else args.seed)
-                elif any(source_fields) or any(v is not None for v in (args.filter, args.limit, args.seed)):
-                    raise PipelineError("supply all source IDs and times, or omit source flags to use the saved local snapshot")
+                elif any(source_ids) or any(v is not None for v in (args.start_time, args.end_time, args.filter, args.limit, args.seed)):
+                    raise PipelineError("supply both source IDs, or omit source flags to use the saved local snapshot")
                 elif (directory / "snapshot.json").exists():
                     source = load_snapshot(directory)["source"]
                 else:
-                    raise PipelineError("no local snapshot; supply workspace, project, start time, and end time to download traces")
+                    raise PipelineError("no local snapshot; supply workspace and project to download traces")
                 settings = triage.council_settings(
                     directory, judges=args.judges.split(",") if args.judges is not None else args.judge,
                     rules=args.rule, config_path=args.config,
@@ -613,8 +613,8 @@ def main(argv: list[str] | None = None) -> None:
                     raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")
                 value = triage.create_triaged_dataset(args.triage_dir, args.name, dataset_id=args.dataset_id, confirm=args.confirm)
             else:
-                if not all((args.workspace_id, args.project_id, args.start_time, args.end_time, args.limit)):
-                    raise PipelineError("dataset create requires workspace, project, start time, end time, and --limit, or --triage-dir")
+                if not all((args.workspace_id, args.project_id, args.limit)):
+                    raise PipelineError("dataset create requires workspace, project, and --limit, or --triage-dir")
                 print("Selecting conversations and " + ("updating dataset..." if args.dataset_id else "creating dataset..."), file=sys.stderr)
                 value = curation.create_dataset(
                     workspace_id=args.workspace_id, project_id=args.project_id,

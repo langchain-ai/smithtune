@@ -10,7 +10,6 @@ Create a dataset directly from a tracing project and filters:
 smithtune dataset create \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
-  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
   --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
@@ -18,6 +17,10 @@ smithtune dataset create \
 Each matching root selects its whole thread when it has a thread ID, otherwise
 its single trace. Thread examples include turns outside the filter window. Use
 the returned dataset ID in `prepare`.
+
+`--end-time` defaults to now, and `--start-time` defaults to 24 hours before the
+resolved end. Omit both for the last 24 hours, or pass either or both as ISO 8601
+timestamps with timezones. These defaults also apply to a new `dataset triage` run.
 
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
 - `--limit` is required, at most 2000. Querying stops once that many distinct trajectories are found, in the order LangSmith returns roots; no sampling is applied
@@ -93,7 +96,6 @@ uv tool install --upgrade --python 3.12 \
 ```bash
 smithtune dataset triage data/datasets/my-sft \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
   --limit 100
 ```
 
