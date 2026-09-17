@@ -8,7 +8,7 @@ Tracing project → dataset → prepare → plan → train + evaluate → LangSm
 
 | What you have | Start here |
 | --- | --- |
-| Trajectories in a tracing project | [Create a dataset](#create-a-dataset-from-conversations) |
+| Trajectories in a tracing project | [Create a dataset](#create-a-dataset-from-trajectories) |
 | A LangSmith trajectory dataset | [Prepare data](#prepare-data) |
 | Prepared smithtune data | [Plan and train](#plan-and-train) |
 | A completed smithtune training run | [Evaluate a trained model](#evaluate-a-trained-model) |
@@ -86,10 +86,10 @@ if preferred. Preparation selects its tokenizer and formatting automatically.
 If you already have prepared data or a training run, set these variables to its
 provider and existing directories instead.
 
-## Create a dataset from conversations
+## Create a dataset from trajectories
 
 Skip this step if you already have a LangSmith dataset. Otherwise, select
-conversations from a tracing project in the workspace above. Replace the project
+trajectories from a tracing project in the workspace above. Replace the project
 ID and time window with your source, and choose a feedback filter your project uses:
 
 ```bash
@@ -104,9 +104,9 @@ smithtune dataset create \
 ```
 
 The filter matches feedback on trace root runs. Each matching root selects its
-whole thread when it has one, otherwise its single trace. Each conversation
+whole thread when it has one, otherwise its single trace. Each trajectory
 becomes one dataset example, including earlier turns outside the time window.
-`--limit 100` selects at most 100 distinct conversations. Remove `--filter` to
+`--limit 100` selects at most 100 distinct trajectories. Remove `--filter` to
 select without a feedback threshold; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
 
 For an optional model review before import, use
@@ -126,16 +126,15 @@ smithtune prepare \
   --data-dir "$data_dir"
 ```
 
-Preparation downloads the conversations, captures their tools, and validates the
+Preparation downloads the trajectories, captures their tools, and validates the
 training format. It creates approximately 80% training, 10% validation, and 10%
-held-out test data, keeping each source conversation in one split. These splits
+held-out test data, keeping each source trajectory in one split. These splits
 are also registered on the original LangSmith dataset for evaluation.
 
 The main data requirements are:
 
-- Text and tool conversations; images are unsupported
+- Text and tool trajectories; images are unsupported
 - Recorded system messages are preserved; Qwen requires them at the start
-- Each conversation uses the combined tools from all its source LLM calls, including tools that were never called; earlier turns see that combined list
 - Provider built-in tools and incompatible tool definitions are unsupported
 - All supported assistant messages are training targets, including earlier turns
 
@@ -149,13 +148,13 @@ model limits, tool handling, split settings, and reasoning options.
 ## Plan and train
 
 **Check the evaluation size before starting paid work.** Replay evaluates the
-next assistant action at multiple points in each test conversation. For example,
-20 conversations with 30 eligible actions each produce 600 comparisons. Each
+next assistant action at multiple points in each test trajectory. For example,
+20 trajectories with 30 eligible actions each produce 600 comparisons. Each
 comparison generates and judges a base response and a tuned response, with
 additional judge calibration calls.
 
 For a smaller first evaluation, the commands below cap replay at **2 actions per
-test conversation**. This cap changes evaluation coverage, not training data.
+test trajectory**. This cap changes evaluation coverage, not training data.
 Omit it from both commands to evaluate every eligible assistant action.
 
 Preview the training and evaluation plan:
@@ -190,10 +189,10 @@ When replay begins, the CLI prints **one comparison link** for the base and tune
 experiments. Open it to view results on the original LangSmith dataset. Completed
 comparisons publish in the background; refresh the view as evaluation progresses.
 
-Each conversation groups its independent next-action predictions:
+Each trajectory groups its independent next-action predictions:
 
 - `teacher_agreement`: whether an action passed the judge, with an explanation
-- `trajectory_teacher_agreement`: the conversation's average over completed actions
+- `trajectory_teacher_agreement`: the trajectory's average over completed actions
 
 Replay predicts the next response or tool call from recorded context. Generated
 tool calls are **not executed**. Scores measure agreement with recorded behavior,
@@ -237,7 +236,7 @@ uploads, saved artifacts, and sampler cleanup.
 
 | Task | Guide |
 | --- | --- |
-| Judge conversations before training or extend a dataset | [Dataset curation and triage](docs/datasets.md) |
+| Judge trajectories before training or extend a dataset | [Dataset curation and triage](docs/datasets.md) |
 | Change models, preparation settings, tools, or replay options | [Preparation and evaluation reference](docs/reference.md) |
 | Run a trained model in an application or evaluate a Baseten endpoint | [Deployment](docs/deployment.md) |
 
