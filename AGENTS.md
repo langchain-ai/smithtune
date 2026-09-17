@@ -46,7 +46,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 ## Change the repository
 
 - Follow CONTRIBUTING for Python 3.12, uv, dependency installation, and checks. Use nearby implementations before adding abstractions.
-- Keep the README's commands aligned with CLI behavior. Keep detailed usage in the README and development procedures in CONTRIBUTING.
+- Keep the README's commands aligned with CLI behavior. Keep the main workflow in the README, detailed usage in its linked guides, and development procedures in CONTRIBUTING.
 - Run checks proportional to the change. If local prerequisites are missing, report the limitation and defer those checks to CI unless setup repair is requested.
 - Keep credentials, generated datasets, run artifacts, and private planning notes out of commits. Commit only task-related source, tests, and maintained documentation.
 - `CLAUDE.md` imports this file; update shared instructions here so both agents receive the same guidance.
