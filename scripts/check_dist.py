@@ -12,6 +12,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+OVERRIDES = ROOT / "overrides.txt"
 
 
 def run(*args: str, cwd: Path = ROOT, env: dict | None = None) -> None:
@@ -32,8 +33,7 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     venv = scratch / "venv"
     run("uv", "venv", "--python", "3.12", str(venv))
     python = str(venv / "bin/python")
-    run("sfw", "uv", "pip", "install", "--python", python, str(wheel), "pytest==9.1.1")
-    run("uv", "pip", "check", "--python", python)
+    run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel), "pytest==9.1.1")
     work = scratch / "customer"
     work.mkdir()
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
@@ -46,7 +46,7 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
         "from fireworks.training.sdk import FireworksClient", cwd=work, env=env)
     # Copy only test inputs and project metadata; never application source.
     shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
-    for name in ("README.md", "pyproject.toml"):
+    for name in ("README.md", "pyproject.toml", "overrides.txt"):
         shutil.copy2(ROOT / name, work / name)
     targets = ["tests"] if full_tests else ["tests/test_cli_installation.py", "tests/test_training_dependency.py"]
     run(python, "-I", "-m", "pytest", *targets, cwd=work, env=env)
@@ -54,26 +54,24 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     if full_tests:
         # Verify the opt-in runtime from the installed wheel, with real graphs
         # and deterministic local models. The default install is tested first.
-        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[deepagents]")
-        run("uv", "pip", "check", "--python", python)
+        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[deepagents]")
         run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
-        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[baseten-deploy]")
-        run("uv", "pip", "check", "--python", python)
+        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[baseten-deploy]")
         run(python, "-I", "-m", "pytest", "tests/test_baseten_truss.py", "tests/test_baseten_deployment.py", "tests/test_baseten_deploy_cli.py", cwd=work, env=env)
         # Commit a clean source snapshot in a disposable repository. This tests
         # Git installation of the current working tree without committing it to
         # the developer's repository or depending on a published branch.
         source = scratch / "source"
         source.mkdir()
-        for name in ("pyproject.toml", "README.md", "CONTRIBUTING.md", "MANIFEST.in", ".gitignore"):
+        for name in ("pyproject.toml", "README.md", "CONTRIBUTING.md", "MANIFEST.in", ".gitignore", "overrides.txt"):
             shutil.copy2(ROOT / name, source / name)
         shutil.copytree(ROOT / "src/smithtune", source / "src/smithtune", ignore=shutil.ignore_patterns("__pycache__"))
         run("git", "init", "--quiet", str(source))
-        run("git", "add", "pyproject.toml", "README.md", "CONTRIBUTING.md", "MANIFEST.in", ".gitignore", "src/smithtune", cwd=source)
+        run("git", "add", "pyproject.toml", "README.md", "CONTRIBUTING.md", "MANIFEST.in", ".gitignore", "overrides.txt", "src/smithtune", cwd=source)
         run("git", "diff", "--cached", "--name-only", cwd=source)
         run("git", "-c", "user.name=Distribution test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Distribution test snapshot", cwd=source)
         tool_env = {**env, "UV_TOOL_DIR": str(scratch / "tools"), "UV_TOOL_BIN_DIR": str(scratch / "bin")}
-        run("sfw", "uv", "tool", "install", "--no-config", "--python", "3.12", "git+" + source.as_uri(), cwd=work, env=tool_env)
+        run("sfw", "uv", "tool", "install", "--no-config", "--python", "3.12", "--overrides", str(source / "overrides.txt"), "git+" + source.as_uri(), cwd=work, env=tool_env)
         run(str(scratch / "bin/smithtune"), "--version", cwd=work, env=tool_env)
         run(str(scratch / "bin/smithtune"), "doctor", cwd=work, env=tool_env)
 

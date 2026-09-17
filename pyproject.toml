@@ -17,7 +17,7 @@ dependencies = [
   "referencing==0.37.0",
   "rich==13.9.4",
   "tinker==0.23.0",
-  "transformers==5.5.4",
+  "transformers==5.10.4",
   "trl==1.13.0",
   "pillow>=12.3,<13",
   "datasets>=5.0.1,<6",
@@ -34,6 +34,12 @@ Issues = "https://github.com/langchain-ai/smithtune/issues"
 baseten-deploy = ["truss==0.18.30"]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
 deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]
+
+[tool.uv]
+# The upstream cookbook metadata still pins a Transformers release affected by
+# CVE-2026-9856. Tool installs do not inherit this project setting, so customers
+# must also pass the matching overrides.txt file documented in README.md.
+override-dependencies = ["transformers==5.10.4"]
 
 [tool.setuptools.package-data]
 smithtune = ["skills/*/*.md", "skills/*/*.json"]

@@ -1,0 +1,3 @@
+# The upstream Fireworks and Tinker cookbooks constrain Transformers to versions
+# affected by CVE-2026-9856. Use the version verified by smithtune.
+transformers==5.10.4

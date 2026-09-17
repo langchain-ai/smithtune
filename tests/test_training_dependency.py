@@ -3,6 +3,11 @@
 from importlib import metadata, resources
 import json
 from pathlib import Path
+import tomllib
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+import pytest
 
 
 class CharacterTokenizer:
@@ -31,6 +36,24 @@ TOOLS = [{"type": "function", "function": {
     "name": "weather", "description": "Look up weather.",
     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
 }}]
+OVERRIDDEN_REQUIREMENTS = {
+    ("fireworks-training-cookbook", "transformers"),
+    ("tinker-cookbook", "transformers"),
+}
+
+
+def configured_transformers_override() -> Requirement:
+    project = Path(__file__).resolve().parents[1]
+    override_lines = [line.strip() for line in (project / "overrides.txt").read_text().splitlines()
+                      if line.strip() and not line.lstrip().startswith("#")]
+    assert len(override_lines) == 1
+    override = Requirement(override_lines[0])
+    settings = tomllib.loads((project / "pyproject.toml").read_text())
+    assert settings["tool"]["uv"]["override-dependencies"] == override_lines
+    direct = next(Requirement(value) for value in settings["project"]["dependencies"]
+                  if canonicalize_name(Requirement(value).name) == "transformers")
+    assert direct.specifier == override.specifier
+    return override
 
 
 def renderer_snapshot():
@@ -98,15 +121,31 @@ def test_upstream_training_dependencies_are_importable():
     assert callable(get_training_chat_template)
     assert metadata.version("fireworks-training-cookbook") == "0.1.0"
     assert metadata.version("tinker-cookbook") == "0.4.3"
-    assert metadata.version("transformers") == "5.5.4"
+    override = configured_transformers_override()
+    assert override.specifier.contains(metadata.version("transformers"), prereleases=True)
+    assert metadata.version("transformers") == "5.10.4"
     assert metadata.version("trl") == "1.13.0"
 
 
-def test_installed_dependencies_are_compatible():
-    from packaging.requirements import Requirement
-    from packaging.utils import canonicalize_name
+def test_transformers_rejects_chat_template_path_traversal(tmp_path):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
 
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    tokenizer.chat_template = {"../escaped": "{{ messages }}"}
+    with pytest.raises(ValueError, match="Invalid chat template name"):
+        tokenizer.save_pretrained(tmp_path / "tokenizer")
+    assert not (tmp_path / "escaped.jinja").exists()
+
+
+def test_installed_dependencies_are_compatible_except_for_recorded_overrides():
+    override = configured_transformers_override()
     conflicts = []
+    overridden = set()
     for distribution in metadata.distributions():
         owner = canonicalize_name(distribution.metadata["Name"])
         for text in distribution.requires or []:
@@ -117,5 +156,10 @@ def test_installed_dependencies_are_compatible():
             installed = metadata.version(name)
             if requirement.specifier.contains(installed, prereleases=True):
                 continue
+            pair = (owner, name)
+            if pair in OVERRIDDEN_REQUIREMENTS and override.specifier.contains(installed, prereleases=True):
+                overridden.add(pair)
+                continue
             conflicts.append(f"{owner} requires {requirement}; installed {installed}")
     assert not conflicts, "\n".join(conflicts)
+    assert overridden == OVERRIDDEN_REQUIREMENTS
