@@ -96,7 +96,7 @@ provider and existing directories instead.
 
 Skip this step if you already have a LangSmith dataset. Otherwise, select
 trajectories from a tracing project in the workspace above. Replace the project
-ID and time window with your source, and choose a feedback filter your project uses:
+ID with your source, and choose a feedback filter your project uses:
 
 ```bash
 project_id='<project-id>'
@@ -104,10 +104,13 @@ project_id='<project-id>'
 smithtune dataset create \
   --workspace-id "$workspace_id" --project-id "$project_id" \
   --name my-sft-dataset \
-  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
   --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 ```
+
+Without time flags, creation selects roots from the last 24 hours: `--end-time`
+defaults to now and `--start-time` defaults to 24 hours before the resolved end.
+Pass either or both flags to choose another ISO 8601 window.
 
 The filter matches feedback on trace root runs. Each matching root selects its
 whole thread when it has one, otherwise its single trace. Each trajectory

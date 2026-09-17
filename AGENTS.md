@@ -15,7 +15,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 - To label full trajectories for SFT, preview with `dataset triage <directory>` and source flags. Then use `dataset triage <directory> --confirm` to label or resume with saved settings. The default is a Deep Agent coordinator and DeepSeek V4.1 Flash and GLM-5.3-Flash judge subagents on Fireworks, plus GPT-5.6 Terra on OpenAI, with Python code mode. Set models with one `--judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra` list; other models use `provider:model`. Use `--rule` for project rules. Each line in `labels.jsonl` has only `trajectory_id`, `keep` (1 or 0), and `reason`. Explain the counts and reasons to the user after dispatch. Detailed votes stay in `judgments.jsonl`. Import selected whole conversations with `dataset create --triage-dir`. Export the portable skill with `skill export`.
 - Existing dataset: start at `prepare`; each example's metadata needs `source_scope`, `source_scope_id`, and `source_project_id` for automatic tool capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.
-- Continue from existing artifacts when they match the task. Ask for missing source information rather than guessing IDs or a time window.
+- Continue from existing artifacts when they match the task. Ask for missing source IDs rather than guessing them. New dataset creation and triage default to the last 24 hours when time bounds are omitted; use explicit bounds when the user specifies another window.
 - Use LangSmith API filter expressions from the README and linked syntax reference.
 
 ## Run and recover

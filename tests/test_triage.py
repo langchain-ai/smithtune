@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 
-from smithtune import cli, dataset, triage, triage_judges, triage_source
+from smithtune import cli, curation, dataset, triage, triage_judges, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
@@ -419,17 +419,20 @@ def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
 
 def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
     original = triage.run_triage
     monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
         *args, **kwargs, runner=API(), judge_call=judge_call))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"]]
+    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101)]
     directories = []
     for _ in range(2):
         cli.main(args)
         run_dir = Path(json.loads(capsys.readouterr().out)["run_dir"])
         assert run_dir.parent == Path("data/datasets")
         assert (run_dir / "snapshot.json").exists()
+        saved_source = json.loads((run_dir / "snapshot.json").read_text())["source"]
+        assert saved_source["start_time"] == "2026-09-02T00:00:00+00:00"
+        assert saved_source["end_time"] == "2026-09-03T00:00:00+00:00"
         assert len(list((run_dir / "conversations").glob("*.json"))) == 1
         directories.append(run_dir)
     assert directories[0] != directories[1]

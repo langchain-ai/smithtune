@@ -8,14 +8,13 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
-from smithtune.curation import _api, _fetch_trajectory, _matches, _time, _uuid
+from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.dataset_artifacts import save_conversation
 from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
@@ -174,11 +173,10 @@ def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: s
                              for root in sorted(roots, key=lambda r: (r.get("start_time") or "", r["id"]))))
 
 
-def source_options(workspace_id, project_id, start_time, end_time, *, filter=None, limit=100, seed=42) -> dict:
+def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42) -> dict:
+    start_time, end_time = resolve_time_window(start_time, end_time)
     value = {"workspace_id": _uuid(workspace_id, "workspace id"), "project_id": _uuid(project_id, "project id"),
-             "start_time": _time(start_time), "end_time": _time(end_time), "filter": filter, "limit": limit, "seed": seed}
-    if datetime.fromisoformat(value["start_time"]) >= datetime.fromisoformat(value["end_time"]):
-        raise PipelineError("start time must precede end time")
+             "start_time": start_time, "end_time": end_time, "filter": filter, "limit": limit, "seed": seed}
     if limit is not None and (type(limit) is not int or limit < 1):
         raise PipelineError("trace limit must be positive")
     if type(seed) is not int or (filter is not None and (not isinstance(filter, str) or not filter.strip())):

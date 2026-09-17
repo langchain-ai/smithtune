@@ -11,7 +11,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ MAX_LIMIT = 2000
 # Conversations fetched and written at once; bounded to stay gentle on the API.
 MAX_CONCURRENCY = 4
 DEFAULT_CONCURRENCY = 4
+DEFAULT_SOURCE_WINDOW = timedelta(days=1)
 # Trajectory reads are idempotent, so transient failures are retried; example writes are not.
 FETCH_ATTEMPTS = 3
 FETCH_BACKOFF_SECONDS = 1.0
@@ -88,6 +89,17 @@ def _time(value: str) -> str:
         return parsed.astimezone(UTC).isoformat()
     except (ValueError, AttributeError) as exc:
         raise PipelineError("timestamps must be ISO 8601 with a timezone") from exc
+
+
+def resolve_time_window(start_time: str | None, end_time: str | None) -> tuple[str, str]:
+    """Resolve an optional source window, defaulting to the 24 hours ending now."""
+    resolved_end = _time(end_time if end_time is not None else _utc_now())
+    resolved_start = _time(start_time) if start_time is not None else (
+        datetime.fromisoformat(resolved_end) - DEFAULT_SOURCE_WINDOW
+    ).isoformat()
+    if datetime.fromisoformat(resolved_start) >= datetime.fromisoformat(resolved_end):
+        raise PipelineError("start_time must precede end_time")
+    return resolved_start, resolved_end
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -210,7 +222,7 @@ def _select_dataset(
 
 
 def create_dataset(
-    *, workspace_id: str, project_id: str, start_time: str, end_time: str,
+    *, workspace_id: str, project_id: str, start_time: str | None = None, end_time: str | None = None,
     limit: int, name: str | None = None, dataset_id: str | None = None,
     filter: str | None = None, output: Path | None = None,
     run_dir: Path | None = None,
@@ -221,6 +233,7 @@ def create_dataset(
     _check_concurrency(concurrency)
     if output is not None and run_dir is not None:
         raise PipelineError("use --run-dir or --output, not both")
+    start_time, end_time = resolve_time_window(start_time, end_time)
     run_dir = output.parent if output is not None else run_dir or new_run_directory()
     output = output if output is not None else run_dir / "selection.json"
     selected = _select_dataset(
