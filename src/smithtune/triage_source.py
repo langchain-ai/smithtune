@@ -16,7 +16,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
 from smithtune.curation import _api, _fetch_trajectory, _matches, _time, _uuid
-from smithtune.dataset import _project_start_time, _query_contract_runs, convert_message, validate_trajectories
+from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.dataset_artifacts import save_conversation
 from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
@@ -191,9 +191,9 @@ def training_error(unit: dict) -> str | None:
     if unit["training_error"]:
         return unit["training_error"]
     try:
-        validate_trajectories([unit["example"]], 1)
+        messages = validate_import_messages(unit["example"])
         contract = parse_inference_contract(unit["contract"])
-        contract.validate_messages([convert_message(message) for message in unit["example"]["inputs"]["messages"]])
+        contract.validate_messages(messages)
     except (PipelineError, ContractError) as exc:
         return str(exc)
     return None

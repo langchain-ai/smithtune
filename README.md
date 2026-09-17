@@ -109,6 +109,11 @@ becomes one dataset example, including earlier turns outside the time window.
 `--limit 100` selects at most 100 distinct trajectories. Remove `--filter` to
 select without a feedback threshold; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
 
+Invalid whole trajectories are pruned before upload using message and captured
+tool-schema checks. Saved conversations remain unchanged; the result reports a
+`rejected` count and the import receipt records reasons. Model-specific rendering
+and context limits are still checked by `prepare`.
+
 For an optional model review before import, use
 [dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council).
 For additions to an existing dataset, see [dataset curation](docs/datasets.md).

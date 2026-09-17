@@ -46,6 +46,7 @@ class API:
     def __init__(self, pages=None):
         self.pages = pages or [[]]
         self.calls = []
+        self.contract_calls = []
         self.examples = []
         self.messages = [
             {"role": "system", "content": "Be precise."},
@@ -61,7 +62,18 @@ class API:
         assert command[:2] == ["langsmith", "api"]
         assert command[command.index("--workspace") + 1] == uid(100)
         path = command[2]
-        body = json.loads(input) if input is not None else None
+        body = json.loads(input) if input is not None else json.loads(command[command.index("--body") + 1]) if "--body" in command else None
+        if path.startswith("/api/v1/sessions/") or (path == "/api/v2/runs/query" and body.get("selects") != ["ID", "TRACE_ID", "THREAD_ID", "START_TIME"]):
+            self.contract_calls.append((path, copy.deepcopy(body)))
+            if path.startswith("/api/v1/sessions/"):
+                result = {"id": uid(101), "start_time": "2026-09-01T00:00:00+00:00"}
+            elif body.get("is_root"):
+                result = {"items": [{"id": uid(1), "project_id": uid(101)}]}
+            else:
+                trace_id = body.get("trace_id") or uid(1)
+                result = {"items": [{"id": uid(1001), "trace_id": trace_id, "project_id": uid(101),
+                                    "run_type": "llm", "extra": {"invocation_params": {"tools": []}}}]}
+            return SimpleNamespace(stdout=json.dumps(result))
         self.calls.append((path, copy.deepcopy(body)))
         if self.failure:
             self.failure(path, body)

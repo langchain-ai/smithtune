@@ -323,6 +323,8 @@ def _import_selection(
     *, selection: Path, name: str | None = None, dataset_id: str | None = None, concurrency: int = DEFAULT_CONCURRENCY,
     runner: Callable[..., Any] = _run,
 ) -> dict:
+    from smithtune.dataset_import import import_rejection
+
     _check_concurrency(concurrency)
     value = _load_json(selection)
     if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
@@ -352,7 +354,7 @@ def _import_selection(
     receipt = {
         "selection": str(selection.resolve()), "workspace_id": workspace_id,
         "project_id": project_id, "dataset_name": name, "concurrency": concurrency,
-        "dataset_id": None, "status": "in_progress", "example_ids": [],
+        "dataset_id": None, "status": "in_progress", "example_ids": [], "rejections": [],
         "in_flight": [], "pending_write": "dataset", "created_at_utc": _utc_now(),
     }
     _write_new(receipt_path, receipt)
@@ -375,6 +377,14 @@ def _import_selection(
         example = load_conversation(conversation_path)
         with lock:
             entry["conversation"] = str(conversation_path)
+            _save_receipt(receipt_path, receipt)
+        rejection = import_rejection(example, workspace_id, runner=runner)
+        with lock:
+            if rejection is not None:
+                receipt["rejections"].append({**rejection, "conversation": str(conversation_path)})
+                receipt["in_flight"].remove(entry)
+                _save_receipt(receipt_path, receipt)
+                return
             entry["pending_write"] = "example"
             _save_receipt(receipt_path, receipt)
         result = _api(workspace_id, "POST", "/api/v1/examples", {
@@ -428,4 +438,5 @@ def _import_selection(
             f"confirmed={len(receipt['example_ids'])}; source={source}; "
             f"receipt={receipt_path}{pending_note}. Inspect the import before starting a new attempt."
         ) from exc
-    return {"dataset_id": dataset_id, "example_count": len(receipt["example_ids"]), "receipt": str(receipt_path)}
+    return {"dataset_id": dataset_id, "example_count": len(receipt["example_ids"]),
+            "rejected": len(receipt["rejections"]), "receipt": str(receipt_path)}

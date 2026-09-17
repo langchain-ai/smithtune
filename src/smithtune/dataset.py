@@ -357,7 +357,7 @@ def _validate_source_message(message: dict[str, Any]) -> None:
     if not isinstance(message, dict):
         raise PipelineError("message must be an object")
     role = message.get("role")
-    if role not in ROLE_MAP:
+    if not isinstance(role, str) or role not in ROLE_MAP:
         raise PipelineError(f"unsupported message role: {role!r}")
     message_id = message.get("id")
     if message_id is not None and (not isinstance(message_id, str) or not message_id):
@@ -618,6 +618,20 @@ def validate_trajectories(
     )
 
 
+def validate_import_messages(example: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate an import without rewriting messages or choosing a training model."""
+    validate_trajectories([example], 1)
+    messages = []
+    for position, message in enumerate(example["inputs"]["messages"]):
+        if position and message["role"] == "system":
+            raise PipelineError(f"example {example['id']} has misplaced system message")
+        try:
+            messages.append(convert_message(message))
+        except PipelineError as exc:
+            raise PipelineError(f"example {example['id']} message {position}: {exc}") from exc
+    return messages
+
+
 def _malformed_trajectory_reason(example_id: str, error: PipelineError) -> str | None:
     detail = str(error)
     if detail.startswith(f"example {example_id} repeats tool call id "):
@@ -636,7 +650,20 @@ def _malformed_trajectory_reason(example_id: str, error: PipelineError) -> str |
         return "missing_assistant_training_target"
     if detail == f"example {example_id} has unexpected outputs":
         return "unexpected_outputs"
+    if detail == f"example {example_id} has misplaced system message":
+        return "misplaced_system_message"
     return None
+
+
+def _recorded_tool_call_reason(error: ContractError) -> str:
+    detail = str(error)
+    if detail.startswith("unknown tool "):
+        return "unknown_tool"
+    if " do not match its JSON Schema:" in detail:
+        return "invalid_tool_arguments"
+    if " are not valid JSON" in detail:
+        return "invalid_tool_arguments_json"
+    return "recorded_tool_call_incompatible"
 
 
 def _exclude_malformed_trajectories(
@@ -951,15 +978,7 @@ def prepare_sft_rows(
             except ContractError as exc:
                 if exclusion_warnings is None:
                     raise PipelineError(f"example {example['id']} violates inference contract: {exc}") from exc
-                detail = str(exc)
-                if detail.startswith("unknown tool "):
-                    reason = "unknown_tool"
-                elif " do not match its JSON Schema:" in detail:
-                    reason = "invalid_tool_arguments"
-                elif " are not valid JSON" in detail:
-                    reason = "invalid_tool_arguments_json"
-                else:
-                    reason = "recorded_tool_call_incompatible"
+                reason = _recorded_tool_call_reason(exc)
                 warning = {
                     "code": "incompatible_inference_contract_excluded",
                     "example_id": example["id"],
