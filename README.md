@@ -19,10 +19,16 @@ Install with [uv](https://docs.astral.sh/uv/getting-started/installation/) and G
 
 ```bash
 uv tool install --python 3.12 \
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
   'git+https://github.com/langchain-ai/smithtune.git'
 ```
 
 To upgrade, repeat the command with `--upgrade`.
+
+The override selects the patched Transformers version tested by smithtune while
+the upstream Fireworks and Tinker cookbook metadata still pins an affected
+release. Keep the override URL and smithtune Git ref aligned when installing a
+release tag or commit.
 
 Install the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) for
 fetching traces and datasets:

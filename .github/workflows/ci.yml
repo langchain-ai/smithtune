@@ -38,5 +38,7 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         with:
           name: distributions
-          path: dist/smithtune-*
+          path: |
+            dist/smithtune-*
+            overrides.txt
           if-no-files-found: error
