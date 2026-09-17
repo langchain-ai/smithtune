@@ -21,12 +21,16 @@ def example(n, turns=1, **metadata):
     return {"id": uid(n), "dataset_id": uid(200), "outputs": None,
             "inputs": {"messages": [{"role": role, "content": f"{i}-{role}", "id": f"{i}-{role}"}
                                      for i in range(turns) for role in ("human", "ai")]},
-            "metadata": {"source_workspace_id": uid(100), "source_project_id": uid(101),
+            "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
+                          "source_workspace_id": uid(100), "source_project_id": uid(101),
                          "source_scope": "thread", "source_scope_id": f"thread-{n}", **metadata}}
 
 
 class API:
     def __init__(self, existing=()):
+        from test_curation import API as SourceAPI
+
+        self.source = SourceAPI()
         self.existing = list(existing)
         self.calls = []
         self.writes = []
@@ -38,6 +42,8 @@ class API:
         assert command[command.index("--workspace") + 1] == uid(100)
         method = command[command.index("--method") + 1]
         path = command[2]
+        if path.startswith("/api/v1/sessions/") or path == "/api/v2/runs/query":
+            return self.source(command, capture=capture, input=input)
         body = json.loads(input) if input else None
         self.calls.append((method, path, body))
         if method != "GET":

@@ -226,6 +226,23 @@ def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, 
         assert (tmp_path / "snapshot.json").read_bytes() == original
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_cached_triage_prunes_misplaced_system_messages_before_upload(tmp_path, monkeypatch, existing):
+    api = API()
+    api.trajectory_pages["next"]["messages"].insert(0, {"role": "system", "content": "Late instructions."})
+    with monkeypatch.context() as patch:
+        patch.setattr(triage_source, "training_error", lambda _: None)
+        patch.setattr(triage, "training_error", lambda _: None)
+        assert run(tmp_path, api)["eligible_conversations"] == 1
+    original = (tmp_path / "snapshot.json").read_bytes()
+    api.calls.clear()
+    destination = {"dataset_id": uid(200)} if existing else {"name": "new"}
+    with pytest.raises(PipelineError, match="no complete, kept"):
+        triage.create_triaged_dataset(tmp_path, confirm=True, runner=api, **destination)
+    assert api.calls == []
+    assert (tmp_path / "snapshot.json").read_bytes() == original
+
+
 def test_triage_accepts_valid_tool_calls_and_keeps_saved_contract(tmp_path):
     assert run(tmp_path, tool_conversation())["eligible_conversations"] == 1
     frozen = triage_source.load_snapshot(tmp_path)

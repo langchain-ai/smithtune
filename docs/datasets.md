@@ -30,6 +30,24 @@ trajectory before uploading it, alongside the selection and import receipt.
 Use `dataset create --run-dir <directory>` to choose a location. The returned
 `run_dir` identifies the saved files; they remain on disk after upload or failure.
 
+Before each example upload, creation validates the saved messages and captures
+the tool union from all source LLM runs, including tools that were not called.
+It excludes whole trajectories with malformed tool pairs, repeated tool-call IDs,
+unsupported content such as images, conflicting tool schemas, unknown tools,
+invalid arguments, or system messages after the first position. A leading system
+message is allowed and preserved; messages are never repaired or truncated.
+Compatible optional tool arguments and description changes use the same merge
+rules as `prepare`.
+
+The JSON result includes `rejected`; new-dataset receipts include `rejections`
+with reason codes, source identities, and saved conversation paths. Rejected
+trajectories are not replaced with additional selections, so the uploaded count
+can be less than `--limit`. If all selected trajectories are rejected, the new
+dataset is empty and the receipt still records every rejection. Source-read or
+schema-resolution failures stop the import rather than counting as rejections.
+These checks need LangSmith access, but no training provider or tokenizer;
+reasoning policy, rendering compatibility, and context limits remain in `prepare`.
+
 To add trajectories to an existing dataset, use the same source flags with
 `--dataset-id` instead of `--name`:
 
@@ -49,8 +67,10 @@ destination, stop the import. Extending a triaged example requires fresh passing
 triage. Run only one import into a dataset at a time.
 
 Existing-dataset imports download with bounded concurrency and write sequentially.
-The receipt records created, updated and skipped counts, an action log, and any
-pending write whose outcome needs checking. Earlier successful writes remain if a
+The receipt records created, updated, skipped and rejected counts, an action log,
+and any pending write whose outcome needs checking. Rejected actions record their
+reason and saved conversation path without creating or updating an example.
+Existing remote examples are never deleted. Earlier successful writes remain if a
 later trajectory fails.
 
 ## Label full trajectories with an agent council

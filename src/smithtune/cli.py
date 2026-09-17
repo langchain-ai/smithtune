@@ -83,7 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
     create = curate_sub.add_parser(
         "create", help="filter root traces and import their whole conversations into a new dataset",
-        description="Create a dataset from conversations selected through matching root traces. A root selects its whole thread when it has one, otherwise its trace; thread imports include turns outside the time window.",
+        description="Create a dataset from conversations selected through matching root traces. A root selects its whole thread when it has one, otherwise its trace; thread imports include turns outside the time window. Invalid whole trajectories are excluded before upload and recorded in the import receipt.",
     )
     create.add_argument("--workspace-id")
     create.add_argument("--project-id")
@@ -93,7 +93,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--start-time", help="inclusive root start time, with timezone")
     create.add_argument("--end-time", help="exclusive root start time, with timezone")
     create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
-    create.add_argument("--limit", type=int, help=f"number of distinct conversations to import, at most {curation.MAX_LIMIT}; querying stops once this many are found")
+    create.add_argument("--limit", type=int, help=f"number of distinct conversations to select before validation, at most {curation.MAX_LIMIT}; rejected trajectories are not replaced")
     create.add_argument("--concurrency", type=int, default=curation.DEFAULT_CONCURRENCY, help=f"conversations fetched and written at once, 1 to {curation.MAX_CONCURRENCY} (default: %(default)s)")
     create.add_argument("--run-dir", type=Path, help="local run directory (default: data/datasets/<generated-id>)")
     create.add_argument("--output", type=Path, help="selection file path; its parent becomes the run directory; cannot combine with --run-dir")
