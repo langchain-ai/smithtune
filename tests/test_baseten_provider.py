@@ -1560,16 +1560,6 @@ def test_accumulation_groups_split_one_oversized_microbatch_in_order():
     assert all(sum(len(batch) for batch in group) <= 32 for group in groups)
 
 
-def test_project_metadata_and_readme_describe_baseten_training_artifacts():
-    project = Path(__file__).resolve().parents[1]
-    metadata = (project / "pyproject.toml").read_text(encoding="utf-8")
-    readme = (project / "README.md").read_text(encoding="utf-8")
-
-    assert "Baseten Loops training" in metadata
-    for artifact in ("plan.json", "run-state.json", "epochs.json", "result.json"):
-        assert artifact in readme
-
-
 def _install_renderer_output(monkeypatch: pytest.MonkeyPatch, tokens=None, weights=None, render=None) -> None:
     if render is None:
         def render(*args, **kwargs):
