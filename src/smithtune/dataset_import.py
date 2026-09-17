@@ -1,14 +1,57 @@
 """Match saved trajectories to an existing dataset and record every write."""
 
 import json
+import sys
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.curation import _api, _time, _uuid, _write_new
-from smithtune.dataset import _source_key
+from smithtune.dataset import (
+    _malformed_trajectory_reason,
+    _recorded_tool_call_reason,
+    _source_key,
+    capture_example_contracts,
+    validate_import_messages,
+)
 from smithtune.dataset_artifacts import load_conversation, save_conversation
-from smithtune.inference_contract import json_sha256
+from smithtune.inference_contract import ContractError, json_sha256
 from smithtune.providers.base import PipelineError
+
+
+def import_rejection(example, workspace, *, runner):
+    """Return a source-only rejection record before uploading a whole trajectory."""
+    source = dict(zip(("workspace", "project", "scope", "scope_id"), _source_key(example, workspace, None), strict=True))
+    example = {**example, "id": example.get("id") or json_sha256(source)}
+    reason = None
+    try:
+        messages = validate_import_messages(example)
+    except PipelineError as exc:
+        reason = _malformed_trajectory_reason(example["id"], exc)
+        if reason is None:
+            raise
+    if reason is None:
+        def read(command, *, capture):
+            body = json.loads(command[command.index("--body") + 1]) if "--body" in command else None
+            value = _api(command[command.index("--workspace") + 1],
+                         command[command.index("--method") + 1], command[2], body, runner=runner)
+            return SimpleNamespace(stdout=json.dumps(value))
+
+        warnings = []
+        contracts = capture_example_contracts(workspace, [example], runner=read, exclusion_warnings=warnings)
+        if warnings:
+            reason = warnings[0]["reason"]
+        else:
+            try:
+                contracts[example["id"]].validate_messages(messages)
+            except ContractError as exc:
+                if str(exc).startswith(("cannot resolve schema reference", "cannot validate arguments")):
+                    raise PipelineError(f"cannot validate source {source['scope_id']}: {exc}") from exc
+                reason = _recorded_tool_call_reason(exc)
+    if reason is None:
+        return None
+    print(f"Warning: excluding {source['scope']} {source['scope_id']} before upload: {reason}", file=sys.stderr)
+    return {"code": "invalid_import_trajectory_excluded", "source": source, "reason": reason}
 
 
 def _destination_index(workspace, dataset_id, source_keys, run_dir, *, runner):
@@ -76,7 +119,7 @@ def _action(incoming, existing, *, triaged):
 def update_dataset(workspace, dataset_id, examples, source_keys, run_dir, receipt_path, *, runner, triaged=False):
     """Consume bounded incoming downloads; never retry an ambiguous write."""
     actions_path = receipt_path.with_suffix(".actions.jsonl")
-    receipt = {"dataset_id": dataset_id, "status": "indexing", "created": 0, "updated": 0, "skipped": 0,
+    receipt = {"dataset_id": dataset_id, "status": "indexing", "created": 0, "updated": 0, "skipped": 0, "rejected": 0,
                "actions": str(actions_path), "pending_write": None, "created_at_utc": _utc_now()}
     _write_new(receipt_path, receipt)
     try:
@@ -97,9 +140,13 @@ def update_dataset(workspace, dataset_id, examples, source_keys, run_dir, receip
             example_id, existing_path = index.get(key, (None, None))
             existing = load_conversation(existing_path) if existing_path is not None else None
             action, body = _action(incoming, existing, triaged=triaged)
+            rejection = import_rejection(incoming, workspace, runner=runner) if action != "skipped" else None
+            if rejection is not None:
+                action = "rejected"
             entry = {"action": action, "example_id": example_id, "conversation": str(incoming_path),
-                     "source": dict(zip(("workspace", "project", "scope", "scope_id"), key, strict=True))}
-            if action != "skipped":
+                     "source": dict(zip(("workspace", "project", "scope", "scope_id"), key, strict=True)),
+                     **(rejection or {})}
+            if action in ("created", "updated"):
                 receipt["pending_write"] = entry
                 _json_dump(receipt_path, receipt)
                 if action == "created":
@@ -127,4 +174,4 @@ def update_dataset(workspace, dataset_id, examples, source_keys, run_dir, receip
         detail = str(exc) if isinstance(exc, PipelineError) else type(exc).__name__
         raise PipelineError(f"{detail}; dataset import incomplete; inspect {receipt_path} before retrying") from exc
     return {"dataset_id": dataset_id, "example_count": sum(receipt[key] for key in ("created", "updated", "skipped")),
-            **{key: receipt[key] for key in ("created", "updated", "skipped")}, "receipt": str(receipt_path), "run_dir": str(run_dir)}
+            **{key: receipt[key] for key in ("created", "updated", "skipped", "rejected")}, "receipt": str(receipt_path), "run_dir": str(run_dir)}

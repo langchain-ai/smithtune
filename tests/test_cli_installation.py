@@ -24,7 +24,8 @@ def test_module_entrypoint_and_version_outside_checkout(tmp_path):
 
 @pytest.mark.parametrize("argv", [
     ["--help"], ["models", "list", "--help"],
-    ["dataset", "triage", "--help"], ["skill", "export", "--help"],
+    ["dataset", "triage", "--help"], ["dataset", "publish-splits", "--help"],
+    ["skill", "export", "--help"],
     ["models", "list"], ["models", "list", "--provider", "baseten"],
     ["models", "list", "--provider", "fireworks"],
 ])
@@ -90,6 +91,24 @@ def test_default_and_explicit_data_paths_follow_invocation(tmp_path, monkeypatch
         assert cli._parser().parse_args([command, *extras]).data_dir == tmp_path / "data"
         assert cli._parser().parse_args([command, *extras, "--data-dir", "custom"]).data_dir == Path("custom")
     assert cli.new_run_directory().resolve().parent == tmp_path / "data/datasets"
+
+
+def test_dataset_publish_splits_dispatches_without_preparation(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def publish(data_dir):
+        calls.append(data_dir)
+        return {"status": "complete", "data_dir": str(data_dir)}
+
+    monkeypatch.setattr(cli.reporting, "publish_prepared_splits", publish)
+
+    cli.main(["dataset", "publish-splits", "--data-dir", str(tmp_path)])
+
+    assert calls == [tmp_path]
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "complete",
+        "data_dir": str(tmp_path),
+    }
 
 
 def test_default_selection_is_written_in_working_directory(tmp_path, monkeypatch):

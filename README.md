@@ -109,6 +109,11 @@ becomes one dataset example, including earlier turns outside the time window.
 `--limit 100` selects at most 100 distinct trajectories. Remove `--filter` to
 select without a feedback threshold; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
 
+Invalid whole trajectories are pruned before upload using message and captured
+tool-schema checks. Saved conversations remain unchanged; the result reports a
+`rejected` count and the import receipt records reasons. Model-specific rendering
+and context limits are still checked by `prepare`.
+
 For an optional model review before import, use
 [dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council).
 For additions to an existing dataset, see [dataset curation](docs/datasets.md).
@@ -129,13 +134,23 @@ smithtune prepare \
 Preparation downloads the trajectories, captures their tools, and validates the
 training format. It creates approximately 80% training, 10% validation, and 10%
 held-out test data, keeping each source trajectory in one split. These splits
-are also registered on the original LangSmith dataset for evaluation.
+are also registered on the original LangSmith dataset for evaluation. If local
+preparation succeeds but publication does not, publish and verify only the saved
+memberships without rerunning preparation:
+
+```bash
+smithtune dataset publish-splits --data-dir "$data_dir"
+```
 
 The main data requirements are:
 
 - Text and tool trajectories; images are unsupported
 - Recorded system messages are preserved; Qwen requires them at the start
 - All supported assistant messages are training targets, including earlier turns
+
+Whole malformed or incompatible trajectories are excluded unchanged. `prepare`
+prints a warning and records each exclusion in `prepared/warnings.json` and
+`prepared/rejected.json`, including a stable reason code and source identity.
 
 Examples over the model's context limit are rejected without truncation.
 Reasoning is omitted by default. See the [reference](docs/reference.md) for

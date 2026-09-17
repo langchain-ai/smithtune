@@ -94,6 +94,15 @@ def write_manifest(
     (prepared / "test.jsonl").write_text("{}\n", encoding="utf-8")
 
 
+def test_jsonl_roundtrips_unicode_line_separator(tmp_path: Path):
+    path = tmp_path / "rows.jsonl"
+    rows = [{"content": "before\u2028after"}, {"content": "next"}]
+
+    artifacts._jsonl_dump(path, rows)
+
+    assert artifacts._load_jsonl(path) == rows
+
+
 def loaded_contract(tmp_path: Path, *, legacy: bool = True) -> inference_contract.InferenceContract:
     tools = [
         {
@@ -501,6 +510,126 @@ def test_prepare_keeps_all_rows_and_metadata(tmp_path: Path, monkeypatch: pytest
     assert all("_source" in json.loads(line) for line in train + validation + test)
 
 
+def test_prepare_excludes_malformed_tool_trajectories_with_warning(tmp_path: Path, capsys):
+    malformed = example(
+        1,
+        [
+            message("human", "find x", "human-1"),
+            message(
+                "ai",
+                [{"type": "tool_call", "id": "call-missing", "name": "lookup", "args": {"query": "x"}}],
+                "ai-1",
+            ),
+        ],
+    )
+    write_raw(tmp_path, [example(0), malformed])
+
+    manifest = dataset_ops.prepare_dataset(
+        "workspace-id",
+        "dataset-id",
+        fireworks.DEFAULT_MODEL,
+        tmp_path,
+        inference_contract=loaded_contract(tmp_path),
+        fetch=False,
+        check_render=False,
+        sync_splits=False,
+    )
+
+    rows = [
+        json.loads(line)
+        for split in dataset_ops.SPLIT_NAMES
+        for line in (tmp_path / "prepared" / f"{split}.jsonl").read_text().splitlines()
+    ]
+    expected = {
+        "code": "malformed_tool_trajectory_excluded",
+        "example_id": "example-1",
+        "source_scope": "thread",
+        "source_scope_id": "thread-1",
+        "reason": "unmatched_tool_calls_or_results",
+    }
+    assert [row["_source"]["example_id"] for row in rows] == ["example-0"]
+    assert manifest["langsmith"]["examples"] == 2
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert manifest["audit"]["malformed_tool_trajectories"] == 1
+    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
+    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
+    assert "Warning: excluding malformed tool trajectory example-1 (thread thread-1): unmatched_tool_calls_or_results" in capsys.readouterr().err
+
+
+def test_prepare_excludes_repeated_tool_call_ids(tmp_path: Path):
+    repeated = example(
+        1,
+        [
+            message("human", "find x", "human-1"),
+            message(
+                "ai",
+                [{"type": "tool_call", "id": "call-repeated", "name": "lookup", "args": {"query": "x"}}],
+                "ai-1",
+            ),
+            message("tool", "result", "tool-1", tool_call_id="call-repeated"),
+            message(
+                "ai",
+                [{"type": "tool_call", "id": "call-repeated", "name": "lookup", "args": {"query": "y"}}],
+                "ai-2",
+            ),
+        ],
+    )
+    write_raw(tmp_path, [example(0), repeated])
+
+    manifest = dataset_ops.prepare_dataset(
+        "workspace-id",
+        "dataset-id",
+        fireworks.DEFAULT_MODEL,
+        tmp_path,
+        inference_contract=loaded_contract(tmp_path),
+        fetch=False,
+        check_render=False,
+        sync_splits=False,
+    )
+
+    warnings = json.loads((tmp_path / "prepared" / "warnings.json").read_text())
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert warnings == [{
+        "code": "malformed_tool_trajectory_excluded",
+        "example_id": "example-1",
+        "source_scope": "thread",
+        "source_scope_id": "thread-1",
+        "reason": "repeated_tool_call_id",
+    }]
+
+
+def test_prepare_excludes_unsupported_message_content(tmp_path: Path):
+    multimodal = example(
+        1,
+        [
+            message("human", [{"type": "image", "url": "https://example.invalid/image.png"}], "human-1"),
+            message("ai", "answer", "ai-1"),
+        ],
+    )
+    write_raw(tmp_path, [example(0), multimodal])
+
+    manifest = dataset_ops.prepare_dataset(
+        "workspace-id",
+        "dataset-id",
+        fireworks.DEFAULT_MODEL,
+        tmp_path,
+        inference_contract=loaded_contract(tmp_path),
+        fetch=False,
+        check_render=False,
+        sync_splits=False,
+    )
+
+    warning = json.loads((tmp_path / "prepared" / "warnings.json").read_text())
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert warning == [{
+        "code": "malformed_trajectory_excluded",
+        "example_id": "example-1",
+        "source_scope": "thread",
+        "source_scope_id": "thread-1",
+        "reason": "unsupported_native_content",
+    }]
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_prepare_requires_tool_schemas_and_preserves_recorded_prompts(tmp_path: Path, legacy):
     messages = [
@@ -600,6 +729,46 @@ def test_prepare_reports_rejected_rows_without_changing_source_count(
     assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [
         {"example_id": "example-9"}
     ]
+
+
+def test_prepare_excludes_renderer_incompatible_trajectory_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    examples = [example(0), example(1)]
+    write_raw(tmp_path, examples)
+    monkeypatch.setattr(rendering, "load_training_renderer", lambda model: object())
+
+    def render(row, model, *, renderer):
+        if row["_source"]["example_id"] == "example-1":
+            raise ValueError("System message must be at the beginning")
+        return [SimpleNamespace(token_ids=[1], token_weights=[1])]
+
+    monkeypatch.setattr(rendering, "render_row_tokens", render)
+    monkeypatch.setattr(dataset_ops, "validate_model_context", rendering.validate_model_context)
+
+    manifest = dataset_ops.prepare_dataset(
+        "workspace-id",
+        "dataset-id",
+        fireworks.DEFAULT_MODEL,
+        tmp_path,
+        fetch=False,
+        sync_splits=False,
+    )
+
+    expected = {
+        "code": "renderer_incompatible_trajectory_excluded",
+        "example_id": "example-1",
+        "source_scope": "thread",
+        "source_scope_id": "thread-1",
+        "reason": "system_message_not_first",
+    }
+    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
+    assert manifest["audit"]["renderer_incompatible_trajectories"] == 1
+    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
+    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
+    assert "Warning: excluding trajectory example-1 (thread thread-1): system_message_not_first" in capsys.readouterr().err
 
 
 def test_prepare_accepts_a_test_only_dataset(tmp_path: Path):
