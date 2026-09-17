@@ -78,7 +78,7 @@ def test_replay_rejects_results_with_unverified_or_changed_judge_endpoint(tmp_pa
     def chat(model, messages, max_tokens, json_mode, request_contract=None):
         if json_mode:
             evidence = json.loads(messages[1]["content"])
-            passed = evidence["candidate_next_action"]["content"] == evidence["reference_next_action"]["content"]
+            passed = evidence["candidate_next_action"]["content"] == evidence["untrusted_trajectory"]["reference_next_action"]["content"]
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "text check"})}
         return {"role": "assistant", "content": "x is 1"}
 

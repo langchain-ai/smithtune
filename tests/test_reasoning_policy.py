@@ -143,8 +143,8 @@ def test_prepare_manifest_and_replay_use_same_policy(tmp_path, monkeypatch, poli
     assert ("reasoning_content" in cases[-1]["reference"]) == (policy == "preserve")
     evidence = json.loads(evaluation._judge_input(cases[-1], cases[-1]["reference"])[1]["content"])
     assert "reasoning_content" not in evidence["candidate_next_action"]
-    assert "reasoning_content" not in evidence["reference_next_action"]
-    assert evidence["trajectory_prefix_visible_to_candidate"] == last_prefix
+    assert "reasoning_content" not in evidence["untrusted_trajectory"]["reference_next_action"]
+    assert evidence["untrusted_trajectory"]["trajectory_prefix_visible_to_candidate"] == last_prefix
     if policy == "preserve":
         manifest["conversion"]["reasoning_policy"] = "omit"
         (tmp_path / "prepared" / "manifest.json").write_text(json.dumps(manifest))
