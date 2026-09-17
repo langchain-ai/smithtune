@@ -1,7 +1,6 @@
 <h1 align="center">smithtune</h1>
 
-Fine-tune models on LangSmith conversations with Fireworks or Baseten, then
-compare the base and tuned models in LangSmith.
+Fine-tune models on LangSmith trajectories with Fireworks or Baseten
 
 ```text
 Tracing project → dataset → prepare → plan → train + evaluate → LangSmith comparison
@@ -9,7 +8,7 @@ Tracing project → dataset → prepare → plan → train + evaluate → LangSm
 
 | What you have | Start here |
 | --- | --- |
-| Conversations in a tracing project | [Create a dataset](#create-a-dataset-from-conversations) |
+| Trajectories in a tracing project | [Create a dataset](#create-a-dataset-from-conversations) |
 | A LangSmith trajectory dataset | [Prepare data](#prepare-data) |
 | Prepared smithtune data | [Plan and train](#plan-and-train) |
 | A completed smithtune training run | [Evaluate a trained model](#evaluate-a-trained-model) |
@@ -17,7 +16,6 @@ Tracing project → dataset → prepare → plan → train + evaluate → LangSm
 ## Setup
 
 Install with [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git.
-No local GPU or repository checkout is required.
 
 ```bash
 uv tool install --python 3.12 \
@@ -51,7 +49,7 @@ provider's key, and a judge key** in your environment:
 | `ANTHROPIC_API_KEY` | The default replay judge, Claude Sonnet 5 |
 
 You need the key for the training provider you choose. The default judge calls
-Anthropic directly. [Other judge routes](docs/reference.md#replay-options) include
+Anthropic. [Other judge routes](docs/reference.md#replay-options) include
 Fireworks and the internal LangSmith gateway (`LANGSMITH_GATEWAY_API_KEY`).
 Optional [dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council)
 uses a Fireworks/OpenAI council by default and also requires `OPENAI_API_KEY`.
@@ -84,7 +82,7 @@ smithtune models list --provider "$provider"
 ```
 
 `qwen3p8-27b` is supported by both providers. Choose another model from the list
-if needed. Preparation selects its tokenizer and formatting automatically.
+if preferred. Preparation selects its tokenizer and formatting automatically.
 If you already have prepared data or a training run, set these variables to its
 provider and existing directories instead.
 
