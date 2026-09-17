@@ -190,7 +190,21 @@ def validate_model_context(
     rejected: list[dict[str, Any]] = []
     rendered_count = context_tokens = target_tokens = max_context = 0
     for row in rows:
-        rendered_items = render_row_tokens(row, model, renderer=renderer)
+        try:
+            rendered_items = render_row_tokens(row, model, renderer=renderer)
+        except ValueError as exc:
+            if str(exc) != "System message must be at the beginning":
+                raise
+            rejected.append(
+                {
+                    "code": "renderer_incompatible_trajectory_excluded",
+                    "example_id": row["_source"]["example_id"],
+                    "source_scope": row["_source"]["source_scope"],
+                    "source_scope_id": row["_source"]["source_scope_id"],
+                    "reason": "system_message_not_first",
+                }
+            )
+            continue
         if not rendered_items:
             raise PipelineError(f"example {row['_source']['example_id']} rendered no training datum")
         row_context = row_targets = 0

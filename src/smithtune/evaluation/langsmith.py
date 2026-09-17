@@ -128,6 +128,29 @@ def synchronize_splits(data_dir: Path, manifest: dict, examples: list[dict], *, 
         raise PipelineError(f"LangSmith split synchronization failed ({type(exc).__name__}); local data is saved; rerun prepare: {path}") from None
 
 
+def publish_prepared_splits(data_dir: Path) -> dict:
+    """Publish and verify existing prepared split artifacts without preparing again."""
+    with output_lock(data_dir):
+        manifest_path = data_dir / "prepared" / "manifest.json"
+        manifest = _load_json(manifest_path)
+        examples = _load_json(data_dir / "raw" / "examples.json")
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("langsmith"), dict):
+            raise PipelineError(f"prepared manifest has no LangSmith dataset identity: {manifest_path}")
+        if not isinstance(manifest.get("split"), dict):
+            raise PipelineError(f"prepared manifest has no split definition: {manifest_path}")
+        if not isinstance(examples, list):
+            raise PipelineError("raw examples artifact must be an array")
+        synchronized = synchronize_splits(data_dir, manifest, examples)
+        manifest["langsmith"]["split_sync"] = synchronized
+        _json_dump(manifest_path, manifest)
+        return {
+            "status": synchronized["status"],
+            "data_dir": str(data_dir.resolve()),
+            "langsmith": synchronized,
+            "split": manifest["split"],
+        }
+
+
 def verify_test_split(data_dir: Path, manifest: dict, *, client=None):
     """Resolve the registered test cohort and verify it before paid inference."""
     path = data_dir / "prepared" / SPLIT_RECEIPT

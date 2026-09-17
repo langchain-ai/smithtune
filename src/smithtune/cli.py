@@ -19,6 +19,7 @@ from smithtune import curation, dataset, triage
 from smithtune.dataset_artifacts import new_run_directory
 from smithtune.triage_source import load_snapshot, source_options
 from smithtune.evaluation import replay as replay_evaluation
+from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
 from smithtune.inference import ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection
 from smithtune.providers.baseten import (
@@ -127,6 +128,16 @@ def _parser() -> argparse.ArgumentParser:
     triage_cmd.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     triage_cmd.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
     triage_cmd.add_argument("--attempts", type=int, help=argparse.SUPPRESS)
+
+    publish_splits = curate_sub.add_parser(
+        "publish-splits",
+        help="publish and verify existing prepared split memberships",
+        description="Publish train, validation, and test memberships from existing prepared artifacts without fetching, converting, rendering, or splitting the dataset again.",
+    )
+    publish_splits.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="existing prepared dataset directory containing raw/ and prepared/ artifacts",
+    )
 
     skill = sub.add_parser("skill", help="export the packaged SFT selection skill for any agent")
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)
@@ -565,7 +576,9 @@ def main(argv: list[str] | None = None) -> None:
                 ],
             }
         elif args.command == "dataset":
-            if args.dataset_command == "triage":
+            if args.dataset_command == "publish-splits":
+                value = reporting.publish_prepared_splits(args.data_dir)
+            elif args.dataset_command == "triage":
                 directory = args.directory or args.output_dir
                 if args.directory is not None and args.output_dir is not None:
                     raise PipelineError("use a directory argument or --output-dir, not both")
