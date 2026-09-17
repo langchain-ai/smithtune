@@ -2,7 +2,7 @@
 
 [Back to the workflow](../README.md)
 
-## Create a dataset from conversations
+## Create a dataset from trajectories
 
 Create a dataset directly from a tracing project and filters:
 
@@ -20,17 +20,17 @@ its single trace. Thread examples include turns outside the filter window. Use
 the returned dataset ID in `prepare`.
 
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
-- `--limit` is required, at most 2000. Querying stops once that many distinct conversations are found, in the order LangSmith returns roots; no sampling is applied
-- Each conversation is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
+- `--limit` is required, at most 2000. Querying stops once that many distinct trajectories are found, in the order LangSmith returns roots; no sampling is applied
+- Each trajectory is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
 - Use `--name` for a new dataset or `--dataset-id` for an existing dataset in the same workspace. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
 
 Direct creation and triage both save complete examples under `conversations/` in a local run
 directory, defaulting to `data/datasets/<generated-id>/`. Creation saves each
-conversation before uploading it, alongside the selection and import receipt.
+trajectory before uploading it, alongside the selection and import receipt.
 Use `dataset create --run-dir <directory>` to choose a location. The returned
 `run_dir` identifies the saved files; they remain on disk after upload or failure.
 
-To add conversations to an existing dataset, use the same source flags with
+To add trajectories to an existing dataset, use the same source flags with
 `--dataset-id` instead of `--name`:
 
 ```bash
@@ -41,7 +41,7 @@ smithtune dataset create \
   --limit 100
 ```
 
-Sources match by workspace, project, scope and scope ID. New conversations are
+Sources match by workspace, project, scope and scope ID. New trajectories are
 added; unchanged ones are skipped. Longer snapshots update the existing example
 only when its saved messages are an exact prefix, preserving its ID and unrelated
 metadata. Shorter or conflicting snapshots, or duplicate sources already in the
@@ -51,12 +51,12 @@ triage. Run only one import into a dataset at a time.
 Existing-dataset imports download with bounded concurrency and write sequentially.
 The receipt records created, updated and skipped counts, an action log, and any
 pending write whose outcome needs checking. Earlier successful writes remain if a
-later conversation fails.
+later trajectory fails.
 
 ## Label full trajectories with an agent council
 
-Optionally use `dataset triage` to select training conversations with model judges before
-creating a dataset. Each judge sees the full conversation; a majority keep vote
+Optionally use `dataset triage` to select training trajectories with model judges before
+creating a dataset. Each judge sees the full trajectory; a majority keep vote
 selects it for import once all judges finish. Ties are dropped.
 
 The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks, plus
@@ -77,14 +77,12 @@ smithtune dataset triage data/datasets/my-sft \
   --limit 100
 ```
 
-This saves conversations and a judging plan locally, without calling judges.
-Messages come from `POST /v1/trajectory` with system messages included, for both
-threads and standalone traces. Source runs supply tool schemas and media checks;
-the judges receive the full saved message list.
-`--limit` samples root traces; roots in the same thread become one conversation,
+This saves trajectories and a judging plan locally, without calling judges.
+Each judge receives the full saved message list, including system messages.
+`--limit` samples root traces; roots in the same thread become one trajectory,
 including history outside the time window. Repeat an interrupted download to
 reuse saved progress. Omit the directory to generate one under `data/datasets/`.
-Select runs that contain conversations. For example, use
+Select runs that contain trajectories. For example, use
 `--filter 'eq(run_type,"chain")'` for agent runs in a project that also records
 standalone prompt-rendering runs. A source with no messages stops the download
 and reports its ID.
@@ -100,12 +98,12 @@ retry incomplete work with the saved settings. Completed runs make no new model
 calls. Read `report.md` for results, `labels.jsonl` for keep/drop labels, and
 `judgments.jsonl` for individual votes.
 
-- Multimodal conversations are excluded before judging.
-- If any judge rejects a conversation as too long, the whole conversation is
+- Multimodal trajectories are excluded before judging.
+- If any judge rejects a trajectory as too long, the whole trajectory is
   excluded without truncation.
 - Other request failures remain incomplete and can be retried.
 
-**3. Import accepted conversations:**
+**3. Import accepted trajectories:**
 
 ```bash
 smithtune dataset create --triage-dir data/datasets/my-sft --name selected-sft --confirm
@@ -115,10 +113,8 @@ Import uses the saved messages and tool schemas; unsupported training content
 is excluded. Pass the returned dataset ID to `prepare`. To add to an existing
 dataset, replace `--name` with `--dataset-id '<dataset-id>'`.
 
-Use a new triage directory when conversations or judging settings change.
-Older snapshots from the V2 message readers must be downloaded and judged again
-to include system messages.
-Extended conversations need fresh passing triage. After a partial import,
+Use a new triage directory when trajectories or judging settings change.
+Extended trajectories need fresh passing triage. After a partial import,
 inspect `dataset-import.json` before retrying; uploads do not resume automatically.
 
 ### Change the council or selection rules

@@ -135,15 +135,11 @@ The main data requirements are:
 
 - Text and tool trajectories; images are unsupported
 - Recorded system messages are preserved; Qwen requires them at the start
-- Provider built-in tools and incompatible tool definitions are unsupported
 - All supported assistant messages are training targets, including earlier turns
 
-CLI-created datasets include the source metadata needed for automatic tool
-capture. Existing examples need `source_scope`, `source_scope_id`, and
-`source_project_id`; see [preparation requirements](docs/reference.md#prepare-data).
 Examples over the model's context limit are rejected without truncation.
 Reasoning is omitted by default. See the [reference](docs/reference.md) for
-model limits, tool handling, split settings, and reasoning options.
+model selection, split settings, and reasoning options.
 
 ## Plan and train
 
@@ -198,9 +194,8 @@ Replay predicts the next response or tool call from recorded context. Generated
 tool calls are **not executed**. Scores measure agreement with recorded behavior,
 so they do not establish whether the agent would complete a task end to end.
 
-The CLI shows a music-note indicator for the current command, suppresses routine
-warnings, and returns JSON on success. The final JSON includes the same
-`langsmith.comparison_url`. Keep the local data and run directories for recovery.
+The final JSON includes `langsmith.comparison_url`. Keep the local data and run
+directories for recovery.
 
 ## Evaluate a trained model
 
@@ -237,7 +232,7 @@ uploads, saved artifacts, and sampler cleanup.
 | Task | Guide |
 | --- | --- |
 | Judge trajectories before training or extend a dataset | [Dataset curation and triage](docs/datasets.md) |
-| Change models, preparation settings, tools, or replay options | [Preparation and evaluation reference](docs/reference.md) |
+| Change models, preparation settings, or replay options | [Preparation and evaluation reference](docs/reference.md) |
 | Run a trained model in an application or evaluate a Baseten endpoint | [Deployment](docs/deployment.md) |
 
 ## Using with a coding agent
