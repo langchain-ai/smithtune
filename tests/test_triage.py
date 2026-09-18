@@ -1,9 +1,11 @@
 import copy
 import json
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
+from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 import pytest
@@ -662,10 +664,28 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
         triage.selected_examples(tmp_path)
 
 
-def test_skill_export_works_outside_checkout(tmp_path):
+def test_skill_export_works_outside_checkout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     result = triage.export_skill(tmp_path)
-    assert Path(result["skill"]).read_text().startswith("---\nname: sft-trace-triage")
-    assert (tmp_path / "sft-trace-triage/judge.md").exists()
+    entry = Path(result["skill"])
+    assert entry.read_text().startswith("---\nname: sft-trace-triage")
+    skill_dir = entry.parent.resolve()
+    pending, visited = [entry], set()
+    while pending:
+        document = pending.pop()
+        if document in visited:
+            continue
+        visited.add(document)
+        for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
+            link = urlsplit(target)
+            if link.scheme or link.netloc or not link.path:
+                continue
+            referenced = (document.parent / unquote(link.path)).resolve()
+            assert referenced.is_relative_to(skill_dir), f"Skill reference leaves export: {target}"
+            assert referenced.is_file(), f"Missing exported skill reference: {target}"
+            if referenced.suffix == ".md":
+                pending.append(referenced)
+    assert {"SKILL.md", "judge.md", "discovery.md"} <= {path.name for path in visited}
     exported = json.loads((tmp_path / "sft-trace-triage/config.example.json").read_text())
     assert exported == triage.load_config(None) == triage.council_settings(tmp_path / "new")["config"]
     assert [(j["provider"], j["model"]) for j in exported["judges"]] == [

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from smithtune import checkpoint, cli, dataset_workflow as workflow, triage
+from smithtune import checkpoint, cli, dataset_workflow as workflow, triage, triage_source
 from smithtune.artifacts import output_lock
 from smithtune.providers.base import PipelineError
 from test_triage import API, judge_call, uid
@@ -95,7 +95,7 @@ def test_no_triage_is_explicit_and_saved(tmp_path):
     assert run(tmp_path, api, confirm=True, judge=no_judge)["created"] == 1
 
 
-@pytest.mark.parametrize("option", [{"rules": ["good"]}, {"judges": ["gpt-5.6-terra"]}])
+@pytest.mark.parametrize("option", [{"rules": ["good"]}, {"judges": ["gpt-5.6-terra"]}, {"rubric_path": "unused.md"}])
 def test_no_triage_cannot_discard_judging_criteria(tmp_path, option):
     api = API()
     with pytest.raises(PipelineError, match="no-triage conflicts"):
@@ -111,6 +111,93 @@ def test_existing_council_plan_cannot_be_bypassed_by_push(tmp_path):
     with pytest.raises(PipelineError, match="no-triage conflicts"):
         run(tmp_path, api, no_triage=True, confirm=True)
     assert not api.datasets
+
+
+@pytest.mark.parametrize("command", ["create", "triage"])
+def test_cli_rubric_is_frozen_for_partial_resume_and_upload(tmp_path, monkeypatch, capsys, command):
+    api, seen = API(), []
+    directory = tmp_path / "run"
+    rubric_path = tmp_path / "rubric.md"
+    rubric = '# Selection\r\nKeep supported answers, including “no”.\r\n\r\nDrop invented results.\r\n'
+    rules = ["Keep useful outcomes.", "Require evidence for claimed success."]
+    rubric_path.write_text("Draft criteria", encoding="utf-8")
+
+    def judge(slot, prompt, tokens):
+        seen.append((slot["name"], copy.deepcopy(prompt)))
+        if slot["name"] == "judge-2" and sum(name == "judge-2" for name, _ in seen) == 1:
+            return {"keep": 1}  # Leave one vote incomplete.
+        return judge_call(slot, prompt, tokens)
+
+    original = workflow.run
+    monkeypatch.setattr(workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge))
+    source_args = [item for key, value in SOURCE.items() for item in ("--" + key.replace("_", "-"), value)]
+    if command == "triage":
+        cli.main(["dataset", "pull", str(directory), *source_args])
+        capsys.readouterr()
+    args = ["dataset", command, str(directory), "--rubric", str(rubric_path), "--attempts", "1", "--concurrency", "1"]
+    if command == "create":
+        args += [*source_args, "--name", "selected", "--filter", FILTER]
+    cli.main(args)
+    assert json.loads(capsys.readouterr().out)["selection"]["mode"] == "council"
+    # A preview can replace criteria before votes, without changing the source.
+    rubric_path.write_bytes(rubric.encode("utf-8"))
+    cli.main(["dataset", command, str(directory), "--rubric", str(rubric_path),
+              *[item for rule in rules for item in ("--rule", rule)]])
+    plan = json.loads(capsys.readouterr().out)["triage"]
+    assert plan["selection_rubric"] == rubric and not seen and not api.imported
+    assert checkpoint.load(directory)["workflow"]["council"]["selection_rubric"] == rubric
+    frozen = triage_source.load_snapshot(directory)
+    trajectory, = triage_source.conversation_trajectories(frozen)
+    expected = triage.judge_messages(trajectory, triage.rubric_text() + "\nTask-specific selection rubric:\n" + rubric, rules)
+    assert expected[0]["content"].startswith(triage.rubric_text())
+    assert json.loads(expected[1]["content"])["untrusted_trajectory"] == trajectory["messages"]
+    rubric_path.write_text("Changed criteria", encoding="utf-8")
+    api.calls.clear()
+    with pytest.raises(SystemExit) as incomplete:
+        cli.main(["dataset", command, str(directory), "--confirm"])
+    assert incomplete.value.code == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["incomplete"] == 1
+    assert len(seen) == 3 and not api.calls and not api.imported
+    saved = {name: (directory / name).read_bytes() for name in
+             ("checkpoint.json", "plan.json", "snapshot.json", "triage-config.json", "judgments.jsonl")}
+    completed = {vote["judge"]: vote for vote in map(json.loads, saved["judgments.jsonl"].splitlines()) if vote["status"] == "complete"}
+    for override in (["--rubric", str(rubric_path)], ["--rule", "Different policy"]):
+        for confirm in ([], ["--confirm"]):
+            with pytest.raises(SystemExit) as changed:
+                cli.main(["dataset", command, str(directory), *override, *confirm])
+            assert changed.value.code == 2
+            assert "conflict" in capsys.readouterr().err
+            assert len(seen) == 3 and not api.calls
+            assert all((directory / name).read_bytes() == content for name, content in saved.items())
+    rubric_path.unlink()
+    cli.main(["dataset", "resume", str(directory), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["status"] == "complete"
+    assert len(seen) == 4 and seen[-1][0] == "judge-2"
+    assert all(prompt == expected for _, prompt in seen)
+    votes = {vote["judge"]: vote for vote in map(json.loads, (directory / "judgments.jsonl").read_text().splitlines())}
+    assert all(votes[name] == vote for name, vote in completed.items())
+    if command == "triage":
+        cli.main(["dataset", "push", str(directory), "--name", "selected", "--confirm"])
+        capsys.readouterr()
+    assert api.imported[0]["inputs"]["messages"] == trajectory["messages"]
+    api.calls.clear()
+    cli.main(["dataset", "resume", str(directory), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["status"] == "complete"
+    assert len(seen) == 4 and not api.calls
+
+
+@pytest.mark.parametrize("content", [None, b"\xff", b"", b" \n\t", "directory"])
+def test_invalid_rubric_fails_before_download(tmp_path, content):
+    api = API()
+    rubric_path = tmp_path / "rubric.md"
+    if content == "directory":
+        rubric_path.mkdir()
+    elif content is not None:
+        rubric_path.write_bytes(content)
+    with pytest.raises(PipelineError, match="rubric"):
+        run(tmp_path / "run", api, rubric_path=rubric_path, filter=FILTER, confirm=True, judge=no_judge)
+    assert not api.calls
+    assert not (tmp_path / "run" / "plan.json").exists()
 
 
 def test_judge_failure_blocks_push_and_resume_reuses_votes(tmp_path):

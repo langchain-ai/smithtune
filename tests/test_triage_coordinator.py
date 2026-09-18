@@ -9,11 +9,11 @@ import pytest
 pytest.importorskip("deepagents")
 pytest.importorskip("pydantic_monty")
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from smithtune import triage, triage_agent, triage_coordinator
 from smithtune.triage_coordinator import JudgeTasks, coordinate, run_code
-from test_triage import API, source
+from test_triage import API, SYSTEM, messages, source
 from test_triage_agent import JudgeModel
 
 
@@ -123,7 +123,9 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
     config = tmp_path / "judges.json"
-    config.write_text(json.dumps({"judges": [JUDGE]}))
+    rules = ["Keep completed requests.", "Require evidence for every claimed result."]
+    rubric = "# Selection\nKeep factual answers supported by the recorded evidence.\n"
+    config.write_text(json.dumps({"judges": [JUDGE], "rules": rules}))
     model = coordinator_model()
     monkeypatch.setattr(triage_coordinator, "_model", lambda *_: model)
     seen = []
@@ -136,14 +138,16 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
 
     monkeypatch.setattr(triage_agent, "_model", lambda *_: EvidenceJudge(answers=[]))
     work = tmp_path / "work"
-    args = dict(config_path=config, runner_mode="deepagent", confirm=True, runner=API())
+    args = dict(config_path=config, runner_mode="deepagent", confirm=True, runner=API(), selection_rubric=rubric)
     result = triage.run_triage(source(), work, **args)
     assert result["kept"] == 1 and result["status"] == "complete"
     assert len(seen) == 1
     # One judge gets the whole conversation.
     evidence = json.loads(next(m.content for m in seen[0] if isinstance(m, HumanMessage)))["untrusted_trajectory"]
-    assert len(evidence) == 5
-    assert evidence[0]["role"] == "system"
+    assert evidence == SYSTEM + messages(1) + messages(2)
+    instructions = next(m.content for m in seen[0] if isinstance(m, SystemMessage))
+    assert "\nTask-specific selection rubric:\n" + rubric in instructions
+    assert json.loads(instructions.split("\nAdditional selection rules:\n", 1)[1]) == rules
     imported = triage.create_triaged_dataset(work, "accepted", confirm=True, runner=args["runner"])
     assert imported["example_count"] == 1
     assert args["runner"].imported[0]["inputs"]["messages"] == evidence

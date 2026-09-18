@@ -46,7 +46,8 @@ smithtune dataset create data/datasets/grounded \
 ```
 
 The filter narrows the source query first; the council then judges those
-trajectories against the rule. Repeat `--rule` for multiple criteria. `--judges`
+trajectories against the rule. Repeat `--rule` for multiple criteria, or pass a
+file with `--rubric` as described below. `--rubric` and `--judges`
 also requests council judging. Without a filter, `create` defaults to council
 review. Use `--no-triage` to explicitly download and upload without review;
 it cannot discard council rules or bypass an existing council plan.
@@ -82,12 +83,30 @@ smithtune dataset pull data/datasets/reviewed \
   --limit 100
 
 smithtune dataset triage data/datasets/reviewed \
-  --rule 'Keep complete, useful solutions.'
+  --rubric ./rubric.md
 smithtune dataset triage data/datasets/reviewed --confirm
 
 smithtune dataset push data/datasets/reviewed --name reviewed-sft
 smithtune dataset push data/datasets/reviewed --confirm
 ```
+
+Write the task description, keep/drop criteria, and concrete examples in a
+UTF-8 `rubric.md` file. `--rubric` works with both `triage` and `create`; it
+requests council judging even when a source filter is set. It can accompany
+short additional `--rule` criteria and cannot be combined with `--no-triage`.
+
+The preview saves the exact text as `selection_rubric` in `plan.json` and the
+workflow checkpoint. Each judge receives it alongside the standard quality
+checks and JSON output format. Confirm and resume use the saved text even if
+the original file changes or is deleted. Before scoring, preview again with
+`--rubric` to replace it. After votes start, changed criteria need a new directory.
+
+For help choosing criteria, `smithtune skill export --output ./skills` exports
+the general-purpose triage skill and discovery guide. The agent reads varied
+traces, discusses concrete examples with the user, writes an agreed rubric,
+and passes the file to the CLI. Inspect a small council batch before scoring
+the larger pool. Domain-specific rules and private examples stay in local run
+files; the CLI saves the rubric but does not verify human agreement.
 
 `triage` reads only downloaded trajectories. Its default council is DeepSeek
 V4.1 Flash and GLM-5.3-Flash on Fireworks plus GPT-5.6 Terra on OpenAI, managed by a

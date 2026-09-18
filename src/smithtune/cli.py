@@ -104,6 +104,7 @@ def _parser() -> argparse.ArgumentParser:
         if name in {"triage", "create"}:
             command.add_argument("--judges", help="comma-separated model aliases or provider:model; requests council judging")
             command.add_argument("--rule", action="append", help="criterion requiring council judging; repeat for multiple rules")
+            command.add_argument("--rubric", type=Path, help="UTF-8 file with selection criteria; requests council judging and saves the text for resume")
             command.add_argument("--config", type=Path, help=argparse.SUPPRESS)
             command.add_argument("--runner", choices=("api", "deepagent"), help=argparse.SUPPRESS)
             command.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
@@ -578,7 +579,7 @@ def main(argv: list[str] | None = None) -> None:
                 )}
                 options.update(judges=args.judges.split(",") if getattr(args, "judges", None) is not None else None,
                                rules=getattr(args, "rule", None), config_path=getattr(args, "config", None),
-                               runner_mode=getattr(args, "runner", None))
+                               runner_mode=getattr(args, "runner", None), rubric_path=getattr(args, "rubric", None))
                 value = dataset_workflow.run(args.dataset_command, args.directory,
                                              confirm=getattr(args, "confirm", False), **options)
         elif args.command == "capture-contract":

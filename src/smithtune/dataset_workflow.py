@@ -15,7 +15,7 @@ from smithtune.providers.base import PipelineError
 
 STAGES = ("pull", "triage", "push")
 SOURCE_FLAGS = ("workspace_id", "project_id", "start_time", "end_time", "filter", "limit")
-COUNCIL_FLAGS = ("judges", "rules", "config_path", "runner_mode", "concurrency", "attempts", "max_output_tokens")
+COUNCIL_FLAGS = ("judges", "rules", "config_path", "rubric_path", "runner_mode", "concurrency", "attempts", "max_output_tokens")
 
 
 def _open(directory, command, options):
@@ -68,7 +68,7 @@ def _settings(directory, checkpoint, command, options):
         state["destination"] = {"name": receipt.get("dataset_name"),
                                 "dataset_id": None if receipt.get("dataset_name") else receipt["dataset_id"]}
     has_council_options = any(options.get(key) is not None for key in COUNCIL_FLAGS)
-    has_criteria = any(options.get(key) is not None for key in ("judges", "rules", "config_path", "runner_mode"))
+    has_criteria = any(options.get(key) is not None for key in ("judges", "rules", "config_path", "rubric_path", "runner_mode"))
     if options.get("no_triage") and (any(options.get(key) is not None for key in COUNCIL_FLAGS if key != "concurrency") or "triage" in state["stages"]):
         raise PipelineError("--no-triage conflicts with council judging or rules; use a new directory")
     stages = set(state["stages"])

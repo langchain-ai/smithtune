@@ -46,24 +46,35 @@ should explain the saved counts and remaining failures to the user.
 
 ## Agent helping a user
 
+Use [discovery.md](discovery.md) to inspect varied full trajectories with the
+user, agree on useful training examples, and write a selection rubric. Learn
+the application's task and tools from its traces; keep domain-specific rules
+and evidence in local run files. The coordinator above only dispatches saved
+tasks; it must not start an interview or change the rubric.
+
 Run `smithtune doctor` and `smithtune dataset create --help` for setup. Use one
 saved directory across `pull`, `triage`, `push`, `create`, and `resume`.
 
 First map the user's selection criteria to the project's actual feedback,
 metadata, tags, and error fields. Use `--filter` for criteria those fields express.
 Do not invent feedback keys, thresholds, or the meaning of missing values.
-Use `--rule` for criteria requiring the content of a trajectory to be judged.
+Write `rubric.md` with the task, keep/drop criteria, and concrete examples.
+Review it with the user, then pass `--rubric ./rubric.md` for council judging.
+Use `--rule` as a shortcut for short additional criteria.
 
 - `dataset create DIR` composes downloading, optional judging, and uploading.
   A filter with no council criteria skips inference. Without a filter, create
-  defaults to council judging. `--rule` or `--judges` requests judging even with
+  defaults to council judging. `--rubric`, `--rule`, or `--judges` requests judging even with
   a filter; filtering always happens before trajectory downloads and judging.
   `--no-triage` explicitly skips council and cannot discard judging criteria.
 - Preview without `--confirm`: review the selected path and pending work. When
   the planned judging and uploads are authorized, repeat with `--confirm`.
 - For staged work, use `dataset pull DIR` with source IDs, time window, and
-  optional `--filter` / `--limit`. Then use `dataset triage DIR` to preview and
-  `dataset triage DIR --confirm` to judge. Read `labels.jsonl` and `report.md`
+  optional `--filter` / `--limit`. Read examples and agree on the rubric before
+  running `dataset triage DIR --rubric ./rubric.md` to preview. Check the saved
+  text in `plan.json`, then use `dataset triage DIR --confirm` to judge.
+  Inspect a small batch's decisions before scoring the larger pool.
+  Read `labels.jsonl`, individual votes in `judgments.jsonl`, and `report.md`
   and explain the counts and reasons. Failed judge requests remain incomplete.
 - Preview upload with `dataset push DIR --name NAME` (or `--dataset-id ID`).
   Add `--confirm` when upload is authorized. Push respects any council plan
@@ -75,7 +86,9 @@ Use `--rule` for criteria requiring the content of a trajectory to be judged.
 
 The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks plus
 GPT-5.6 Terra on OpenAI. Choose models with `--judges`; other models use
-`provider:model`. Rules apply to whole trajectories. Source and destination
+`provider:model`. The rubric and rules apply to whole trajectories. Confirm and
+resume use the saved rubric text even if its original file changes or is deleted.
+Source and destination
 are frozen; council rules can change before judging starts. Use a new directory
 to change rules after votes or to review a different source selection.
 
