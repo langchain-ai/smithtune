@@ -93,6 +93,14 @@ and receipt persistence. No model/GPU serving profile has been validated by
 these offline tests; deployment runs text and tool-call smoke tests before
 marking an endpoint ready.
 
+`bindings.py` separates producing-run capture from the saved per-assistant tool
+representation. Keep capture replaceable by trajectory endpoint evidence. Training,
+validation, and replay must consume the same tool list for each assistant target.
+The Fireworks loader uses smithtune's target renderer with the official cookbook's
+JSONL dataset and batching; changing only preparation masks is insufficient.
+Regression coverage includes actual loader masks, tool additions/removals/schema
+changes, local upload/prepare roundtrips, and capture checkpoint recovery.
+
 ## Dependency compatibility
 
 Transformers is pinned to the patched `5.10.4`. The upstream Fireworks cookbook
@@ -114,7 +122,8 @@ remains separate from upstream template coverage.
 
 The additional Baseten models use `native_rendering.py`: it calls the official
 formatter, verifies each response against its inference prompt, and coalesces
-only identical token prefixes. Keep its implementation version in the prepared
+only identical token prefixes. The training boundary requests each final assistant
+target separately, with history loss masked out. Keep its implementation version in the prepared
 identity when changing formatting or masks. Test model-specific stop tokens,
 empty reasoning, history changes, and Unicode against the pinned real tokenizers.
 

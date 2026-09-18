@@ -1,5 +1,7 @@
 """Native prefix masks, changing history, and provider datum boundaries."""
 
+from binding_fixtures import bound_row
+
 import copy
 from dataclasses import replace
 from importlib import resources
@@ -50,14 +52,15 @@ def test_native_loading_and_loops_conversion_do_not_import_fireworks(monkeypatch
     monkeypatch.setitem(sys.modules, "training", None)
     monkeypatch.setattr(hf_rendering, "load_tokenizer", lambda model: _tokenizer(TEMPLATE))
     renderer = rendering.load_training_renderer(MODEL)
-    tokens = renderer.render(MESSAGES, TOOLS)
+    row = bound_row({"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "e"}})
+    tokens = rendering.render_row_tokens(row, MODEL, renderer=renderer)
     constructors = SimpleNamespace(
         ModelInput=SimpleNamespace(from_ints=lambda ids: ids),
         TensorData=lambda **kwargs: SimpleNamespace(**kwargs),
         Datum=lambda **kwargs: SimpleNamespace(**kwargs),
     )
-    datums = baseten.render_row({"messages": MESSAGES, "tools": TOOLS}, MODEL, renderer=renderer, loops_types=constructors)
-    assert len(datums) == len(tokens) == 2
+    datums = baseten.render_row(row, MODEL, renderer=renderer, loops_types=constructors)
+    assert len(datums) == len(tokens) == 3
     for datum, expected in zip(datums, tokens, strict=True):
         assert datum.model_input == expected.token_ids[:-1]
         assert datum.loss_fn_inputs["weights"].data == expected.token_weights[1:]
@@ -70,11 +73,11 @@ def test_native_loading_and_loops_conversion_do_not_import_fireworks(monkeypatch
 def test_each_native_datum_is_checked_against_context_limit(monkeypatch):
     renderer = _renderer()
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: renderer)
-    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "e", "source_scope": "thread", "source_scope_id": "t"}}
+    row = bound_row({"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "e", "source_scope": "thread", "source_scope_id": "t"}})
     maximum = max(len(datum.token_ids) for datum in renderer.render(MESSAGES, TOOLS))
     model = replace(MODEL, max_seq_len=maximum, trainer_max_seq_len=maximum)
     accepted, rejected, audit = rendering.validate_model_context([row], model)
-    assert accepted == [row] and rejected == [] and audit["rendered_datums"] == 2
+    assert accepted == [row] and rejected == [] and audit["rendered_datums"] == 3
     accepted, rejected, _ = rendering.validate_model_context([row], replace(model, max_seq_len=maximum - 1))
     assert accepted == [] and len(rejected) == 1
 
@@ -82,18 +85,18 @@ def test_each_native_datum_is_checked_against_context_limit(monkeypatch):
 def test_multiple_datums_keep_their_parent_conversations_partition(monkeypatch):
     renderer = _renderer()
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: renderer)
-    rows = [{"messages": copy.deepcopy(MESSAGES), "tools": TOOLS,
+    rows = [bound_row({"messages": copy.deepcopy(MESSAGES), "tools": TOOLS,
              "_source": {"example_id": f"example-{i}", "source_scope": "thread", "source_scope_id": f"thread-{i}",
-                         "source_key": ["workspace", "project", "thread", f"thread-{i}"]}}
+                         "source_key": ["workspace", "project", "thread", f"thread-{i}"]}})
             for i in range(3)]
     accepted, rejected, audit = rendering.validate_model_context(rows, MODEL)
-    assert not rejected and audit["rendered_datums"] == 6
+    assert not rejected and audit["rendered_datums"] == 9
     assert accepted == rows  # Context checks retain whole conversations for splitting.
     sources = {}
     for partition, conversations in enumerate(dataset.split_rows(accepted)):
         for row in conversations:
-            datums = renderer.render(row["messages"], row["tools"])
-            assert len(datums) == 2
+            datums = rendering.render_row_tokens(row, MODEL, renderer=renderer)
+            assert len(datums) == 3
             source = row["_source"]["source_scope_id"]
             assert source not in sources
             sources[source] = partition
@@ -157,3 +160,18 @@ def test_muse_rejects_shapes_the_cookbook_cannot_preserve(monkeypatch, stage, sh
             rendering.render_row_tokens({"messages": messages}, model, renderer=None)
         else:
             rendering.validate_replay_context([{"messages": messages}], model)
+
+
+def test_actual_native_boundary_masks_each_target_with_changing_tools():
+    from test_assistant_bindings import example
+    row, = dataset.prepare_sft_rows([example()[0]])
+    renderer = _renderer()
+    rows = rendering.render_row_tokens(row, MODEL, renderer=renderer)
+    assert len(rows) == 3
+    for i, datum in enumerate(rows):
+        supervised = ''.join(_loss_spans(datum, renderer.tokenizer))
+        assert f'answer-{i}' in supervised
+        assert all(f'answer-{j}' not in supervised for j in range(i))
+        text = renderer.tokenizer.decode(datum.token_ids)
+        assert ('unused' in text) == (i == 1)
+        assert supervised.endswith('<|im_end|>\n')

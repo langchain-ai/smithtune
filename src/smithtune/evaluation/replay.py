@@ -123,7 +123,18 @@ def build_replay_cases(
 ) -> list[dict[str, Any]]:
     """Slice test trajectories before assistant-message boundaries."""
     cases: list[dict[str, Any]] = []
+    from smithtune.bindings import row_bindings, tool_contract
+
     for row in test_rows:
+        bindings = None if row.get("tool_policy") == "global_override" else row_bindings(row)
+        original_positions = row["_source"]["message_positions"]
+        if bindings is not None:
+            for i, message in enumerate(row["messages"]):
+                if message.get("role") == "assistant":
+                    try:
+                        tool_contract(bindings[original_positions[i]]["tools"]).validate_messages([message])
+                    except ContractError as exc:
+                        raise PipelineError(f"example {row['_source']['example_id']} message {original_positions[i]}: {exc}") from exc
         messages = row.get("messages")
         source = row.get("_source")
         if not isinstance(messages, list) or not isinstance(source, dict):
@@ -144,20 +155,28 @@ def build_replay_cases(
                 if message.get("tool_call_id") in call_ids:
                     tool_results.append(copy.deepcopy(message))
             example_id = source["example_id"]
-            case_id = hashlib.sha256(f"{example_id}:{position}".encode()).hexdigest()[:16]
+            original_position = original_positions[position]
+            binding = bindings[original_position] if bindings is not None else None
+            tools = copy.deepcopy(binding["tools"] if binding else row["tools"])
+            contract_hash = tool_contract(tools).contract_sha256 if binding else source["contract_sha256"]
+            case_id = hashlib.sha256(f"{example_id}:{original_position}".encode()).hexdigest()[:16]
             cases.append(
                 {
                     "id": case_id,
                     "example_id": example_id,
                     "source_scope": source["source_scope"],
                     "source_scope_id": source["source_scope_id"],
-                    "message_index": position,
+                    "message_index": original_position,
+                    "converted_message_index": position,
+                    "source_run_id": binding["run_id"] if binding else None,
+                    "source_trace_id": binding["trace_id"] if binding else None,
+                    "tool_policy": row["tool_policy"],
                     "case_type": case_type,
                     "messages": copy.deepcopy(messages[:position]),
                     "reference": copy.deepcopy(reference),
                     "tool_results": tool_results,
-                    "tools": copy.deepcopy(row.get("tools", [])),
-                    "contract_sha256": source.get("contract_sha256"),
+                    "tools": tools,
+                    "contract_sha256": contract_hash,
                 }
             )
     return cases
@@ -176,6 +195,14 @@ def _case_contract(
     case: dict[str, Any], global_contract: InferenceContract | None,
     example_contracts: dict[str, InferenceContract] | None,
 ) -> InferenceContract | None:
+    if case.get("tool_policy") == "per_assistant":
+        from smithtune.bindings import tool_contract
+        if not case.get("source_run_id") or "tools" not in case:
+            raise PipelineError("replay target is missing producing-run/tool provenance")
+        contract = tool_contract(case["tools"], source_run_id=case["source_run_id"], message_index=case["message_index"])
+        if contract.contract_sha256 != case.get("contract_sha256"):
+            raise PipelineError("replay target tools differ from its saved contract")
+        return contract
     if example_contracts is None:
         return global_contract
     example_id = case.get("example_id")
@@ -195,8 +222,10 @@ def prepare_replay_evaluation(
 ) -> dict[str, Any]:
     """Build model-ready replay cases from the untouched test split."""
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
+    from smithtune.dataset import require_current_preparation
     if not isinstance(manifest, dict):
         raise PipelineError("prepared manifest is not an object")
+    require_current_preparation(manifest)
     if _prepared_split(manifest)["test"] < 1:
         raise PipelineError("prepared dataset has no test rows")
     model = _model_from_manifest(manifest)
@@ -238,7 +267,8 @@ def prepare_replay_evaluation(
             if case.get("tools") != expected_tools:
                 raise PipelineError(f"replay case {case['id']} has different tool schemas")
             try:
-                contract.validate_messages([*case["messages"], case["reference"]])
+                contract.validate_messages([case["reference"]] if case["tool_policy"] == "per_assistant"
+                                           else [*case["messages"], case["reference"]])
             except ContractError as exc:
                 raise PipelineError(f"replay case {case['id']} violates inference contract: {exc}") from exc
     context_options = {"max_seq_len": baseten_context_limit} if baseten_context_limit else {}
@@ -286,6 +316,7 @@ def _judge_input(case: dict[str, Any], candidate: dict[str, Any]) -> list[dict[s
         "untrusted_trajectory": {
             "trajectory_prefix_visible_to_candidate": _inference_messages(case["messages"]),
             "reference_next_action": reference_action,
+            "available_tools": copy.deepcopy(case["tools"]),
             "reference_action_tool_results_not_visible_to_candidate": _inference_messages(case["tool_results"]),
         },
         "candidate_next_action": candidate_action,
@@ -339,8 +370,10 @@ def judge_replay_candidate(
 
 def _tool_call_details(message: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
     raw_calls = message.get("tool_calls")
-    if not isinstance(raw_calls, list) or not raw_calls:
-        return bool(raw_calls), []
+    if raw_calls is None or raw_calls == []:
+        return False, []
+    if not isinstance(raw_calls, list):
+        return True, []
     details: list[dict[str, Any]] = []
     for call in raw_calls:
         function = call.get("function") if isinstance(call, dict) else None
@@ -392,7 +425,7 @@ def score_replay_candidate(
         "reference_arguments_match": None,
         "parallel_call_set_match": None,
     }
-    if not reference_is_tool:
+    if not reference_is_tool and not candidate_is_tool:
         return metrics
     if contract is None:
         raise PipelineError("tool replay scoring requires an inference contract")
@@ -758,6 +791,9 @@ def run_replay_evaluation(
                         _jsonl_dump(generations_path, generations)
                 candidate = generation["candidate"]
                 judgment = judge_replay_candidate(case, candidate, judge_model, chat_fn)
+                metrics = score_replay_candidate(case, candidate, request_contract)
+                if metrics.get("arguments_schema_valid") is False and _tool_call_details(candidate)[0]:
+                    judgment = {"pass": False, "reason": "Candidate tool calls violate the tools available at this assistant turn."}
                 if candidate.get("sampling", {}).get("format_valid") is False:
                     judgment = {"pass": False, "reason": "Response was truncated or contained a malformed tool call."}
                 scored[label] = {

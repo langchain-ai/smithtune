@@ -79,7 +79,7 @@ GPT-5.6 Terra on OpenAI. Choose models with `--judges`; other models use
 are frozen; council rules can change before judging starts. Use a new directory
 to change rules after votes or to review a different source selection.
 
-Preserve recorded messages and saved tool contracts. Labels remain local; these
+Preserve recorded messages and saved per-assistant tool availability. Labels remain local; these
 commands do not write trace feedback. Replay evaluation is separate under
 `evaluate`. Fireworks judging uses its official API. Direct Anthropic uses
 `ANTHROPIC_API_KEY`; `anthropic-gateway` uses `LANGSMITH_GATEWAY_API_KEY`.

@@ -9,8 +9,9 @@ from uuid import UUID
 import pytest
 
 from smithtune import cli, curation, dataset, dataset_workflow, triage, triage_judges, triage_source
+from smithtune.bindings import evidence_hash, read_bindings, tool_contract
 from smithtune.dataset_artifacts import load_conversation
-from smithtune.inference_contract import json_sha256, parse_inference_contract
+from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
 
@@ -188,7 +189,7 @@ def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
 def tool_conversation(name="lookup", args=None, result=True):
     api = API()
     conversation = [
-        {"role": "ai", "content": [{"type": "text", "text": "Looking it up."},
+        {"role": "ai", "id": "tool-output", "content": [{"type": "text", "text": "Looking it up."},
             {"type": "tool_call", "name": name, "args": args or {}, "id": "call-1"}]},
     ]
     if result:
@@ -202,6 +203,9 @@ def tool_conversation(name="lookup", args=None, result=True):
         if "/runs?" in command[2]:
             page = json.loads(response.stdout)
             page["items"][1]["extra"]["invocation_params"]["tools"] = [tool]
+            if command[2].split("/")[4] == uid(1):
+                page["items"].append({**copy.deepcopy(page["items"][1]), "id": uid(9999),
+                                      "outputs": {"messages": [conversation[0]]}})
             response.stdout = json.dumps(page)
         return response
 
@@ -257,14 +261,14 @@ def test_cached_triage_prunes_misplaced_system_messages_before_upload(tmp_path, 
     assert (tmp_path / "snapshot.json").read_bytes() == original
 
 
-def test_triage_accepts_valid_tool_calls_and_keeps_saved_contract(tmp_path):
+def test_triage_accepts_valid_tool_calls_and_keeps_saved_bindings(tmp_path):
     assert run(tmp_path, tool_conversation())["eligible_conversations"] == 1
     frozen = triage_source.load_snapshot(tmp_path)
     example, = triage.selected_examples(tmp_path)
     assert example["inputs"] == frozen["units"][0]["example"]["inputs"]
-    assert example["metadata"]["smithtune_triage"]["contract"] == frozen["units"][0]["contract"]
-    contract = parse_inference_contract(example["metadata"]["smithtune_triage"]["contract"])
-    assert dataset.prepare_sft_rows([example], contract=contract)
+    assert example["metadata"]["smithtune_source"] == frozen["units"][0]["example"]["metadata"]["smithtune_source"]
+    assert example["metadata"]["smithtune_triage"]["evidence_sha256"] == evidence_hash(example)
+    assert dataset.prepare_sft_rows([example])
 
 
 def test_triage_defers_reasoning_policy_to_preparation(tmp_path):
@@ -382,8 +386,8 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     assert all(command[2] in {"/api/v1/datasets", "/api/v1/examples"} for command, _ in api.calls)
     example = api.imported[0]
     assert example["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
-    contracts = dataset.capture_example_contracts(uid(100), [example], runner=lambda *_args, **_kw: pytest.fail("must not fetch changed tools"))
-    assert list(contracts[example["id"]].tools) == []
+    bindings = read_bindings(example["metadata"], example["inputs"]["messages"])
+    assert all(binding["tools"] == [] for binding in bindings.values())
     raw = tmp_path / "data/raw"
     raw.mkdir(parents=True)
     # Add independent source groups to exercise the normal 80/10/10 path.
@@ -394,6 +398,7 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
         item["metadata"]["source_scope_id"] = f"independent-{n}"
         item["inputs"]["messages"][-1]["content"] += f" variant-{n}"
         item["metadata"]["smithtune_triage"]["messages_sha256"] = json_sha256(item["inputs"]["messages"])
+        item["metadata"]["smithtune_triage"]["evidence_sha256"] = evidence_hash(item)
         examples.append(item)
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     manifest = dataset.prepare_dataset(uid(100), uid(200), DEFAULT_MODEL, tmp_path / "data", fetch=True, check_render=False)
@@ -494,7 +499,7 @@ def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
 def test_prepare_always_checks_triaged_message_integrity(tmp_path, monkeypatch, fetch, global_contract):
     run(tmp_path)
     examples = triage.selected_examples(tmp_path)
-    contract = parse_inference_contract(examples[0]["metadata"]["smithtune_triage"]["contract"]) if global_contract else None
+    contract = tool_contract([]) if global_contract else None
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     with pytest.raises(PipelineError, match="changed after judging"):

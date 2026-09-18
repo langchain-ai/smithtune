@@ -214,7 +214,10 @@ class InferenceContract:
         max_tokens: int,
         json_mode: bool = False,
     ) -> dict[str, Any]:
-        self.validate_messages(messages)
+        # Per-target replay has already validated each historical action with
+        # its own binding. Removed or changed tools must remain valid history.
+        if "message_index" not in self.provenance:
+            self.validate_messages(messages)
         if not isinstance(model, str) or not model:
             raise ContractError("model must be a non-empty string")
         if max_tokens < 1:

@@ -32,6 +32,14 @@ def import_rejection(example, workspace, *, runner, captured=None):
         reason = _malformed_trajectory_reason(example["id"], exc)
         if reason is None:
             raise
+    if reason is None and "smithtune_source" in example.get("metadata", {}):
+        from smithtune.bindings import validate_bound_messages
+        try:
+            validate_bound_messages(example)
+        except PipelineError as exc:
+            reason = str(exc)
+        else:
+            return None
     if reason is None:
         def read(command, *, capture):
             body = json.loads(command[command.index("--body") + 1]) if "--body" in command else None
@@ -99,7 +107,7 @@ def _action(incoming, existing, *, triaged):
         raise PipelineError("incoming example must contain a whole message trajectory without outputs")
     metadata = incoming.get("metadata") or {}
     if metadata.get("smithtune_triage") is not None and not triaged:
-        raise PipelineError("triaged updates require --triage-dir")
+        raise PipelineError("triaged updates require the saved council workflow")
     if existing is None:
         return "created", {"inputs": inputs, "outputs": None, "metadata": metadata}
     previous = existing.get("inputs")
@@ -110,11 +118,21 @@ def _action(incoming, existing, *, triaged):
     if len(messages) < len(previous_messages) or json_sha256(prefix) != json_sha256(previous):
         raise PipelineError(f"incoming trajectory is shorter or conflicts with destination example {existing['id']}; existing history must be an exact prefix")
     old_metadata = existing.get("metadata") or {}
+    incoming_bindings = metadata.get("smithtune_source")
+    previous_bindings = old_metadata.get("smithtune_source")
+    if incoming_bindings is not None or previous_bindings is not None:
+        from smithtune.bindings import read_bindings
+        if incoming_bindings is None or previous_bindings is None:
+            raise PipelineError("destination tool provenance differs; use a new dataset for per-assistant tools")
+        current = read_bindings(metadata, messages)
+        previous = read_bindings(old_metadata, previous_messages)
+        if any(json_sha256(current.get(index)) != json_sha256(binding) for index, binding in previous.items()):
+            raise PipelineError(f"tool availability conflicts with destination example {existing['id']}; bindings must preserve the existing prefix")
     same_messages = len(messages) == len(previous_messages)
     if old_metadata.get("smithtune_triage") is not None and not triaged:
         if same_messages:
             return "skipped", None
-        raise PipelineError(f"destination example {existing['id']} was triaged; rerun triage on the extended conversation and import with --triage-dir")
+        raise PipelineError(f"destination example {existing['id']} was triaged; rerun triage on the extended conversation and push the saved council workflow")
     if same_messages and (not triaged or old_metadata.get("smithtune_triage") == metadata.get("smithtune_triage")):
         return "skipped", None
     return "updated", {"inputs": inputs, "outputs": None, "metadata": {**old_metadata, **metadata}}

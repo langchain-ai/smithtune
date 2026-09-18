@@ -70,9 +70,9 @@ class Audit:
     readable_reasoning_blocks: int = 0
 
 
-def _run_langsmith(command: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_langsmith(command: list[str], *, capture: bool = False, input: str | None = None) -> subprocess.CompletedProcess[str]:
     try:
-        return _run(command, capture=capture)
+        return _run(command, capture=capture, **({"input": input} if input is not None else {}))
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
         raise PipelineError(detail) from None
@@ -110,18 +110,18 @@ def _langsmith_page_command(
     ]
 
 
-def _contract_read(command: list[str], *, runner: Callable[..., Any]) -> Any:
-    for attempt in range(6):
+def _contract_read(command: list[str], *, runner: Callable[..., Any], attempts: int = 6) -> Any:
+    for attempt in range(attempts):
         try:
             result = runner(command, capture=True)
             break
         except PipelineError as exc:
             retryable = re.search(r"\b(HTTP 429|context deadline exceeded|Client\.Timeout exceeded|request timed out|Query timeout exceeded)\b", str(exc), re.I)
-            if attempt == 5 or not retryable:
+            if attempt + 1 == attempts or not retryable:
                 raise
             delay = min(5 * 2**attempt + random.uniform(0, 1), 60)
             reason = "rate limit reached" if retryable[0].upper() == "HTTP 429" else "request timed out"
-            print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/5)", file=sys.stderr)
+            print(f"LangSmith {reason}; retrying in {delay:.1f}s ({attempt + 1}/{attempts - 1})", file=sys.stderr)
             time.sleep(delay)
     try:
         return json.loads(result.stdout)
@@ -140,11 +140,11 @@ def _read_contract_run(workspace_id: str, run_id: str, *, runner: Callable[..., 
     return run
 
 
-def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[..., Any]) -> str:
+def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[..., Any], read_attempts: int = 6) -> str:
     project = _contract_read([
         "langsmith", "api", f"/api/v1/sessions/{quote(project_id, safe='')}",
         "--workspace", workspace_id, "--method", "GET",
-    ], runner=runner)
+    ], runner=runner, attempts=read_attempts)
     if not isinstance(project, dict) or project.get("id") != project_id:
         raise PipelineError(f"LangSmith did not return the requested project {project_id}")
     start = project.get("start_time")
@@ -158,7 +158,7 @@ def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[
 
 
 def _query_contract_runs(
-    workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any],
+    workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any], read_attempts: int = 6,
 ) -> list[dict[str, Any]]:
     body = {
         "page_size": LANGSMITH_PAGE_SIZE,
@@ -180,7 +180,7 @@ def _query_contract_runs(
             response = _contract_read([
                 "langsmith", "api", "/api/v2/runs/query", "--workspace", workspace_id,
                 "--method", "POST", "--body", _canonical(body),
-            ], runner=runner)
+            ], runner=runner, attempts=read_attempts)
             if not isinstance(response, dict) or not isinstance(response.get("items"), list):
                 raise PipelineError("LangSmith returned an invalid run query page")
             for item in response["items"]:
@@ -571,6 +571,10 @@ def validate_trajectories(
             or saved_triage.get("messages_sha256") != json_sha256(messages)
         ):
             raise PipelineError(f"example {example_id}: triaged example messages changed after judging")
+        if saved_triage is not None and "smithtune_source" in metadata:
+            from smithtune.bindings import evidence_hash
+            if saved_triage.get("evidence_sha256") != evidence_hash(example):
+                raise PipelineError(f"example {example_id}: triaged evidence changed after judging")
         for position, message in enumerate(messages):
             try:
                 _validate_source_message(message)
@@ -927,75 +931,110 @@ def _example_contract_snapshot(
 
 
 def prepare_sft_rows(
-    examples: list[dict[str, Any]],
-    contract: InferenceContract | None = None,
-    *,
-    example_contracts: dict[str, InferenceContract] | None = None,
-    reasoning_policy: ReasoningPolicy = "omit",
-    model: ModelSpec | None = None,
-    workspace_id: str | None = None,
-    source_workspace_id: str | None = None,
-    exclusion_warnings: list[dict[str, Any]] | None = None,
+    examples: list[dict[str, Any]], contract: InferenceContract | None = None, *,
+    example_contracts=None, reasoning_policy: ReasoningPolicy = "omit",
+    model: ModelSpec | None = None, workspace_id: str | None = None,
+    source_workspace_id: str | None = None, exclusion_warnings=None,
 ) -> list[dict[str, Any]]:
-    """Convert validated LangSmith trajectories to provider-neutral SFT rows."""
+    """Keep canonical conversations; expand targets only at the rendering boundary."""
+    from smithtune.bindings import read_bindings, tool_contract
+
+    if example_contracts is not None:
+        raise PipelineError("legacy conversation-wide contracts require per-message re-capture")
     _validate_reasoning_policy(reasoning_policy)
     rows = []
     for source_index, example in enumerate(examples):
-        if example_contracts is not None:
-            if example["id"] not in example_contracts:
-                raise PipelineError(f"example {example['id']} has no captured tool schemas")
-            contract = example_contracts[example["id"]]
         identity = _source_identity(example)
-        messages = []
-        for position, source in enumerate(example["inputs"]["messages"]):
-            try:
-                converted = convert_message(source, reasoning_policy=reasoning_policy, model=model)
-            except PipelineError as exc:
-                raise PipelineError(f"example {example['id']} message {position}: {exc}") from exc
-            had_reasoning = isinstance(source["content"], list) and any(
-                part["type"] == "reasoning" for part in source["content"]
-            )
-            if had_reasoning and not _has_message_content(converted):
-                continue
-            messages.append(converted)
-        _validate_tool_pairs(messages, example["id"])
-        if not any(message["role"] == "assistant" and _has_message_content(message) for message in messages):
-            raise PipelineError(f"example {example['id']} has no assistant training target after reasoning conversion")
-        row = {
-            "messages": messages,
-            "_source": {
-                "example_id": example["id"],
-                **identity,
-                "source_index": source_index,
-                "metadata": copy.deepcopy(example["metadata"]),
-            },
-        }
+        try:
+            bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"]) if contract is None else None
+            messages, positions = [], []
+            for position, source in enumerate(example["inputs"]["messages"]):
+                try:
+                    converted = convert_message(source, reasoning_policy=reasoning_policy, model=model)
+                except PipelineError as exc:
+                    raise PipelineError(f"message {position}: {exc}") from exc
+                if source["role"] == "ai":
+                    current = contract or tool_contract(bindings[position]["tools"])
+                    current.validate_messages([converted])
+                if source["role"] == "ai" and not _has_message_content(converted):
+                    continue
+                messages.append(converted)
+                positions.append(position)
+            _validate_tool_pairs(messages, example["id"])
+            if not any(m["role"] == "assistant" for m in messages):
+                raise PipelineError("no assistant training target after reasoning conversion")
+        except (PipelineError, ContractError) as exc:
+            if exclusion_warnings is None:
+                raise PipelineError(f"example {example['id']} {exc}") from exc
+            exclusion_warnings.append({"code": "incompatible_inference_contract_excluded", "example_id": example["id"],
+                                       **identity, "reason": str(exc)})
+            continue
+        row = {"messages": messages, "tool_policy": "global_override" if contract else "per_assistant",
+               "_source": {"example_id": example["id"], **identity, "source_index": source_index,
+                           "message_positions": positions, "metadata": copy.deepcopy(example["metadata"])}}
         if workspace_id is not None:
             row["_source"]["source_key"] = list(_source_key(example, workspace_id, source_workspace_id))
         if contract is not None:
-            try:
-                contract.validate_messages(messages)
-            except ContractError as exc:
-                if exclusion_warnings is None:
-                    raise PipelineError(f"example {example['id']} violates inference contract: {exc}") from exc
-                reason = _recorded_tool_call_reason(exc)
-                warning = {
-                    "code": "incompatible_inference_contract_excluded",
-                    "example_id": example["id"],
-                    **identity,
-                    "reason": reason,
-                }
-                exclusion_warnings.append(warning)
-                print(
-                    f"Warning: excluding trajectory {example['id']} "
-                    f"({identity['source_scope']} {identity['source_scope_id']}): {reason}",
-                    file=sys.stderr,
-                )
-                continue
             row["tools"] = copy.deepcopy(list(contract.tools))
             row["_source"]["contract_sha256"] = contract.contract_sha256
         rows.append(row)
     return rows
+
+
+def capture_example_bindings(examples, workspace_id, *, runner=_run, source_workspace_id=None, checkpoint_path=None):
+    """Enrich unbound exports in memory using verified output identities only."""
+    from smithtune.bindings import capture_bindings
+    from smithtune.triage_source import query_runs, thread_trace_ids, _fetch
+
+    def read(command, **kwargs):
+        try:
+            return _fetch(command, runner=runner, cache_dir=Path("."), use_cache=False, **kwargs)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
+            raise PipelineError(detail) from None
+
+    identity = json_sha256({"schema_version": 1, "workspace_id": workspace_id,
+                           "source_workspace_id": source_workspace_id, "examples": examples})
+    captured = {}
+    if checkpoint_path is not None and checkpoint_path.exists():
+        saved = _load_json(checkpoint_path)
+        if saved.get("identity") == identity:
+            captured = saved.get("bindings")
+            if not isinstance(captured, dict) or saved.get("sha256") != json_sha256(captured):
+                raise PipelineError("saved assistant bindings hash mismatch; remove the capture checkpoint and retry")
+            if not set(captured) <= {example["id"] for example in examples}:
+                raise PipelineError("saved assistant bindings contain unknown examples")
+    enriched, failures = [], []
+    project_starts = {}
+    for original in examples:
+        example = copy.deepcopy(original)
+        metadata = example["metadata"]
+        if "smithtune_source" not in metadata and example["id"] in captured:
+            metadata["smithtune_source"] = copy.deepcopy(captured[example["id"]])
+        if "smithtune_source" not in metadata:
+            if metadata.get("smithtune_triage"):
+                failures.append({"code": "incompatible_inference_contract_excluded", "example_id": example["id"],
+                                 **_source_identity(example), "reason": "legacy triage evidence requires fresh pull and judging"})
+                continue
+            workspace, project, scope, scope_id = _source_key(example, workspace_id, source_workspace_id)
+            project_key = (workspace, project)
+            if scope == "thread" and project_key not in project_starts:
+                project_starts[project_key] = _project_start_time(workspace, project, runner=read, read_attempts=1)
+            traces = [scope_id] if scope == "trace" else thread_trace_ids(
+                workspace, project, scope_id, start_time=project_starts[project_key],
+                end_time=_utc_now(), runner=read)
+            runs = [run for tid in traces for run in query_runs(workspace, project, {"trace": tid}, runner=read)]
+            try:
+                metadata["smithtune_source"] = capture_bindings(example["inputs"]["messages"], runs)
+                captured[example["id"]] = metadata["smithtune_source"]
+                if checkpoint_path is not None:
+                    _json_dump(checkpoint_path, {"identity": identity, "bindings": captured, "sha256": json_sha256(captured)})
+            except PipelineError as exc:
+                failures.append({"code": "incompatible_inference_contract_excluded", "example_id": example["id"],
+                                 **_source_identity(example), "reason": str(exc)})
+                continue
+        enriched.append(example)
+    return enriched, failures
 
 
 def _split_key(row: dict[str, Any]) -> str:
@@ -1212,36 +1251,34 @@ def prepare_dataset(
     expected_count = len(source_examples)
     examples, malformed_warnings = _exclude_malformed_trajectories(source_examples)
     _validate_unique_sources(examples, workspace_id, source_workspace_id)
-    example_contracts = None
     contract_warnings: list[dict[str, Any]] = []
-    if inference_contract is None:
-        example_contracts = _example_contract_snapshot(
-            workspace_id, dataset_id, examples, source_sha, data_dir / "raw", fetch=fetch,
-            source_workspace_id=source_workspace_id, exclusion_warnings=contract_warnings,
-        )
-        excluded_contract_ids = {warning["example_id"] for warning in contract_warnings}
-        examples = [example for example in examples if example["id"] not in excluded_contract_ids]
-    rows = prepare_sft_rows(examples, inference_contract, example_contracts=example_contracts,
-                            reasoning_policy=reasoning_policy, model=model, workspace_id=workspace_id,
-                            source_workspace_id=source_workspace_id, exclusion_warnings=contract_warnings)
+    if inference_contract is None and any("smithtune_source" not in e["metadata"] for e in examples):
+        captured_path = data_dir / "raw" / "bound_examples.json"
+        if fetch:
+            examples, contract_warnings = capture_example_bindings(examples, workspace_id, source_workspace_id=source_workspace_id,
+                                                                  checkpoint_path=data_dir / "raw" / "bindings.partial.json")
+            _json_dump(captured_path, {"workspace_id": workspace_id, "source_sha256": source_sha, "source_workspace_id": source_workspace_id, "examples": examples, "exclusions": contract_warnings,
+                                       "sha256": json_sha256({"examples": examples, "exclusions": contract_warnings})})
+            (data_dir / "raw" / "bindings.partial.json").unlink(missing_ok=True)
+        elif captured_path.exists():
+            saved = _load_json(captured_path)
+            if saved.get("workspace_id") != workspace_id:
+                raise PipelineError("cached bindings use a different workspace; prepare again without --no-fetch")
+            if saved.get("source_sha256") != source_sha:
+                raise PipelineError("saved per-message capture differs from the export; prepare again")
+            if saved.get("source_workspace_id") != source_workspace_id:
+                raise PipelineError("cached bindings use a different source workspace; prepare again")
+            if saved.get("sha256") != json_sha256({"examples": saved.get("examples"), "exclusions": saved.get("exclusions")}):
+                raise PipelineError("cached per-assistant bindings hash mismatch; prepare again without --no-fetch")
+            examples, contract_warnings = saved["examples"], saved["exclusions"]
+        else:
+            raise PipelineError("export has no per-assistant bindings; prepare without --no-fetch to capture provenance")
+    rows = prepare_sft_rows(examples, inference_contract, reasoning_policy=reasoning_policy, model=model,
+                            workspace_id=workspace_id, source_workspace_id=source_workspace_id,
+                            exclusion_warnings=contract_warnings)
     excluded_contract_ids = {warning["example_id"] for warning in contract_warnings}
     examples = [example for example in examples if example["id"] not in excluded_contract_ids]
-    if example_contracts is not None:
-        example_contracts = {
-            example_id: contract for example_id, contract in example_contracts.items()
-            if example_id not in excluded_contract_ids
-        }
     audit = validate_trajectories(examples, len(examples))
-    description_replacements = []
-    captured_contracts = example_contracts or ({"global": inference_contract} if inference_contract else {})
-    for example_id, contract in captured_contracts.items():
-        for replacement in contract.provenance.get("tool_description_replacements", []):
-            description_replacements.append({
-                **replacement,
-                **({"example_id": example_id} if example_contracts is not None else {}),
-                "source_workspace_id": contract.provenance.get("source_workspace_id"),
-                "source_thread_id": contract.provenance.get("source_thread_id"),
-            })
     messages_removed = audit.messages - sum(len(row["messages"]) for row in rows)
     reasoning_preserved = audit.readable_reasoning_blocks if reasoning_policy == "preserve" else 0
     context_rejected: list[dict[str, Any]] = []
@@ -1253,7 +1290,7 @@ def prepare_dataset(
         warning for warning in context_rejected
         if warning.get("code") == "renderer_incompatible_trajectory_excluded"
     ]
-    for warning in renderer_warnings:
+    for warning in [*contract_warnings, *renderer_warnings]:
         print(
             f"Warning: excluding trajectory {warning['example_id']} "
             f"({warning['source_scope']} {warning['source_scope_id']}): {warning['reason']}",
@@ -1271,10 +1308,11 @@ def prepare_dataset(
         ),
         "incompatible_inference_contracts": len(contract_warnings),
         "renderer_incompatible_trajectories": len(renderer_warnings),
-        "tool_description_replacements": len(description_replacements),
     }
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "tool_policy": "global_override" if inference_contract else "per_assistant",
+        "target_policy": "each_assistant_once",
         "created_at_utc": _utc_now(),
         "langsmith": {
             "workspace_id": workspace_id,
@@ -1294,7 +1332,7 @@ def prepare_dataset(
         "conversion": {
             "roles": ROLE_MAP,
             "tool_calls": "StandardMessage tool_call blocks to OpenAI tool_calls",
-            "tool_schemas_added": inference_contract is not None or example_contracts is not None,
+            "tool_schemas_added": True,
             "system_prompts_added": False,
             "messages_filtered": messages_removed > 0,
             "messages_removed": messages_removed,
@@ -1322,10 +1360,6 @@ def prepare_dataset(
     })
     if inference_contract is not None:
         manifest["inference_contract"] = inference_contract.manifest_summary()
-    if example_contracts is not None:
-        payload = {key: contract.to_dict() for key, contract in example_contracts.items()}
-        manifest["example_contracts"] = {"count": len(payload), "sha256": json_sha256(payload)}
-        _json_dump(data_dir / "prepared" / "example_contracts.json", payload)
     _jsonl_dump(data_dir / "prepared" / "train.jsonl", train)
     _jsonl_dump(data_dir / "prepared" / "validation.jsonl", validation)
     _jsonl_dump(data_dir / "prepared" / "test.jsonl", test)
@@ -1334,7 +1368,6 @@ def prepare_dataset(
         data_dir / "prepared" / "warnings.json",
         [*audit.duplicate_message_warnings, *preparation_warnings],
     )
-    _json_dump(data_dir / "prepared" / "tool_description_replacements.json", description_replacements)
     _json_dump(data_dir / "prepared" / "rejected.json", rejected)
     if inference_contract is not None:
         _json_dump(
@@ -1438,3 +1471,8 @@ def _prepared_example_contracts(
     if summary.get("count") != len(contracts):
         raise PipelineError("prepared example inference contract count differs from the manifest")
     return contracts
+
+
+def require_current_preparation(manifest):
+    if manifest.get("schema_version") != 2 or manifest.get("target_policy") != "each_assistant_once":
+        raise PipelineError("prepared artifacts predate per-assistant tools and target-only loss; run prepare again")

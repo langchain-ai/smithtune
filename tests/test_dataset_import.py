@@ -204,7 +204,8 @@ def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
     dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), **{key: value for key, value in source().items() if key != "seed"})
     old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
     old.update(id=uid(1), dataset_id=uid(200))
-    old["inputs"]["messages"] = old["inputs"]["messages"][:2]
+    old["inputs"]["messages"] = old["inputs"]["messages"][:3]
+    old["metadata"]["smithtune_source"]["assistant_runs"] = old["metadata"]["smithtune_source"]["assistant_runs"][:1]
     destination = API([old])
     original = dataset_workflow.run
     monkeypatch.setattr(dataset_workflow, "run", lambda *a, **kw: original(*a, **kw, runner=destination))
@@ -222,7 +223,8 @@ def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypat
     incoming, = triage.selected_examples(tmp_path)
     old = copy.deepcopy(incoming)
     old.update(id=uid(1), dataset_id=uid(200))
-    old["inputs"]["messages"] = old["inputs"]["messages"][:2]
+    old["inputs"]["messages"] = old["inputs"]["messages"][:3]
+    old["metadata"]["smithtune_source"]["assistant_runs"] = old["metadata"]["smithtune_source"]["assistant_runs"][:1]
     old["metadata"].update(note="retain", smithtune_triage={"identity_sha256": "old", "contract": {"old": True}})
     api = API([old])
     original = dataset_workflow.run
@@ -234,7 +236,8 @@ def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypat
     assert body["metadata"]["smithtune_triage"] == incoming["metadata"]["smithtune_triage"]
     assert body["metadata"]["note"] == "retain"
     assert body["inputs"] == incoming["inputs"]
-    assert len(dataset.capture_example_contracts(uid(100), [{"id": uid(1), **body}])) == 1
+    from smithtune.bindings import validate_bound_messages
+    assert len(validate_bound_messages({"id": uid(1), **body})) == 2
 
 
 def test_failed_triage_never_reaches_destination(tmp_path):

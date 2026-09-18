@@ -156,6 +156,8 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
                 "runner": runner_mode, "max_output_tokens": max_output_tokens,
                 "reasoning": {"fireworks": "none", "gpt-5.6-terra": "none"},
                 "prefilter": "multimodal-and-provider-context-v1", "judging_unit": "conversation-v1"}
+    if any("assistant_runs" in trajectory for trajectory in judging):
+        identity["tool_evidence"] = "per-assistant-v1"
     identity["reasoning"].update({judge["model"]: FIREWORKS_REASONING[judge["model"]] for judge in config["judges"]
                                   if judge["provider"] == "fireworks" and judge["model"] in FIREWORKS_REASONING})
     if any(judge["provider"] == "baseten" for judge in config["judges"]):
@@ -377,9 +379,14 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_c
             example = {**unit["example"], "metadata": dict(unit["example"]["metadata"])}
         else:
             example = load_conversation(save_conversation(triage_dir, unit["example"]))
-        contract = parse_inference_contract(unit["contract"])
-        example["metadata"]["smithtune_triage"] = {"identity_sha256": json_sha256(identity),
-            "messages_sha256": json_sha256(example["inputs"]["messages"]), "contract": contract.to_dict()}
+        evidence = {"identity_sha256": json_sha256(identity),
+                    "messages_sha256": json_sha256(example["inputs"]["messages"])}
+        if "smithtune_source" in example["metadata"]:
+            from smithtune.bindings import evidence_hash
+            evidence["evidence_sha256"] = evidence_hash(example)
+        else:
+            evidence["contract"] = parse_inference_contract(unit["contract"]).to_dict()
+        example["metadata"]["smithtune_triage"] = evidence
         selected.append(example)
     if not selected and not allow_empty:
         raise PipelineError("no complete, kept conversations are eligible for training")

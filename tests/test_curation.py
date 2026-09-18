@@ -446,7 +446,8 @@ def test_create_download_prepare(tmp_path):
     rows = [json.loads(line) for line in (data_dir / "prepared" / "train.jsonl").read_text().splitlines()]
     # Provider JSONL strips provenance; the preserved raw examples keep it.
     assert all(row["messages"][0]["role"] == "user" for row in rows)
-    source_rows = dataset.prepare_sft_rows(api.examples)
+    from binding_fixtures import bound_example
+    source_rows = dataset.prepare_sft_rows([bound_example(ex) for ex in api.examples])
     assert sum(row["_source"]["source_scope"] == "thread" for row in source_rows) == 8
     assert sum(row["_source"]["source_scope"] == "trace" for row in source_rows) == 4
 

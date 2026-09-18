@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from binding_fixtures import bound_row
+
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import io
@@ -1455,17 +1457,12 @@ def test_render_row_enforces_the_selected_model_context_limit(
 
 
 def test_render_row_preserves_tool_declarations_and_masks_role_boundaries():
-    calls: list[dict] = []
+    calls = []
 
-    def render(messages, *, tools):
-        calls.append({"messages": messages, "tools": tools})
-        # system | user | assistant tool call | tool result | assistant text
-        return [SimpleNamespace(
-            token_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9],
-            token_weights=[0, 0, 1, 1, 0, 0, 0, 1, 1],
-        )]
+    def render(messages, *, tools, final_target):
+        calls.append({"messages": messages, "tools": tools, "final_target": final_target})
+        return [SimpleNamespace(token_ids=[1, 2, 3, 4], token_weights=[0, 0, 1, 1])]
 
-    renderer = SimpleNamespace(render=render)
     row = _row()
     row["messages"] = [
         {"role": "system", "content": "You may use tools."},
@@ -1474,23 +1471,15 @@ def test_render_row_preserves_tool_declarations_and_masks_role_boundaries():
         {"role": "tool", "tool_call_id": "call-1", "content": "72"},
         {"role": "assistant", "content": "It is 72 degrees."},
     ]
-
-    datum = baseten.render_row(
-        row, _model(), loops_types=FAKE_LOOPS_TYPES, renderer=renderer
-    )[0]
-
-    assert calls == [{"messages": row["messages"], "tools": row["tools"]}]
-    assert datum.loss_fn_inputs["target_tokens"].data == [
-        -100,
-        3,
-        4,
-        -100,
-        -100,
-        -100,
-        8,
-        9,
-    ]
-    assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    bound_row(row)
+    datums = baseten.render_row(row, _model(), loops_types=FAKE_LOOPS_TYPES,
+                               renderer=SimpleNamespace(render=render))
+    assert calls == [{"messages": row["messages"][:end], "tools": row["tools"], "final_target": True}
+                     for end in (3, 5)]
+    assert len(datums) == 2
+    for datum in datums:
+        assert datum.loss_fn_inputs["target_tokens"].data == [-100, 3, 4]
+        assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0, 1.0]
 
 
 @pytest.mark.parametrize("limit", [131_072, 262_144])
@@ -1573,11 +1562,11 @@ def _install_renderer_output(monkeypatch: pytest.MonkeyPatch, tokens=None, weigh
 
 
 def _row() -> dict:
-    return {
+    return bound_row({
         "messages": [{"role": "user", "content": "Hello"}],
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
-    }
+    })
 
 
 def _model() -> ModelSpec:
@@ -1629,6 +1618,7 @@ def _write_prepared_dataset(root: Path, *, model: ModelSpec | None = None, max_c
     # Older prepared artifacts retain their recorded 131K trainer limit.
     model = model or replace(baseten.DEFAULT_MODEL, trainer_max_seq_len=131_072)
     manifest = {
+        "schema_version": 2, "target_policy": "each_assistant_once",
         "langsmith": {
             "workspace_id": "workspace-id",
             "dataset_id": "dataset-id",

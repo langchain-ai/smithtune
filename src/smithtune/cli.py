@@ -142,7 +142,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
     prep.add_argument("--source-workspace-id", help="default workspace for automatic source tool capture; example metadata.source_workspace_id takes precedence (default: dataset workspace)")
-    prep.add_argument("--inference-contract", type=Path, help="optional global tool-schema override; by default collect tools from each example's source LLM runs")
+    prep.add_argument("--inference-contract", type=Path, help="explicit global tool-schema override; default uses recorded per-assistant tool availability")
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
         help="omit source reasoning from SFT and replay (default), or explicitly preserve readable reasoning",
