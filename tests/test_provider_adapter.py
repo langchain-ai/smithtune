@@ -324,6 +324,7 @@ def test_fireworks_training_configuration_is_owned_by_provider(tmp_path, monkeyp
     (prepared / "manifest.json").write_text(
         json.dumps(
             {
+                "schema_version": 2, "target_policy": "each_assistant_once",
                 "langsmith": {"examples": 100},
                 "split": {"train": 80, "validation": 10, "test": 10},
                 "model": model.__dict__,
@@ -361,6 +362,7 @@ def test_fireworks_provider_rejects_a_baseten_prepared_manifest(tmp_path):
     (prepared / "manifest.json").write_text(
         json.dumps(
             {
+                "schema_version": 2, "target_policy": "each_assistant_once",
                 "langsmith": {"examples": 100},
                 "split": {"train": 90, "validation": 10, "test": 0},
                 "model": baseten.MODEL_SPECS["qwen3p8-27b"].__dict__,
@@ -388,6 +390,7 @@ def test_fireworks_provider_train_rejects_a_baseten_prepared_manifest(tmp_path):
     (prepared / "manifest.json").write_text(
         json.dumps(
             {
+                "schema_version": 2, "target_policy": "each_assistant_once",
                 "langsmith": {"examples": 100},
                 "split": {"train": 90, "validation": 10, "test": 0},
                 "model": baseten.MODEL_SPECS["qwen3p8-27b"].__dict__,
@@ -415,8 +418,7 @@ def test_fireworks_provider_train_rejects_a_baseten_prepared_manifest(tmp_path):
 @pytest.mark.parametrize("provider", ["baseten", "fireworks"])
 def test_cli_cross_workspace_preparation(tmp_path, monkeypatch, capsys, provider):
     from test_example_tools import example
-    from test_tool_capture import llm
-    from smithtune.inference_contract import contract_from_runs, parse_inference_contract
+    from binding_fixtures import bound_example
 
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     module = baseten if provider == "baseten" else fireworks
@@ -427,19 +429,18 @@ def test_cli_cross_workspace_preparation(tmp_path, monkeypatch, capsys, provider
     def download(workspace, dataset_id, raw):
         calls.append(("download", workspace))
         examples = [example(1)]
+        del examples[0]["metadata"]["smithtune_source"]
         raw.mkdir(parents=True)
         (raw / "examples.json").write_text(json.dumps(examples))
         (raw / "dataset-export.json").write_text(json.dumps([{"inputs": examples[0]["inputs"]}]))
         (raw / "dataset.json").write_text(json.dumps({"id": dataset_id, "example_count": 1}))
 
-    def capture(workspace, examples, *, source_workspace_id, checkpoint_path, exclusion_warnings=None):
+    def capture(examples, workspace, *, source_workspace_id, checkpoint_path=None):
         calls.append(("capture", workspace, source_workspace_id))
-        payload = contract_from_runs([llm("run-1", [])], workspace_id=source_workspace_id)
-        payload["provenance"]["source_example_id"] = examples[0]["id"]
-        return {examples[0]["id"]: parse_inference_contract(payload)}
+        return [bound_example(e, tools=[]) for e in examples], []
 
     monkeypatch.setattr(dataset, "download_dataset", download)
-    monkeypatch.setattr(dataset, "capture_example_contracts", capture)
+    monkeypatch.setattr(dataset, "capture_example_bindings", capture)
     monkeypatch.setattr(sys, "argv", [
         "smithtune", "prepare", "--provider", provider, "--model", "qwen3p8-27b",
         "--workspace-id", "dataset-workspace", "--source-workspace-id", "trace-workspace",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from binding_fixtures import bound_row
+
 import copy
 import json
 import sys
@@ -172,20 +174,21 @@ def test_invalid_tool_arguments_are_rejected(arguments):
 def test_baseten_preparation_and_datum_conversion_share_native_renderer(monkeypatch):
     native = HFRenderer(baseten.DEFAULT_MODEL, _tokenizer())
     monkeypatch.setattr(rendering, "load_training_renderer", lambda model: native)
-    row = {"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "example", "source_scope": "thread", "source_scope_id": "thread"}}
-    token_datum = native.render(MESSAGES, TOOLS)[0]
+    row = bound_row({"messages": MESSAGES, "tools": TOOLS, "_source": {"example_id": "example", "source_scope": "thread", "source_scope_id": "thread"}})
+    tokens = rendering.render_row_tokens(row, baseten.DEFAULT_MODEL, renderer=native)
+    token_datum = tokens[-1]
     limit = len(token_datum.token_ids)
     model = replace(baseten.DEFAULT_MODEL, max_seq_len=limit, trainer_max_seq_len=limit)
     accepted, rejected, audit = rendering.validate_model_context([row], model)
     assert accepted == [row] and rejected == []
-    assert audit["target_tokens"] == sum(token_datum.token_weights)
+    assert audit["target_tokens"] == sum(sum(d.token_weights) for d in tokens)
     assert rendering.validate_model_context([row], replace(model, max_seq_len=limit - 1))[0] == []
     loops_types = SimpleNamespace(
         ModelInput=SimpleNamespace(from_ints=lambda ids: ids),
         TensorData=lambda **kwargs: SimpleNamespace(**kwargs),
         Datum=lambda **kwargs: SimpleNamespace(**kwargs),
     )
-    datum = baseten.render_row(row, model, loops_types=loops_types, renderer=native)[0]
+    datum = baseten.render_row(row, model, loops_types=loops_types, renderer=native)[-1]
     assert datum.model_input == token_datum.token_ids[:-1]
     assert datum.loss_fn_inputs["weights"].data == token_datum.token_weights[1:]
     assert datum.loss_fn_inputs["target_tokens"].data == [

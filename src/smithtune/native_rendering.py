@@ -8,7 +8,7 @@ from smithtune.hf_rendering import TokenDatum, _normalize_messages, template_sha
 from smithtune.providers.base import ModelSpec, PipelineError
 
 
-NATIVE_RENDERING_VERSION = "smithtune-native-prefix-v1"
+NATIVE_RENDERING_VERSION = "smithtune-native-prefix-v2"
 NATIVE_MODELS = {
     "hf_prefix_kimi_k3": ("moonshotai/Kimi-K3", "preserved"),
     "hf_prefix_qwen3_5": ("Qwen/Qwen3.5-9B", "interleaved"),
@@ -60,12 +60,12 @@ class NativePrefixRenderer:
             raise PipelineError("native response boundary is not a single special token")
         return tokens[0]
 
-    def render(self, messages: list[dict[str, Any]], tools: Any = None) -> list[TokenDatum]:
+    def render(self, messages: list[dict[str, Any]], tools: Any = None, *, final_target=False) -> list[TokenDatum]:
         messages = _normalize_messages(messages)
         datums: list[TokenDatum] = []
         pending: TokenDatum | None = None
         for index, message in enumerate(messages):
-            if message["role"] != "assistant":
+            if message["role"] != "assistant" or (final_target and index != len(messages) - 1):
                 continue
             prompt = self._tokens(messages[:index], tools, prompt=True)
             tokens = self._tokens(messages[:index + 1], tools, prompt=False)

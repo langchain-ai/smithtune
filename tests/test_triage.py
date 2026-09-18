@@ -9,8 +9,9 @@ from uuid import UUID
 import pytest
 
 from smithtune import cli, curation, dataset, dataset_workflow, triage, triage_judges, triage_source
+from smithtune.bindings import evidence_hash, read_bindings, tool_contract
 from smithtune.dataset_artifacts import load_conversation
-from smithtune.inference_contract import json_sha256, parse_inference_contract
+from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
 
@@ -150,7 +151,7 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     assert triage_source.snapshot(source(), tmp_path, runner=only_membership) == frozen
 
 
-def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
+def test_snapshot_retains_missing_root_but_filters_before_judging(tmp_path):
     api = API()
 
     def missing_root(command, **kwargs):
@@ -164,7 +165,8 @@ def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
     result = run(tmp_path, missing_root)
     frozen = triage_source.load_snapshot(tmp_path)
     assert all(trace["root_run_id"] is None and trace["source_warnings"] for trace in frozen["traces"])
-    assert result["kept"] == 1 and result["eligible_conversations"] == 0
+    assert result["kept"] == 0 and result["eligible_conversations"] == 0
+    assert result["filtered_training"] == 1
     assert frozen["units"][0]["training_error"] == "conversation source has a missing root run"
     with pytest.raises(PipelineError, match="no complete, kept"):
         triage.selected_examples(tmp_path)
@@ -185,12 +187,14 @@ def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
                for line in (tmp_path / "labels.jsonl").read_text().splitlines())
 
 
-def tool_conversation(name="lookup", args=None, result=True):
+def tool_conversation(name="lookup", args=None, result=True, repeat=False):
     api = API()
     conversation = [
-        {"role": "ai", "content": [{"type": "text", "text": "Looking it up."},
+        {"role": "ai", "id": "tool-output", "content": [{"type": "text", "text": "Looking it up."},
             {"type": "tool_call", "name": name, "args": args or {}, "id": "call-1"}]},
     ]
+    if repeat:
+        conversation[0]["content"].append(copy.deepcopy(conversation[0]["content"][-1]))
     if result:
         conversation.append({"role": "tool", "content": "done", "tool_call_id": "call-1"})
     api.trajectory_pages[None]["messages"][2:2] = conversation
@@ -202,6 +206,9 @@ def tool_conversation(name="lookup", args=None, result=True):
         if "/runs?" in command[2]:
             page = json.loads(response.stdout)
             page["items"][1]["extra"]["invocation_params"]["tools"] = [tool]
+            if command[2].split("/")[4] == uid(1):
+                page["items"].append({**copy.deepcopy(page["items"][1]), "id": uid(9999),
+                                      "outputs": {"messages": [conversation[0]]}})
             response.stdout = json.dumps(page)
         return response
 
@@ -212,6 +219,7 @@ def tool_conversation(name="lookup", args=None, result=True):
     ({"name": "missing_tool"}, "unknown tool missing_tool"),
     ({"args": {"limit": "many"}}, "do not match its JSON Schema"),
     ({"result": False}, "unmatched tool calls or results"),
+    ({"repeat": True}, "repeats tool call id"),
 ])
 @pytest.mark.parametrize("cached", [False, True])
 def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, error, cached):
@@ -228,10 +236,17 @@ def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, 
 
         def api(*_a, **_kw):
             pytest.fail("cached source was fetched again")
-    summary = run(tmp_path, api)
+    def unexpected_judge(*args):
+        pytest.fail("invalid trajectory reached the council")
+
+    monkeypatch.setattr(triage, "check_credentials", unexpected_judge)
+    summary = triage.run_triage(source(), tmp_path, runner=api, judge_call=unexpected_judge, confirm=True)
     frozen = triage_source.load_snapshot(tmp_path)
     assert error in triage_source.training_error(frozen["units"][0])
-    assert summary["kept"] == 1  # Compatibility does not change the quality votes.
+    assert summary["kept"] == 0
+    assert summary["filtered_training"] == 1
+    assert summary["incomplete"] == 0
+    assert error in json.loads((tmp_path / "labels.jsonl").read_text())["reason"]
     assert summary["eligible_conversations"] == 0
     assert summary["unsupported_training_conversations"] == 1
     with pytest.raises(PipelineError, match="no complete, kept"):
@@ -257,14 +272,100 @@ def test_cached_triage_prunes_misplaced_system_messages_before_upload(tmp_path, 
     assert (tmp_path / "snapshot.json").read_bytes() == original
 
 
-def test_triage_accepts_valid_tool_calls_and_keeps_saved_contract(tmp_path):
+
+@pytest.mark.parametrize("runner_mode", ["api", "deepagent"])
+@pytest.mark.parametrize("issue,reason", [
+    ("system", "misplaced system message"),
+    ("builtin", "provider built-in tool"),
+    ("missing_tools", "unknown tool availability"),
+])
+def test_invalid_trajectories_skip_all_paid_work(tmp_path, monkeypatch, runner_mode, issue, reason):
+    api = API()
+    if issue == "system":
+        api.trajectory_pages["next"]["messages"].insert(0, {"role": "system", "content": "New instructions."})
+
+    def runner(command, **kwargs):
+        response = api(command, **kwargs)
+        if "/runs?" in command[2] and issue != "system":
+            page = json.loads(response.stdout)
+            params = page["items"][1]["extra"]["invocation_params"]
+            if issue == "builtin":
+                params["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+            else:
+                params.pop("tools")
+            response.stdout = json.dumps(page)
+        return response
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("ineligible trajectories must not require credentials or inference dependencies")
+
+    monkeypatch.setattr(triage, "check_credentials", unexpected)
+    monkeypatch.setattr(triage, "api_judge", unexpected)
+    monkeypatch.setattr(triage, "deepagent_judge", unexpected)
+    preview = triage.run_triage(source(), tmp_path, runner=runner, runner_mode=runner_mode, dry_run=True)
+    assert preview["filtered_training"] == 1
+    assert preview["judge_tasks"] == 0
+    assert reason in preview["rejections"][0]["reason"]
+    summary = triage.run_triage(source(), tmp_path, runner=unexpected, runner_mode=runner_mode, confirm=True)
+    assert summary["status"] == "complete" and summary["filtered_training"] == 1
+    assert (tmp_path / "judgments.jsonl").read_text() == ""
+    assert reason in json.loads((tmp_path / "labels.jsonl").read_text())["reason"]
+    assert triage.selected_examples(tmp_path, require_complete=True, allow_empty=True) == []
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_prefilter_mixed_trajectories_preserves_completed_votes(tmp_path, monkeypatch, cached):
+    api = API()
+    api.trajectory_pages["next"]["messages"].insert(0, {"role": "system", "content": "Late instructions."})
+    api.root_pages[0].append({"trace_id": uid(3), "thread_id": None, "start_time": "2026-09-02T00:00:00Z"})
+    saved_votes = []
+    if cached:
+        def old_judge(slot, prompt, tokens):
+            if len(json.loads(prompt[-1]["content"])["untrusted_trajectory"]) > 3:
+                raise PipelineError("temporary failure")
+            return judge_call(slot, prompt, tokens)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(triage_source, "training_error", lambda _: None)
+            patch.setattr(triage, "training_error", lambda _: None)
+            summary = triage.run_triage(source(), tmp_path, runner=api, judge_call=old_judge, confirm=True, attempts=1)
+            assert summary["incomplete"] == 1 and summary["kept"] == 1
+        saved_votes = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
+        # Historical incomplete labels are validated, then invalid trajectories
+        # are excluded without forcing more votes before upload.
+        assert len(triage.selected_examples(tmp_path, require_complete=True)) == 1
+        identity = (tmp_path / "triage-config.json").read_bytes()
+        snapshot = (tmp_path / "snapshot.json").read_bytes()
+        def api(*args, **kwargs):
+            pytest.fail("resume must not fetch saved trajectories")
+
+    seen = []
+    def judge(slot, prompt, tokens):
+        assert not cached, "completed valid votes must be reused"
+        assert len(json.loads(prompt[-1]["content"])["untrusted_trajectory"]) == 3
+        seen.append(slot["name"])
+        return judge_call(slot, prompt, tokens)
+
+    plan = triage.run_triage(source(), tmp_path, runner=api, dry_run=True)
+    assert plan["filtered_training"] == 1 and plan["judge_tasks"] == plan["judges"]
+    summary = triage.run_triage(source(), tmp_path, runner=api, judge_call=judge, confirm=True)
+    assert summary["status"] == "complete" and summary["kept"] == 1 and summary["filtered_training"] == 1
+    assert len(triage.selected_examples(tmp_path, require_complete=True)) == 1
+    assert len(seen) == (0 if cached else plan["judges"])
+    if cached:
+        assert [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()] == saved_votes
+        assert (tmp_path / "triage-config.json").read_bytes() == identity
+        assert (tmp_path / "snapshot.json").read_bytes() == snapshot
+
+
+def test_triage_accepts_valid_tool_calls_and_keeps_saved_bindings(tmp_path):
     assert run(tmp_path, tool_conversation())["eligible_conversations"] == 1
     frozen = triage_source.load_snapshot(tmp_path)
     example, = triage.selected_examples(tmp_path)
     assert example["inputs"] == frozen["units"][0]["example"]["inputs"]
-    assert example["metadata"]["smithtune_triage"]["contract"] == frozen["units"][0]["contract"]
-    contract = parse_inference_contract(example["metadata"]["smithtune_triage"]["contract"])
-    assert dataset.prepare_sft_rows([example], contract=contract)
+    assert example["metadata"]["smithtune_source"] == frozen["units"][0]["example"]["metadata"]["smithtune_source"]
+    assert example["metadata"]["smithtune_triage"]["evidence_sha256"] == evidence_hash(example)
+    assert dataset.prepare_sft_rows([example])
 
 
 def test_triage_defers_reasoning_policy_to_preparation(tmp_path):
@@ -382,8 +483,8 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     assert all(command[2] in {"/api/v1/datasets", "/api/v1/examples"} for command, _ in api.calls)
     example = api.imported[0]
     assert example["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
-    contracts = dataset.capture_example_contracts(uid(100), [example], runner=lambda *_args, **_kw: pytest.fail("must not fetch changed tools"))
-    assert list(contracts[example["id"]].tools) == []
+    bindings = read_bindings(example["metadata"], example["inputs"]["messages"])
+    assert all(binding["tools"] == [] for binding in bindings.values())
     raw = tmp_path / "data/raw"
     raw.mkdir(parents=True)
     # Add independent source groups to exercise the normal 80/10/10 path.
@@ -394,6 +495,7 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
         item["metadata"]["source_scope_id"] = f"independent-{n}"
         item["inputs"]["messages"][-1]["content"] += f" variant-{n}"
         item["metadata"]["smithtune_triage"]["messages_sha256"] = json_sha256(item["inputs"]["messages"])
+        item["metadata"]["smithtune_triage"]["evidence_sha256"] = evidence_hash(item)
         examples.append(item)
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     manifest = dataset.prepare_dataset(uid(100), uid(200), DEFAULT_MODEL, tmp_path / "data", fetch=True, check_render=False)
@@ -494,7 +596,7 @@ def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
 def test_prepare_always_checks_triaged_message_integrity(tmp_path, monkeypatch, fetch, global_contract):
     run(tmp_path)
     examples = triage.selected_examples(tmp_path)
-    contract = parse_inference_contract(examples[0]["metadata"]["smithtune_triage"]["contract"]) if global_contract else None
+    contract = tool_contract([]) if global_contract else None
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     with pytest.raises(PipelineError, match="changed after judging"):

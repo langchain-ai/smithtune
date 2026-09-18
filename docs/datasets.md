@@ -6,7 +6,7 @@ to inspect or change the plan before continuing.
 
 | Command | Behavior |
 | --- | --- |
-| `dataset pull DIR` | Download trajectories and their tool contracts |
+| `dataset pull DIR` | Download trajectories and per-assistant tool lists |
 | `dataset triage DIR` | Preview council judging; `--confirm` runs it |
 | `dataset push DIR` | Preview upload; `--confirm` uploads |
 | `dataset create DIR` | Download, optionally judge, and upload |
@@ -68,8 +68,9 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
 - Source settings are frozen in the directory. Use a new directory to select a
   different project, time window, filter, or limit.
 
-Whole trajectories with invalid messages or incompatible tool contracts are
-excluded from upload. Recorded messages are preserved. The result includes
+Whole trajectories with invalid messages or unsupported tool evidence are
+excluded before council calls and upload. The triage preview lists rejection
+reasons and counts only eligible judge tasks. Recorded messages are preserved. The result includes
 `eligible` and `rejected` counts; saved units retain validation errors. Model-specific
 rendering and context checks remain in `prepare`.
 
@@ -115,7 +116,9 @@ source workspace. The destination is saved for subsequent commands.
 Sources match by workspace, project, scope, and scope ID. Unchanged examples are
 skipped. Longer trajectories extend the existing example only when its messages
 are an exact prefix, retaining its ID and unrelated metadata. Conflicting or
-shorter histories stop the import. Run one import per destination at a time.
+shorter histories stop the import. Existing tool lists and producing-run identities must also match the message
+prefix. Use a new dataset when the destination lacks this per-assistant evidence.
+Run one import per destination at a time.
 
 ```bash
 smithtune dataset resume data/datasets/my-sft
@@ -132,4 +135,5 @@ For older checkpoints, `resume DIR --confirm` can finish direct imports; saved
 triage snapshots can use `triage`, `push`, and `resume`. Receipts predating the
 recovery format still require inspection and a new directory with `--dataset-id`.
 
-After upload, pass the returned dataset ID to `smithtune prepare`.
+After upload, pass the returned dataset ID to `smithtune prepare`. Saved tool
+availability travels with the examples; see [per-assistant tools](reference.md#per-assistant-tools-and-training-targets).

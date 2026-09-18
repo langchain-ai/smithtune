@@ -20,6 +20,21 @@ from smithtune.providers.fireworks_sampling import create_service
 from smithtune.providers.base import PipelineError
 
 
+def _render_conversation(row):
+    """Worker entry point shared by actual training and eager validation."""
+    from training.recipes import sft_loop
+    from smithtune.bindings import training_targets
+    from smithtune.rendering import render_fireworks_target
+
+    state = sft_loop._worker_state
+    rendered = [datum for target in training_targets(row)
+                for datum in render_fireworks_target(target, state["renderer"])]
+    if not rendered or any(not 2 <= len(d.token_ids) <= state["max_seq_len"] or
+                           not any(w > 0 for w in d.token_weights) for d in rendered):
+        raise PipelineError(f"prepared conversation {row['_source']['example_id']} has an invalid training target; prepare again")
+    return [d.datum for d in rendered]
+
+
 class ServerlessTraining:
     def __init__(self, config, run_dir: Path):
         from training.recipes import sft_loop
@@ -40,7 +55,13 @@ class ServerlessTraining:
             config.thinking_trace_history_mode, config.tokenizer_trust_remote_code,
         )
         sft_loop._init_render_worker(*self.init_args)
-        self.dataset, self.validation = sft_loop._prepare_datasets(config)
+        from training.utils import JsonlRenderDataset
+
+        self.dataset = JsonlRenderDataset(config.dataset, _render_conversation,
+                                         max_examples=config.max_examples, row_index_key=sft_loop.JSONL_ROW_INDEX_KEY)
+        validation = JsonlRenderDataset(config.evaluation_dataset, _render_conversation,
+                                       row_index_key=sft_loop.JSONL_ROW_INDEX_KEY)
+        self.validation = sft_loop._render_eagerly(validation, len(validation))
         if not self.validation:
             raise PipelineError("prepared validation data has no usable training targets")
         self.generator = torch.Generator()

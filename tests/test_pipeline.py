@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from binding_fixtures import bound_row, bound_example
+
 import copy
 import io
 import json
@@ -28,7 +30,7 @@ def message(role: str, content, message_id: str, **extra):
 
 
 def example(index: int, messages: list[dict] | None = None, thread: str | None = None) -> dict:
-    return {
+    return bound_example({
         "id": f"example-{index}",
         "inputs": {
             "messages": messages
@@ -45,7 +47,7 @@ def example(index: int, messages: list[dict] | None = None, thread: str | None =
             "trajectory_format": "messages",
             "conversation_scope": "root",
         },
-    }
+    })
 
 
 def write_raw(root: Path, examples: list[dict], dataset_id: str = "dataset-id", *, workspace_id: str = "workspace-id") -> None:
@@ -74,6 +76,7 @@ def write_manifest(
     prepared = root / "prepared"
     prepared.mkdir(parents=True)
     manifest = {
+        "schema_version": 2, "target_policy": "each_assistant_once",
         "langsmith": {"examples": 10},
         "split": {"train": 8, "validation": 1, "test": 1},
         "model": model.__dict__,
@@ -461,7 +464,7 @@ def test_prepare_rejects_repeated_sources_before_capture(tmp_path, monkeypatch, 
     def unexpected(*_args, **_kwargs):
         pytest.fail("duplicate sources must fail before capturing tools or rendering")
 
-    monkeypatch.setattr(dataset_ops, "_example_contract_snapshot", unexpected)
+    monkeypatch.setattr(dataset_ops, "capture_example_bindings", unexpected)
     monkeypatch.setattr(dataset_ops, "validate_model_context", unexpected)
     with pytest.raises(PipelineError, match=f"examples example-0 and example-1 reference the same {scope} conversation-a.*project-1.*source-workspace"):
         dataset_ops.prepare_dataset("workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path,
@@ -657,15 +660,12 @@ def test_prepare_requires_tool_schemas_and_preserves_recorded_prompts(tmp_path: 
         examples.append(example(index, trajectory, thread=f"thread-{index}"))
     write_raw(tmp_path, examples)
 
-    with pytest.raises(PipelineError, match="inference contract"):
-        dataset_ops.prepare_dataset(
-            "workspace-id",
-            "dataset-id",
-            fireworks.DEFAULT_MODEL,
-            tmp_path,
-            fetch=False,
-            check_render=False,
-        )
+    # Portable bindings supply the recorded tools without any source reads.
+    automatic = dataset_ops.prepare_dataset(
+        "workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path,
+        fetch=False, check_render=False,
+    )
+    assert automatic["prepared"]["accepted"] == len(examples)
 
     contract = loaded_contract(tmp_path, legacy=legacy)
     manifest = dataset_ops.prepare_dataset(
@@ -762,13 +762,13 @@ def test_prepare_excludes_renderer_incompatible_trajectory_with_warning(
         "example_id": "example-1",
         "source_scope": "thread",
         "source_scope_id": "thread-1",
-        "reason": "system_message_not_first",
+        "reason": "System message must be at the beginning",
     }
     assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
     assert manifest["audit"]["renderer_incompatible_trajectories"] == 1
     assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
     assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
-    assert "Warning: excluding trajectory example-1 (thread thread-1): system_message_not_first" in capsys.readouterr().err
+    assert "Warning: excluding trajectory example-1 (thread thread-1): System message must be at the beginning" in capsys.readouterr().err
 
 
 def test_prepare_accepts_a_test_only_dataset(tmp_path: Path):
@@ -861,13 +861,13 @@ def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyP
         lambda *args, **kwargs: SimpleNamespace(token_ids=[1, 2, 3], token_weights=[0, 1, 1]),
     )
     model = ModelSpec("tiny", "accounts/fireworks/models/tiny", "tokenizer", "revision", "renderer", 2)
-    row = {
-        "messages": [],
+    row = bound_row({
+        "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
         "_source": {
             "example_id": "one",
             "source_scope": "thread", "source_scope_id": "thread-one",
         },
-    }
+    })
     accepted, rejected, audit = rendering.validate_model_context([row], model)
     assert accepted == []
     assert rejected == [
@@ -911,11 +911,11 @@ def test_model_context_passes_tools_to_renderer_and_fails_closed(
         10,
         requires_tool_declarations=True,
     )
-    row = {
-        "messages": [{"role": "user", "content": "find x"}],
+    row = bound_row({
+        "messages": [{"role": "user", "content": "find x"}, {"role": "assistant", "content": "hello"}],
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         "_source": {"example_id": "one", "source_scope": "thread", "source_scope_id": "thread-one"},
-    }
+    })
 
     accepted, rejected, _ = rendering.validate_model_context([row], model)
 
@@ -954,10 +954,11 @@ def test_replay_cases_slice_before_even_tool_boundaries():
             ]
         )
     rows = [
-        {
+        bound_row({
             "messages": messages,
+            "tools": [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}} for name in ["lookup", *[f"tool-{i}" for i in range(5)]]],
             "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
-        }
+        })
     ]
 
     cases = replay.build_replay_cases(rows, max_points_per_trajectory=3)
@@ -979,10 +980,11 @@ def test_replay_cases_include_every_assistant_message_by_default():
         {"role": "assistant", "content": "The answer is result.", "id": "assistant-2"},
     ]
     rows = [
-        {
+        bound_row({
             "messages": messages,
+            "tools": [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}} for name in ["lookup", *[f"tool-{i}" for i in range(5)]]],
             "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
-        }
+        })
     ]
 
     cases = replay.build_replay_cases(rows)
@@ -1006,7 +1008,7 @@ def test_replay_evaluation_requires_test_rows(tmp_path: Path):
 def test_replay_cases_preserve_tools_and_contract_hash():
     tools = [{"type": "function", "function": {"name": "lookup", "parameters": {}}}]
     rows = [
-        {
+        bound_row({
             "messages": [
                 {"role": "system", "content": "policy"},
                 {"role": "user", "content": "find x"},
@@ -1018,7 +1020,7 @@ def test_replay_cases_preserve_tools_and_contract_hash():
                 "source_scope": "thread", "source_scope_id": "thread-1",
                 "contract_sha256": "contract-hash",
             },
-        }
+        })
     ]
 
     cases = replay.build_replay_cases(rows)
@@ -1029,7 +1031,7 @@ def test_replay_cases_preserve_tools_and_contract_hash():
 
 def test_replay_cases_include_trace_provenance():
     rows = [
-        {
+        bound_row({
             "messages": [
                 {"role": "user", "content": "question"},
                 {"role": "assistant", "content": "answer"},
@@ -1039,7 +1041,7 @@ def test_replay_cases_include_trace_provenance():
                 "source_scope": "trace",
                 "source_scope_id": "trace-1",
             },
-        }
+        })
     ]
 
     cases = replay.build_replay_cases(rows)
@@ -1130,7 +1132,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
     data_dir = tmp_path / "data"
     contract = loaded_contract(tmp_path, legacy=legacy)
     write_manifest(data_dir, contract=contract)
-    row = {
+    row = bound_row({
         "messages": [
             {"role": "system", "content": "policy", "id": "system-1"},
             {"role": "user", "content": "look up x", "id": "user-1"},
@@ -1143,7 +1145,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
             "source_scope": "thread", "source_scope_id": "thread-1",
             "contract_sha256": contract.contract_sha256,
         },
-    }
+    })
     if system_prompt is None:
         row["messages"].pop(0)
     else:
@@ -1199,13 +1201,13 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
 def test_replay_evaluation_reports_text_scores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     data_dir = tmp_path / "data"
     write_manifest(data_dir)
-    row = {
+    row = bound_row({
         "messages": [
             {"role": "user", "content": "What is x?", "id": "user-1"},
             {"role": "assistant", "content": "x is 1", "id": "assistant-1"},
         ],
         "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
-    }
+    })
     (data_dir / "prepared" / "test.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     monkeypatch.setattr(
         replay,
@@ -1245,13 +1247,13 @@ def test_replay_resume_rejects_a_different_model_set(
     # Resuming with or without --base-model must not mix paired results.
     data_dir = tmp_path / "data"
     write_manifest(data_dir)
-    row = {
+    row = bound_row({
         "messages": [
             {"role": "user", "content": "What is x?", "id": "user-1"},
             {"role": "assistant", "content": "x is 1", "id": "assistant-1"},
         ],
         "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
-    }
+    })
     (data_dir / "prepared" / "test.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     monkeypatch.setattr(
         replay,
@@ -1597,6 +1599,7 @@ def test_judge_marks_reference_tool_results_as_future_evidence():
 
     reference = tool_call("lookup")
     case = {
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
         "messages": [{"role": "user", "content": "question"}],
         "reference": reference,
         "tool_results": [
@@ -1633,6 +1636,7 @@ def test_judge_retries_an_invalid_response():
         return next(responses)
 
     case = {
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
         "messages": [{"role": "user", "content": "question"}],
         "reference": tool_call("lookup"),
         "tool_results": [],
@@ -1680,7 +1684,7 @@ def test_plan_uses_manifest_model_and_sft_defaults(tmp_path: Path):
     assert plan["config"]["renderer"] == "kimi_k3"
     assert plan["config"]["max_epochs"] == 5
     assert plan["config"]["early_stopping_patience"] == 1
-    assert plan["config"]["loss_target"] == "all assistant text and tool calls"
+    assert plan["config"]["loss_target"] == "each assistant target once, with zero loss on history"
     assert "train_on_what" not in plan["config"]
     assert plan["dataset"]["validation_rows"] == 1
     assert plan["dataset"]["test_rows"] == 1

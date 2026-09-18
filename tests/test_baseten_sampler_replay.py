@@ -1,5 +1,7 @@
 """Sampler routing, training handoff, and durable replay integration."""
 
+from binding_fixtures import bound_row
+
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -117,9 +119,9 @@ def training_data(tmp_path, monkeypatch):
     manifest["split"]["test"] = 1
     manifest["langsmith"]["examples"] += 1
     (prepared / "manifest.json").write_text(json.dumps(manifest))
-    row = {"messages": [{"role": "user", "content": "What is x?"},
+    row = bound_row({"messages": [{"role": "user", "content": "What is x?"},
                         {"role": "assistant", "content": "x is 1"}],
-           "_source": {"example_id": "held-out", "source_scope": "thread", "source_scope_id": "held-out-thread"}}
+           "_source": {"example_id": "held-out", "source_scope": "thread", "source_scope_id": "held-out-thread"}})
     (prepared / "test.jsonl").write_text(json.dumps(row) + "\n")
     monkeypatch.setattr(rendering, "load_training_renderer", lambda _: SimpleNamespace(prompt_tokens=lambda *_a, **_k: [1, 2, 3]))
     return tmp_path

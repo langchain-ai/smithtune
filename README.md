@@ -139,8 +139,8 @@ smithtune prepare \
   --data-dir "$data_dir"
 ```
 
-Preparation downloads the trajectories, captures their tools, and validates the
-training format. It creates approximately 80% training, 10% validation, and 10%
+Preparation downloads trajectories, reuses their saved per-assistant tool lists
+(or captures them from producing LLM runs), and validates the training format. It creates approximately 80% training, 10% validation, and 10%
 held-out test data, keeping each source trajectory in one split. These splits
 are also registered on the original LangSmith dataset for evaluation. If local
 preparation succeeds but publication does not, publish and verify only the saved
@@ -154,14 +154,15 @@ The main data requirements are:
 
 - Text and tool trajectories; images are unsupported
 - Recorded system messages are preserved; Qwen requires them at the start
-- All supported assistant messages are training targets, including earlier turns
+- Each supported assistant answer is trained once, using its history and the tools available at that call
 
 Whole malformed or incompatible trajectories are excluded unchanged. `prepare`
 prints a warning and records each exclusion in `prepared/warnings.json` and
 `prepared/rejected.json`, including a stable reason code and source identity.
 
 Examples over the model's context limit are rejected without truncation.
-Reasoning is omitted by default. See the [reference](docs/reference.md) for
+Reasoning is omitted by default. Prepared files from before per-assistant tool
+support require running `prepare` again. See the [reference](docs/reference.md) for
 model selection, split settings, and reasoning options.
 
 ## Plan and train

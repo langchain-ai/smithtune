@@ -20,7 +20,8 @@ from smithtune import checkpoint as storage
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
 from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
-from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
+from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
+from smithtune.bindings import capture_bindings, validate_bound_messages
 from smithtune.providers.base import PipelineError
 
 
@@ -198,9 +199,12 @@ def training_error(unit: dict) -> str | None:
     if unit["training_error"]:
         return unit["training_error"]
     try:
-        messages = validate_import_messages(unit["example"])
-        contract = parse_inference_contract(unit["contract"])
-        contract.validate_messages(messages)
+        if "smithtune_source" in unit["example"].get("metadata", {}):
+            validate_bound_messages(unit["example"])
+        else:
+            messages = validate_import_messages(unit["example"])
+            contract = parse_inference_contract(unit["contract"])
+            contract.validate_messages(messages)
     except (PipelineError, ContractError) as exc:
         return str(exc)
     return None
@@ -279,9 +283,9 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
         contract = None
         error = None
         try:
-            contract = contract_from_runs([run for run in all_runs if run.get("run_type") == "llm"], workspace_id=workspace, thread_id=thread)
-        except ContractError:
-            error = "tool schemas cannot be represented by the current training contract"
+            example["metadata"]["smithtune_source"] = capture_bindings(all_messages, all_runs)
+        except PipelineError as exc:
+            error = str(exc)
         if any(trace["root_run_id"] is None for trace in unit_records):
             error = "conversation source has a missing root run"
         unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error,
@@ -357,5 +361,8 @@ def conversation_trajectories(frozen: dict) -> list[dict]:
         else:
             runs = [run for tid in unit["trace_ids"] for run in traces[tid]["runs"]]
             trajectory["multimodal_types"] = multimodal_types({**trajectory, "runs": runs})
+        source = unit["example"].get("metadata", {}).get("smithtune_source")
+        if source is not None:
+            trajectory["assistant_runs"] = source["assistant_runs"]
         trajectories.append(trajectory)
     return trajectories

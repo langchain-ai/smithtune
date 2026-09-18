@@ -81,7 +81,8 @@ def legacy_preparation(path, *, captured_workspace=False):
                   'validation_fraction': .1, 'test_fraction': .1, 'train': 8, 'validation': 1, 'test': 1},
     })
     if captured_workspace:
-        contracts = _load_json(path / 'raw' / 'example_contracts.json')['contracts']
+        from smithtune.bindings import tool_contract
+        contracts = {e['id']: tool_contract([], source_example_id=e['id']).to_dict() for e in examples}
         for contract in contracts.values():
             contract['provenance']['source_workspace_id'] = 'source-workspace'
         _json_dump(path / 'prepared' / 'example_contracts.json', contracts)

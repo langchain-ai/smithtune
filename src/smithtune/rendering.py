@@ -11,7 +11,7 @@ from typing import Any
 from smithtune.providers.base import ModelSpec, PipelineError
 
 
-SFT_TARGET_POLICY = "all_assistant_messages"
+SFT_TARGET_POLICY = "last_assistant_message"
 
 
 DEFAULT_REPLAY_MAX_TOKENS = 4_096
@@ -35,7 +35,7 @@ def rendering_version(model: ModelSpec) -> str:
             commit = source.get("vcs_info", {}).get("commit_id")
             if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
                 raise PipelineError("the Fireworks cookbook installation has no pinned source revision")
-            implementation = f"fireworks-cookbook@{commit}"
+            implementation = f"smithtune-target-v2;fireworks-cookbook@{commit}"
     except metadata.PackageNotFoundError as exc:
         raise PipelineError("training dependencies are missing; run smithtune doctor") from exc
     return f"{implementation};transformers={transformers_version}"
@@ -112,17 +112,32 @@ def render_row_tokens(
     row: dict[str, Any], model: ModelSpec, *, renderer: Any,
     include_loss_mask: bool = False, reduction: str = "mean",
 ) -> list[Any]:
-    """Preserve the all-assistant policy while selecting provider-specific rendering."""
-    _validate_renderer_messages(row["messages"], model)
-    if model.provider == "baseten":
-        return renderer.render(row["messages"], tools=row.get("tools"))
-    from training.utils import parse_train_on_what, render_messages_to_datums
+    """Render every assistant once with its tools and zero loss on history."""
+    from smithtune.bindings import training_targets
 
-    result = render_messages_to_datums(
-        row["messages"], renderer=renderer,
-        train_on_what=parse_train_on_what(SFT_TARGET_POLICY),
-        tools=row.get("tools"), include_loss_mask=include_loss_mask, reduction=reduction,
-    )
+    _validate_renderer_messages(row["messages"], model)
+    result = []
+    for target in training_targets(row):
+        if model.provider == "baseten":
+            datums = renderer.render(target["messages"], tools=target["tools"], final_target=True)
+        else:
+            datums = render_fireworks_target(target, renderer, include_loss_mask=include_loss_mask, reduction=reduction)
+        if not datums or any(not any(float(w) > 0 for w in datum.token_weights) for datum in datums):
+            raise PipelineError(f"assistant message {target['message_index']} rendered no target tokens")
+        result.extend(datums)
+    if not result:
+        raise PipelineError("conversation rendered no training target")
+    return result
+
+
+def render_fireworks_target(target, renderer, *, include_loss_mask=False, reduction="mean"):
+    from training.utils import render_messages_to_datums
+
+    # The pinned cookbook explicitly switches to CUSTOMIZED for these flags.
+    # This works for both extension renderers and native multi-datum renderers.
+    messages = [{**m, "trainable": i == len(target["messages"]) - 1} for i, m in enumerate(target["messages"])]
+    result = render_messages_to_datums(messages, renderer=renderer, train_on_what="last_assistant_message",
+                                      tools=target["tools"], include_loss_mask=include_loss_mask, reduction=reduction)
     return result if isinstance(result, list) else [result]
 
 
@@ -176,7 +191,9 @@ def validate_model_context(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     """Render all rows and reject complete examples above the model limit."""
     renderer = load_training_renderer(model)
-    has_tools = any(row.get("tools") for row in rows)
+    from smithtune.bindings import training_targets
+
+    has_tools = any(target["tools"] for row in rows for target in training_targets(row))
     if has_tools and not model.requires_tool_declarations:
         raise PipelineError(
             f"model profile {model.name} does not require tool declarations for a tool-enabled dataset"
@@ -188,20 +205,18 @@ def validate_model_context(
             raise PipelineError(f"renderer {model.renderer} cannot declare tools required by model profile {model.name}")
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
-    rendered_count = context_tokens = target_tokens = max_context = 0
+    rendered_count = assistant_targets = context_tokens = target_tokens = max_context = 0
     for row in rows:
         try:
             rendered_items = render_row_tokens(row, model, renderer=renderer)
-        except ValueError as exc:
-            if str(exc) != "System message must be at the beginning":
-                raise
+        except (ValueError, PipelineError) as exc:
             rejected.append(
                 {
                     "code": "renderer_incompatible_trajectory_excluded",
                     "example_id": row["_source"]["example_id"],
                     "source_scope": row["_source"]["source_scope"],
                     "source_scope_id": row["_source"]["source_scope_id"],
-                    "reason": "system_message_not_first",
+                    "reason": str(exc),
                 }
             )
             continue
@@ -231,11 +246,13 @@ def validate_model_context(
             continue
         accepted.append(row)
         rendered_count += len(rendered_items)
+        assistant_targets += sum(1 for _ in training_targets(row))
         context_tokens += row_context
         target_tokens += row_targets
         max_context = max(max_context, row_max_context)
     return accepted, rejected, {
         "rendered_datums": rendered_count,
+        "assistant_targets": assistant_targets,
         "context_tokens": context_tokens,
         "target_tokens": target_tokens,
         "max_context_tokens": max_context,

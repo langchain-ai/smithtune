@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from binding_fixtures import bound_row
 from smithtune.providers import baseten, fireworks
 from smithtune.providers.base import PipelineError
 from smithtune.hf_rendering import _normalize_messages
@@ -61,10 +62,9 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
     if model.renderer != "muse_glimmer":
         messages[2]["content"] = [{"type": "text", "text": "LEADING_TEXT_SENTINEL"}]
     original_messages = copy.deepcopy(messages)
-    rows = render_row_tokens({"messages": messages, "tools": tools}, model, renderer=renderer, include_loss_mask=True)
+    rows = render_row_tokens(bound_row({"messages": messages, "tools": tools, "_source": {"example_id": "tokenizer-check"}}), model, renderer=renderer, include_loss_mask=True)
     assert messages == original_messages
-    expected_datums = 2 if model.renderer in {"muse_glimmer", "hf_prefix_qwen3_5"} else 1
-    assert len(rows) == expected_datums
+    assert len(rows) == 3
     target = ""
     for datum in rows:
         assert len(datum.token_ids) == len(datum.token_weights)
@@ -110,7 +110,7 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
     ]
     for index in (1, 2, 4):
         prefix = renderer.prompt_tokens(messages[:index])
-        datum = renderer.render(messages[:index + 1])[-1]
+        datum = renderer.render(messages[:index + 1], final_target=True)[0]
         assert datum.token_ids[:len(prefix)] == prefix
         expected = renderer.tokenizer.apply_chat_template(
             _normalize_messages(messages[:index + 1]), tokenize=False, add_generation_prompt=False,
@@ -119,6 +119,7 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
             expected += "<|user|>"
         assert renderer.tokenizer.decode(datum.token_ids) == expected
         assert datum.token_weights[len(prefix)] == 1
+        assert not any(datum.token_weights[:len(prefix)])
     rows = renderer.render(messages)
     target = "".join(renderer.tokenizer.decode([
         token for token, weight in zip(row.token_ids, row.token_weights, strict=True) if weight

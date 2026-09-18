@@ -45,6 +45,31 @@ Use `prepare --no-fetch` with the same settings and data directory to reuse the
 downloaded data. Provider checks, tokenizer loading, and split synchronization
 still run.
 
+## Per-assistant tools and training targets
+
+Whole trajectories remain the dataset examples and split rows. Their metadata
+stores `smithtune_source.assistant_runs`: the message position, producing run and
+trace IDs, and complete tools recorded for each assistant call. Tools can be
+added, removed, or change descriptions and schemas between calls. An empty list
+means no tools were offered; missing availability is not treated as an empty list.
+
+Pull currently matches assistant message IDs and normalized content against LLM
+outputs, then reads `extra.invocation_params.tools`. Input history is not evidence
+that a run produced a message. Missing or ambiguous output identities and
+unsupported provider built-ins exclude the trajectory with a recorded reason.
+Preparation reuses saved bindings; unbound, unjudged dataset exports can capture
+them from source runs. Interrupted preparation retains completed captures.
+
+Fireworks and Baseten render each supported assistant answer with its preceding
+messages and its tool list. Only that answer receives training loss; earlier
+assistant answers serve as context. Replay uses the same per-call tools. This
+preserves the recorded trajectory prefix; it does not reconstruct hidden prompt
+rewrites, context compaction, or routing between agents.
+
+`--inference-contract FILE` remains an explicit global tool-schema override.
+Run `prepare` again for older prepared artifacts. Older council datasets need a
+fresh pull and review to attach per-call evidence, or an explicit global override.
+
 ## Model-specific formatting
 
 Muse Glimmer requires an explicit system message. It rejects assistant messages

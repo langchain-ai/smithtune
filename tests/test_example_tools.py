@@ -7,17 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from binding_fixtures import bound_example
 from smithtune import dataset
-from smithtune.evaluation import replay as evaluation
-from smithtune.artifacts import _json_dump, _jsonl_dump, _load_jsonl
-from smithtune.inference_contract import ContractError, TOOL_MERGE_POLICY, contract_from_runs, json_sha256
-from smithtune.providers import fireworks
+from smithtune.artifacts import _json_dump
+from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256
 from smithtune.providers.base import PipelineError
 from test_tool_capture import llm, tool, page
 
 
 def example(index, *, thread=None, project="project-1"):
-    return {
+    return bound_example({
         "id": f"example-{index}",
         "inputs": {"messages": [{"role": "system", "content": f"policy {index}"},
                                 {"role": "human", "content": f"question {index}"},
@@ -25,7 +24,7 @@ def example(index, *, thread=None, project="project-1"):
         "outputs": None, "metadata": {"source_scope": "thread", "source_scope_id": thread or f"thread-{index}",
                                       "source_project_id": project,
                                       "trajectory_format": "messages", "conversation_scope": "root"},
-    }
+    })
 
 
 def source_runner(groups):
@@ -58,18 +57,10 @@ def source_runner(groups):
 
 
 def write_empty_tool_snapshot(root, examples, dataset_id="dataset-id", workspace_id="workspace-id"):
-    """Fixture for previously captured, tool-free source conversations."""
-    contracts = {}
-    for ex in examples:
-        payload = contract_from_runs([llm(f"run-{ex['id']}", [])], workspace_id=workspace_id)
-        payload["provenance"]["source_example_id"] = ex["id"]
-        contracts[ex["id"]] = payload
-    _json_dump(root / "raw" / "example_contracts.json", {
-        "schema_version": 1, "workspace_id": workspace_id, "dataset_id": dataset_id,
-        "tool_merge_policy": TOOL_MERGE_POLICY,
-        "source_examples_sha256": hashlib.sha256((root / "raw" / "examples.json").read_bytes()).hexdigest(),
-        "contracts": contracts, "contracts_sha256": json_sha256(contracts),
-    })
+    payload = {"examples": [bound_example(copy.deepcopy(e), tools=[]) for e in examples], "exclusions": []}
+    _json_dump(root / "raw/bound_examples.json", {
+        "source_sha256": hashlib.sha256((root / "raw/examples.json").read_bytes()).hexdigest(),
+        "workspace_id": workspace_id, "source_workspace_id": None, **payload, "sha256": json_sha256(payload)})
 
 
 def test_examples_get_their_own_complete_union_and_repeated_sources_are_cached():
@@ -81,7 +72,7 @@ def test_examples_get_their_own_complete_union_and_repeated_sources_are_cached()
         ("project-1", "thread-2"): [llm("run-3", [tool("lookup")])],
     })
     contracts = dataset.capture_example_contracts("workspace-id", examples, runner=runner)
-    rows = dataset.prepare_sft_rows(examples, example_contracts=contracts)
+    rows = [dataset.prepare_sft_rows([ex], contract=contracts[ex["id"]])[0] for ex in examples]
     assert [[t["function"]["name"] for t in row["tools"]] for row in rows] == [
         ["swell", "weather"], ["lookup"], ["swell", "weather"],
     ]
@@ -132,203 +123,6 @@ def test_toolless_source_is_valid_but_missing_source_calls_are_not():
     assert contracts["example-1"].tools == ()
     with pytest.raises(PipelineError, match="example example-2.*no LLM runs"):
         dataset.capture_example_contracts("workspace-id", [example(2)], runner=runner)
-
-
-def setup_preparation(tmp_path, monkeypatch, *, builtin=False):
-    examples = [example(1), example(2)]
-    raw = tmp_path / "raw"
-    _json_dump(raw / "examples.json", examples)
-    _json_dump(raw / "dataset-export.json", [{"inputs": ex["inputs"]} for ex in examples])
-    _json_dump(raw / "dataset.json", {"id": "dataset-id", "example_count": 2})
-    second_tools = [{"type": "web_search"}] if builtin else [tool("swell")]
-    runner, _ = source_runner({("project-1", "thread-1"): [llm("run-1", [tool("weather")])],
-                               ("project-1", "thread-2"): [llm("run-2", second_tools)]})
-    collect = dataset.capture_example_contracts
-    monkeypatch.setattr(dataset, "capture_example_contracts", lambda workspace, examples, **kwargs: collect(workspace, examples, runner=runner, **kwargs))
-    monkeypatch.setattr(dataset, "download_dataset", lambda *args: None)
-    return examples
-
-
-def prepare(tmp_path, **kwargs):
-    return dataset.prepare_dataset("workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path,
-                                   test_fraction=1, validation_fraction=0, check_render=False, **kwargs)
-
-
-def test_builtin_in_second_example_aborts_before_publishing_artifacts(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch, builtin=True)
-    with pytest.raises(PipelineError, match="example example-2.*run run-2.*provider built-in.*web_search"):
-        prepare(tmp_path)
-    assert not (tmp_path / "raw" / "example_contracts.json").exists()
-    assert not (tmp_path / "prepared").exists()
-
-
-def test_prepare_excludes_conflicting_per_example_contract(tmp_path, monkeypatch, capsys):
-    collect = dataset.capture_example_contracts
-    setup_preparation(tmp_path, monkeypatch)
-    changed = tool("weather")
-    changed["function"]["parameters"]["required"] = ["query"]
-    runner, _ = source_runner({
-        ("project-1", "thread-1"): [llm("run-1", [tool("weather")]), llm("run-2", [changed])],
-        ("project-1", "thread-2"): [llm("run-3", [tool("swell")])],
-    })
-    monkeypatch.setattr(
-        dataset,
-        "capture_example_contracts",
-        lambda workspace, examples, **kwargs: collect(workspace, examples, runner=runner, **kwargs),
-    )
-
-    manifest = prepare(tmp_path)
-
-    expected = {
-        "code": "incompatible_inference_contract_excluded",
-        "example_id": "example-1",
-        "source_scope": "thread",
-        "source_scope_id": "thread-1",
-        "reason": "conflicting_tool_definitions",
-    }
-    rows = _load_jsonl(tmp_path / "prepared" / "test.jsonl")
-    assert [row["_source"]["example_id"] for row in rows] == ["example-2"]
-    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
-    assert manifest["audit"]["incompatible_inference_contracts"] == 1
-    assert manifest["example_contracts"]["count"] == 1
-    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
-    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
-    assert "Warning: excluding trajectory example-1 (thread thread-1): conflicting_tool_definitions" in capsys.readouterr().err
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("offline preparation attempted contract capture")
-
-    monkeypatch.setattr(dataset, "capture_example_contracts", unexpected)
-    offline = prepare(tmp_path, fetch=False)
-    assert offline["prepared"] == {"accepted": 1, "rejected": 1}
-    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
-
-
-def test_prepare_excludes_recorded_tool_call_missing_from_captured_contract(tmp_path, monkeypatch, capsys):
-    examples = setup_preparation(tmp_path, monkeypatch)
-    examples[0]["inputs"]["messages"] = [
-        {"role": "human", "content": "question"},
-        {
-            "role": "ai",
-            "content": [
-                {"type": "tool_call", "id": "call-1", "name": "missing_tool", "args": {}}
-            ],
-        },
-        {"role": "tool", "content": "result", "tool_call_id": "call-1"},
-    ]
-    _json_dump(tmp_path / "raw" / "examples.json", examples)
-    _json_dump(tmp_path / "raw" / "dataset-export.json", [{"inputs": ex["inputs"]} for ex in examples])
-
-    manifest = prepare(tmp_path, sync_splits=False)
-
-    expected = {
-        "code": "incompatible_inference_contract_excluded",
-        "example_id": "example-1",
-        "source_scope": "thread",
-        "source_scope_id": "thread-1",
-        "reason": "unknown_tool",
-    }
-    rows = _load_jsonl(tmp_path / "prepared" / "test.jsonl")
-    assert [row["_source"]["example_id"] for row in rows] == ["example-2"]
-    assert manifest["prepared"] == {"accepted": 1, "rejected": 1}
-    assert manifest["audit"]["incompatible_inference_contracts"] == 1
-    assert manifest["example_contracts"]["count"] == 1
-    assert json.loads((tmp_path / "prepared" / "warnings.json").read_text()) == [expected]
-    assert json.loads((tmp_path / "prepared" / "rejected.json").read_text()) == [expected]
-    assert "Warning: excluding trajectory example-1 (thread thread-1): unknown_tool" in capsys.readouterr().err
-
-
-def test_per_example_capture_roundtrips_offline_without_network(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch)
-    manifest = prepare(tmp_path)
-    online = (tmp_path / "prepared" / "test.jsonl").read_bytes()
-    contracts = dataset._prepared_example_contracts(tmp_path, manifest)
-    assert set(contracts) == {"example-1", "example-2"}
-
-    def unexpected(*args):
-        pytest.fail("offline preparation attempted a network call")
-
-    monkeypatch.setattr(dataset, "capture_example_contracts", unexpected)
-    monkeypatch.setattr(dataset, "download_dataset", unexpected)
-    offline = prepare(tmp_path, fetch=False)
-    assert offline["example_contracts"] == manifest["example_contracts"]
-    assert (tmp_path / "prepared" / "test.jsonl").read_bytes() == online
-
-
-@pytest.mark.parametrize("corruption", ["missing", "export", "workspace", "coverage", "hash"])
-def test_offline_capture_requires_complete_matching_snapshot(tmp_path, monkeypatch, corruption):
-    setup_preparation(tmp_path, monkeypatch)
-    prepare(tmp_path)
-    path = tmp_path / "raw" / "example_contracts.json"
-    snapshot = json.loads(path.read_text())
-    if corruption == "missing":
-        path.unlink()
-    elif corruption == "export":
-        raw_path = tmp_path / "raw" / "examples.json"
-        raw_path.write_text(raw_path.read_text() + "\n")
-    else:
-        if corruption == "workspace":
-            snapshot["workspace_id"] = "other-workspace"
-        elif corruption == "coverage":
-            del snapshot["contracts"]["example-2"]
-            snapshot["contracts_sha256"] = json_sha256(snapshot["contracts"])
-        else:
-            snapshot["contracts_sha256"] = "0" * 64
-        _json_dump(path, snapshot)
-    with pytest.raises(PipelineError, match="(cached|cover every example)"):
-        prepare(tmp_path, fetch=False)
-
-
-def test_replay_dispatches_matching_contracts_and_rejects_stale_results(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch)
-    prepare(tmp_path)
-    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *args: (
-        [{**case, "prompt_tokens": 10} for case in cases], [],
-    ))
-    monkeypatch.setattr(evaluation, "calibrate_judge", lambda cases, *args: [{"actual": True, "expected": True}] * (len(evaluation._calibration_cases(cases)) * 3))
-    monkeypatch.setattr(evaluation, "judge_replay_candidate", lambda *args: {"pass": True, "reason": "ok"})
-    requests = []
-
-    def chat(model, messages, max_tokens, json_mode, contract):
-        requests.append((messages[0]["content"], [t["function"]["name"] for t in contract.tools]))
-        return {"role": "assistant", "content": "answer"}
-
-    output = tmp_path / "replay"
-    kwargs = dict(confirm=True, chat=chat, concurrency=1)
-    summary = evaluation.run_replay_evaluation(tmp_path, output, "tuned", "judge", **kwargs)
-    assert sorted(requests) == [("policy 1", ["weather"]), ("policy 2", ["swell"])]
-    assert "example_contracts_sha256" in summary
-    requests.clear()
-    evaluation.run_replay_evaluation(tmp_path, output, "tuned", "judge", **kwargs)
-    assert requests == []
-    results = _load_jsonl(output / "results.jsonl")
-    results[0]["contract_sha256"] = "0" * 64
-    _jsonl_dump(output / "results.jsonl", results)
-    with pytest.raises(PipelineError, match="different inference contract"):
-        evaluation.run_replay_evaluation(tmp_path, output, "tuned", "judge", **kwargs)
-
-
-def test_replay_rejects_row_tools_that_differ_from_saved_example(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch)
-    prepare(tmp_path)
-    path = tmp_path / "prepared" / "test.jsonl"
-    rows = _load_jsonl(path)
-    rows[0]["tools"] = rows[1]["tools"]
-    _jsonl_dump(path, rows)
-    with pytest.raises(PipelineError, match="different tool schemas"):
-        evaluation.prepare_replay_evaluation(tmp_path, tmp_path / "replay")
-
-
-def test_prepared_contract_mapping_rejects_tampering(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch)
-    manifest = prepare(tmp_path)
-    path = tmp_path / "prepared" / "example_contracts.json"
-    payload = json.loads(path.read_text())
-    payload["example-1"] = payload["example-2"]
-    _json_dump(path, payload)
-    with pytest.raises(PipelineError, match="hash differs"):
-        dataset._prepared_example_contracts(tmp_path, manifest)
-
 
 
 @pytest.mark.parametrize("temperature", [None, 0.7])
@@ -382,7 +176,7 @@ def test_optional_tool_argument_expansion_preserves_unused_tools(expanded_first,
     runner, _ = source_runner({("project-1", "thread-1"): runs})
     examples = [example(1)]  # No tool calls in the conversation.
     contracts = dataset.capture_example_contracts("workspace-id", examples, runner=runner)
-    rows = dataset.prepare_sft_rows(examples, example_contracts=contracts)
+    rows = [dataset.prepare_sft_rows([ex], contract=contracts[ex["id"]])[0] for ex in examples]
     assert rows[0]["tools"] == [expanded]
     assert runs == before
     assert contracts["example-1"].tools_sha256 == json_sha256([expanded])
@@ -543,61 +337,6 @@ def test_source_workspace_access_failure_does_not_fall_back():
             "dataset-workspace", [example(1)], source_workspace_id="source-workspace", runner=runner,
         )
     assert calls == ["source-workspace"]
-
-
-def test_offline_capture_rejects_changed_source_workspace(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch)
-    prepare(tmp_path)
-    with pytest.raises(PipelineError, match="different source workspace"):
-        prepare(tmp_path, fetch=False, source_workspace_id="different")
-    # Explicitly choosing the original workspace keeps existing caches usable.
-    prepare(tmp_path, fetch=False, source_workspace_id="workspace-id")
-
-
-def test_preparation_reports_description_replacements_and_reuses_them_offline(tmp_path, monkeypatch):
-    collect = dataset.capture_example_contracts
-    setup_preparation(tmp_path, monkeypatch)
-    before, after = tool("list_threads"), tool("list_threads")
-    after["function"]["description"] = "List surfaced threads by locator, participant or admin mode."
-    after["function"]["parameters"]["properties"]["admin_threads"] = {"type": ["boolean", "null"]}
-    runner, _ = source_runner({
-        ("project-1", "thread-1"): [llm("r1", [before]), llm("r2", [after])],
-        ("project-1", "thread-2"): [llm("r3", [])],
-    })
-    monkeypatch.setattr(dataset, "capture_example_contracts",
-                        lambda workspace, examples, **kwargs: collect(workspace, examples, runner=runner, **kwargs))
-    raw_before = (tmp_path / "raw" / "examples.json").read_bytes()
-    manifest = prepare(tmp_path)
-    assert manifest["prepared"] == {"accepted": 2, "rejected": 0}
-    assert manifest["audit"]["tool_description_replacements"] == 1
-    report = json.loads((tmp_path / "prepared" / "tool_description_replacements.json").read_text())
-    assert len(report) == 1
-    assert report[0]["example_id"] == "example-1"
-    assert report[0]["tool_name"] == "list_threads"
-    assert report[0]["previous_run_id"] == "r1"
-    assert report[0]["selected_run_id"] == "r2"
-    assert (tmp_path / "raw" / "examples.json").read_bytes() == raw_before
-    contracts = dataset._prepared_example_contracts(tmp_path, manifest)
-    assert list(contracts["example-1"].tools) == [after]
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("offline preparation called the network")
-    monkeypatch.setattr(dataset, "capture_example_contracts", unexpected)
-    monkeypatch.setattr(dataset, "download_dataset", unexpected)
-    offline = prepare(tmp_path, fetch=False)
-    assert offline["audit"]["tool_description_replacements"] == 1
-    assert json.loads((tmp_path / "prepared" / "tool_description_replacements.json").read_text()) == report
-
-
-def test_previous_capture_policy_requires_fresh_capture(tmp_path, monkeypatch):
-    setup_preparation(tmp_path, monkeypatch)
-    prepare(tmp_path)
-    path = tmp_path / "raw" / "example_contracts.json"
-    snapshot = json.loads(path.read_text())
-    del snapshot["tool_merge_policy"]
-    _json_dump(path, snapshot)
-    with pytest.raises(PipelineError, match="prepare again without --no-fetch"):
-        prepare(tmp_path, fetch=False)
 
 
 def test_interrupted_capture_resumes_and_publishes_complete_snapshot(tmp_path, monkeypatch, capsys):
