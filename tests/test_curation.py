@@ -673,6 +673,71 @@ def test_later_page_retries_only_that_page_and_never_writes_partial_example(tmp_
     assert sleeps == [1.0, 2.0]
 
 
+@pytest.mark.parametrize("oversized_cursor", [None, "second"])
+@pytest.mark.parametrize("stream", ["output", "stderr"])
+@pytest.mark.parametrize("recover", [True, False])
+def test_oversized_page_narrows_same_cursor_without_partial_import(
+    tmp_path, monkeypatch, oversized_cursor, stream, recover,
+):
+    api = API([[root(1, "a")]])
+    select(tmp_path, api)
+    calls, sleeps = [], []
+    monkeypatch.setattr(curation, "_sleep", sleeps.append)
+    error = json.dumps({"status": 400, "detail":
+        "Narrow the requested trajectory page and retry: "
+        "trajectory view exceeded response data size limit: private source content"}) + "\nHTTP 400"
+
+    def runner(command, **kwargs):
+        if command[2] != "/v1/trajectory":
+            return api(command, **kwargs)
+        body = json.loads(kwargs["input"])
+        calls.append(body)
+        assert body["include"] == {"system_messages": True}
+        assert body["format"] == "messages"
+        assert body["thread_id"] == "a" and body["project_id"] == uid(101)
+        assert api.examples == []
+        cursor = body.get("cursor")
+        if cursor == oversized_cursor and (not recover or body.get("page_size") != 1):
+            raise subprocess.CalledProcessError(1, command, **{stream: error})
+        page = {"messages": api.messages[:2], "next_cursor": "second"} if cursor is None else {
+            "messages": api.messages[2:], "next_cursor": None}
+        return SimpleNamespace(stdout=json.dumps(page))
+
+    if recover:
+        curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+        assert api.examples[0]["inputs"]["messages"] == api.messages
+        assert len(api.examples) == 1
+        assert calls[-1]["page_size"] == 1
+    else:
+        with pytest.raises(PipelineError, match="HTTP 400.*page_size=1.*full conversation") as caught:
+            curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+        assert "private source content" not in str(caught.value)
+        assert api.examples == []
+        assert not list((tmp_path / "conversations").glob("*.json"))
+    failed = [body for body in calls if body.get("cursor") == oversized_cursor]
+    assert len(failed) == 2
+    assert failed[1] == {**failed[0], "page_size": 1}
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("error", [
+    "HTTP 400: unrelated private response",
+    "HTTP 503: Narrow the requested trajectory page; trajectory view exceeded response data size limit",
+])
+def test_unrelated_errors_do_not_narrow_trajectory_pages(monkeypatch, error):
+    calls = []
+    monkeypatch.setattr(curation, "_sleep", lambda _: None)
+
+    def runner(command, **kwargs):
+        calls.append(json.loads(kwargs["input"]))
+        raise subprocess.CalledProcessError(1, command, output=error)
+
+    with pytest.raises(PipelineError, match=r"HTTP [45]\d\d after 3 attempt") as caught:
+        curation._fetch_trajectory(uid(100), uid(101), {"key": "thread_id", "id": "a"}, runner=runner)
+    assert "private" not in str(caught.value)
+    assert len(calls) == 3 and all("page_size" not in body for body in calls)
+
+
 @pytest.mark.parametrize("cursor", ["", 123, [], {}, "second"])
 def test_invalid_or_repeated_later_cursor_never_writes_partial_example(tmp_path, cursor):
     api = API([[root(1, "a")]])

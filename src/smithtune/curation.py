@@ -38,6 +38,17 @@ FETCH_BACKOFF_SECONDS = 1.0
 _sleep = time.sleep
 
 
+class _TrajectoryPageTooLarge(PipelineError):
+    """The trajectory read must be retried with a smaller page, not unchanged."""
+
+
+def _trajectory_page_too_large(exc: subprocess.CalledProcessError) -> bool:
+    error = (exc.stdout or "") + (exc.stderr or "")
+    return (bool(re.search(r"\bHTTP 400\b", error))
+            and "trajectory view exceeded response data size limit" in error
+            and "Narrow the requested trajectory page" in error)
+
+
 def _api(workspace_id, method, path, body=None, *, runner=_run):
     command = ["langsmith", "api", path, "--workspace", workspace_id, "--method", method]
     if body is not None:
@@ -46,8 +57,12 @@ def _api(workspace_id, method, path, body=None, *, runner=_run):
         result = runner(command, capture=True, input=json.dumps(body) if body is not None else None)
     except subprocess.CalledProcessError as exc:
         # API errors can echo message contents; only expose the HTTP status.
-        status = re.search(r"\bHTTP [45]\d\d\b", exc.stderr or "")
+        status = re.search(r"\bHTTP [45]\d\d\b", (exc.stderr or "") + (exc.stdout or ""))
         detail = status.group() if status else "request failed"
+        if path == "/v1/trajectory" and _trajectory_page_too_large(exc):
+            raise _TrajectoryPageTooLarge(
+                f"LangSmith {method} {path}: HTTP 400; trajectory page exceeds response size limit"
+            ) from exc
         if path == "/api/v1/datasets" and detail == "HTTP 409":
             detail += "; dataset name already exists"
         raise PipelineError(f"LangSmith {method} {path}: {detail}") from exc
@@ -277,14 +292,22 @@ def _fetch_trajectory(
             "format": "messages", "include": {"system_messages": True}}
     messages, cursors = [], set()
     while True:
-        for attempt in range(1, FETCH_ATTEMPTS + 1):
+        attempt = 1
+        while True:
             try:
                 trajectory = _api(workspace_id, "POST", "/v1/trajectory", body, runner=runner)
                 break
+            except _TrajectoryPageTooLarge as exc:
+                if body.get("page_size") == 1:
+                    raise PipelineError(f"{exc} even with page_size=1; cannot fetch the full conversation") from exc
+                # Narrow only the transport page. Preserve the cursor, all saved
+                # messages, and system-message inclusion; never truncate a turn.
+                body["page_size"] = 1
             except PipelineError as exc:
                 if attempt == FETCH_ATTEMPTS or "returned invalid JSON" in str(exc):
                     raise PipelineError(f"{exc} after {attempt} attempt(s)") from exc
                 _sleep(FETCH_BACKOFF_SECONDS * attempt)
+                attempt += 1
         if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list):
             raise PipelineError(f"{item['key']} {item['id']} returned invalid messages")
         messages.extend(trajectory["messages"])

@@ -25,6 +25,7 @@ timestamps with timezones. These defaults also apply to a new `dataset triage` r
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
 - `--limit` is required, at most 2000. Querying stops once that many distinct trajectories are found, in the order LangSmith returns roots; no sampling is applied
 - Each trajectory is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
+- If LangSmith rejects an oversized trajectory response page, creation and triage retry the same cursor with `page_size=1` and follow every remaining page. Messages are preserved in full; a size rejection at the smallest page stops the download without importing a partial conversation
 - Use `--name` for a new dataset or `--dataset-id` for an existing dataset in the same workspace. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
 
 Direct creation and triage both save complete examples under `conversations/` in a local run
