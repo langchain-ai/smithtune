@@ -112,51 +112,78 @@ def _action(message):
     return content
 
 
+class BindingCapture:
+    """Keep only fingerprints and offered tools for relevant producing outputs."""
+
+    def __init__(self, messages):
+        self.messages = messages
+        self.wanted = {m.get("id") for m in messages if m.get("role") in {"ai", "assistant"} and isinstance(m.get("id"), str) and m["id"]}
+        self.outputs, self.seen_runs = {}, {}
+
+    def add(self, runs):
+        for run in runs:
+            if str(run.get("run_type", "")).lower() != "llm":
+                continue
+            rid = run.get("id")
+            if not isinstance(rid, str) or not rid or not run.get("trace_id"):
+                raise PipelineError("LLM evidence is missing run/trace identity")
+            fingerprint = json_sha256(run)
+            if rid in self.seen_runs:
+                if self.seen_runs[rid] != fingerprint:
+                    raise PipelineError(f"run {rid} changed during capture")
+                continue
+            self.seen_runs[rid] = fingerprint
+            for message in _output_messages(run.get("outputs")):
+                mid = message.get("id")
+                if not isinstance(mid, str) or mid not in self.wanted:
+                    continue
+                candidate = {"run_id": rid, "trace_id": run["trace_id"]}
+                try:
+                    candidate["output_sha256"] = json_sha256(_action(message))
+                    extra = run.get("extra")
+                    params = extra.get("invocation_params") if isinstance(extra, dict) else None
+                    if not isinstance(params, dict) or not isinstance(params.get("tools"), list):
+                        candidate["unknown_tools"] = True
+                    else:
+                        tools = _canonicalize_captured_tools(params["tools"]) if params["tools"] else []
+                        tool_contract(tools)
+                        candidate["tools"] = tools
+                except (ContractError, ValueError, TypeError, KeyError, PipelineError) as exc:
+                    candidate["error"] = str(exc)
+                self.outputs.setdefault(mid, []).append(candidate)
+
+    def finish(self):
+        bindings, occurrences = [], set()
+        for index, message in enumerate(self.messages):
+            if message.get("role") not in {"ai", "assistant"}:
+                continue
+            mid = message.get("id")
+            matches = self.outputs.get(mid, []) if isinstance(mid, str) else []
+            candidates = [candidate["run_id"] for candidate in matches]
+            context = f"message {index} ({mid!r}); candidate runs {candidates}"
+            if len(matches) != 1 or mid in occurrences:
+                raise PipelineError(f"missing or ambiguous producing-run provenance for {context}; supply unique stable output-message IDs and the producing LLM runs")
+            occurrences.add(mid)
+            candidate = matches[0]
+            try:
+                if candidate.get("error"):
+                    raise ContractError(candidate["error"])
+                if json_sha256(_action(message)) != candidate["output_sha256"]:
+                    raise PipelineError(f"recorded message differs from producing output for {context}")
+                if candidate.get("unknown_tools"):
+                    raise PipelineError(f"unknown tool availability for {context}; record invocation_params.tools (including [] for no tools)")
+            except (ContractError, ValueError, TypeError, KeyError) as exc:
+                raise PipelineError(f"unsupported output/tool evidence for {context}: {exc}") from exc
+            bindings.append({"message_index": index, "run_id": candidate["run_id"],
+                             "trace_id": candidate["trace_id"], "tools": candidate["tools"]})
+        return {"schema_version": SCHEMA_VERSION, "assistant_runs": bindings}
+
+
 def capture_bindings(messages, runs):
     """Require one stable output identity for every assistant occurrence."""
-    outputs = {}
-    seen_runs = {}
-    for run in runs:
-        if str(run.get("run_type", "")).lower() != "llm":
-            continue
-        rid = run.get("id")
-        if not isinstance(rid, str) or not rid or not run.get("trace_id"):
-            raise PipelineError("LLM evidence is missing run/trace identity")
-        if rid in seen_runs:
-            if seen_runs[rid] != run:
-                raise PipelineError(f"run {rid} changed during capture")
-            continue
-        seen_runs[rid] = run
-        for message in _output_messages(run.get("outputs")):
-            mid = message.get("id")
-            if isinstance(mid, str) and mid:
-                outputs.setdefault(mid, []).append((run, message))
-    bindings = []
-    occurrences = set()
-    for index, message in enumerate(messages):
-        if message.get("role") not in {"ai", "assistant"}:
-            continue
-        mid = message.get("id")
-        matches = outputs.get(mid, []) if isinstance(mid, str) else []
-        candidates = [run["id"] for run, _ in matches]
-        context = f"message {index} ({mid!r}); candidate runs {candidates}"
-        if len(matches) != 1 or mid in occurrences:
-            raise PipelineError(f"missing or ambiguous producing-run provenance for {context}; supply unique stable output-message IDs and the producing LLM runs")
-        occurrences.add(mid)
-        run, output = matches[0]
-        try:
-            if json_sha256(_action(message)) != json_sha256(_action(output)):
-                raise PipelineError(f"recorded message differs from producing output for {context}")
-            extra = run.get("extra")
-            params = extra.get("invocation_params") if isinstance(extra, dict) else None
-            if not isinstance(params, dict) or "tools" not in params or not isinstance(params["tools"], list):
-                raise PipelineError(f"unknown tool availability for {context}; record invocation_params.tools (including [] for no tools)")
-            tools = _canonicalize_captured_tools(params["tools"]) if params["tools"] else []
-            tool_contract(tools)
-        except (ContractError, ValueError, TypeError, KeyError) as exc:
-            raise PipelineError(f"unsupported output/tool evidence for {context}: {exc}") from exc
-        bindings.append({"message_index": index, "run_id": run["id"], "trace_id": run["trace_id"], "tools": tools})
-    return {"schema_version": SCHEMA_VERSION, "assistant_runs": bindings}
+    capture = BindingCapture(messages)
+    capture.add(runs)
+    return capture.finish()
 
 
 def read_bindings(metadata, messages, *, positions=None):

@@ -66,6 +66,7 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
   the order LangSmith returns roots and stops paging once the limit is reached.
   Rejections are not replaced, and the limit is not a target dataset size.
 - `--concurrency` defaults to 4; downloads cap at 4 workers and uploads are sequential.
+  Use `--concurrency 1` to reduce memory peaks for very large trajectories.
 - Source settings are frozen in the directory. Use a new directory to select a
   different project, time window, filter, or limit.
 
@@ -74,6 +75,12 @@ excluded before council calls and upload. The triage preview lists rejection
 reasons and counts only eligible judge tasks. Recorded messages are preserved. The result includes
 `eligible` and `rejected` counts; saved units retain validation errors. Model-specific
 rendering and context checks remain in `prepare`.
+
+Saved trajectories are read individually during judging and upload; queued judge
+work holds IDs, not message bodies. Source-run evidence is released after each
+trace, and hashing and file writes avoid whole-document copies. Each active
+trace response and full trajectory must still fit in memory. Legacy monolithic
+snapshots remain readable but must fit in memory; new downloads use individual files.
 
 ## Label full trajectories with an agent council
 

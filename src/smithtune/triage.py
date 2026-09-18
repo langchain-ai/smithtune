@@ -16,7 +16,7 @@ from threading import Lock
 from smithtune.artifacts import _atomic_text, _json_dump, _jsonl_dump, _load_json, _load_jsonl, _run, exclusive_output
 from smithtune.curation import _destination
 from smithtune.dataset import _source_key, validate_trajectories
-from smithtune.dataset_artifacts import load_conversation, save_conversation
+from smithtune.dataset_artifacts import LazySequence, load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, rubric_text, validate_judgment
@@ -164,7 +164,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     frozen = snapshot(source, output_dir, runner=runner) if frozen is None else frozen
     if frozen["source"] != source:
         raise PipelineError("triage snapshot uses a different source query; use a new directory")
-    judging = conversation_trajectories(frozen)
+    judging = conversation_trajectories(frozen, summaries=True)
     filtered = {trajectory["trajectory_id"] for trajectory in judging
                 if (trajectory["multimodal_types"] if "multimodal_types" in trajectory else multimodal_types(trajectory))}
     multimodal_filtered = filtered.copy()
@@ -184,7 +184,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
                 "prefilter": "multimodal-and-provider-context-v1", "judging_unit": "conversation-v1"}
     if selection_rubric is not None:
         identity["selection_rubric"] = selection_rubric
-    if any("assistant_runs" in trajectory for trajectory in judging):
+    if any(trajectory["has_assistant_runs"] for trajectory in judging):
         identity["tool_evidence"] = "per-assistant-v1"
     identity["reasoning"].update({judge["model"]: FIREWORKS_REASONING[judge["model"]] for judge in config["judges"]
                                   if judge["provider"] == "fireworks" and judge["model"] in FIREWORKS_REASONING})
@@ -243,7 +243,16 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
             records[key] = record
     call = judge_call or (deepagent_judge if runner_mode == "deepagent" else api_judge)
 
+    positions = {trajectory["trajectory_id"]: index for index, trajectory in enumerate(judging)}
+
     def judge_one(trajectory, judge):
+        # Queued tasks contain only IDs/media. Load full evidence inside the
+        # bounded worker, and release it when that judgment returns.
+        unit = frozen["units"][positions[trajectory["trajectory_id"]]]
+        trajectory = {"trajectory_id": trajectory["trajectory_id"], "messages": unit["example"]["inputs"]["messages"]}
+        source_evidence = unit["example"].get("metadata", {}).get("smithtune_source")
+        if source_evidence is not None:
+            trajectory["assistant_runs"] = source_evidence["assistant_runs"]
         record = {"trajectory_id": trajectory["trajectory_id"], "judge": judge["name"], "identity_sha256": identity_hash}
         messages = judge_messages(trajectory, rubric, config["rules"])
         base_prompt = messages[0]["content"]
@@ -363,9 +372,9 @@ def _run_direct(pending, judge_one, save_record, concurrency):
                 future.cancel()
 
 
-def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_complete=False, allow_empty=False) -> list[dict]:
+def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_complete=False, allow_empty=False):
     frozen = load_snapshot(triage_dir) if frozen is None else frozen
-    judging = conversation_trajectories(frozen)
+    judging = conversation_trajectories(frozen, summaries=True)
     identity = _load_json(triage_dir / "triage-config.json")
     if not isinstance(identity, dict) or identity.get("judging_unit") != "conversation-v1":
         raise PipelineError("this run has per-trace votes; judge whole conversations in a new run directory before import")
@@ -377,7 +386,7 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_c
         raise PipelineError("triage labels or source snapshot have changed")
     trajectories = {trajectory["trajectory_id"]: trajectory for trajectory in judging}
     by_id = {label.get("trajectory_id"): label for label in labels}
-    if len(by_id) != len(labels) or set(by_id) != set(trajectories):
+    if len(trajectories) != len(judging) or len(by_id) != len(labels) or set(by_id) != set(trajectories):
         raise PipelineError("labels must cover every snapshot trajectory exactly once")
     records = {}
     for record in _load_jsonl(triage_dir / "judgments.jsonl"):
@@ -404,10 +413,14 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_c
             raise PipelineError("council judging is incomplete; run dataset resume DIR --confirm before pushing")
         by_id[tid] = calculated
     selected = []
-    for unit in frozen["units"]:
+    for index, unit in enumerate(frozen["units"]):
         label = by_id[unit["example"]["id"]]
         if training_errors[unit["example"]["id"]] or label["keep"] != 1 or label["status"] != "complete":
             continue
+        selected.append(index)
+
+    def load_selected(index):
+        unit = frozen["units"][selected[index]]
         if frozen["schema_version"] == 3:
             example = {**unit["example"], "metadata": dict(unit["example"]["metadata"])}
         else:
@@ -420,12 +433,14 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_c
         else:
             evidence["contract"] = parse_inference_contract(unit["contract"]).to_dict()
         example["metadata"]["smithtune_triage"] = evidence
-        selected.append(example)
-    if not selected and not allow_empty:
+        return example
+
+    examples = LazySequence(len(selected), load_selected)
+    if not examples and not allow_empty:
         raise PipelineError("no complete, kept conversations are eligible for training")
-    if selected:
-        validate_trajectories(selected, len(selected))
-    return selected
+    if examples:
+        validate_trajectories(examples, len(examples))
+    return examples
 
 
 @exclusive_output("triage_dir")
