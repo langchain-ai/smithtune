@@ -12,10 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.resources import files
 from pathlib import Path
 from threading import Lock
-from uuid import NAMESPACE_URL, uuid5
 
 from smithtune.artifacts import _atomic_text, _json_dump, _jsonl_dump, _load_json, _load_jsonl, _run, exclusive_output
-from smithtune.curation import _api, _destination, _uuid, _write_new
+from smithtune.curation import _destination
 from smithtune.dataset import _source_key, validate_trajectories
 from smithtune.dataset_artifacts import load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
@@ -318,8 +317,8 @@ def _run_direct(pending, judge_one, save_record, concurrency):
                 future.cancel()
 
 
-def selected_examples(triage_dir: Path) -> list[dict]:
-    frozen = load_snapshot(triage_dir)
+def selected_examples(triage_dir: Path, *, frozen: dict | None = None) -> list[dict]:
+    frozen = load_snapshot(triage_dir) if frozen is None else frozen
     judging = conversation_trajectories(frozen)
     identity = _load_json(triage_dir / "triage-config.json")
     if not isinstance(identity, dict) or identity.get("judging_unit") != "conversation-v1":
@@ -356,7 +355,10 @@ def selected_examples(triage_dir: Path) -> list[dict]:
         label = by_id[unit["example"]["id"]]
         if training_error(unit) or label["keep"] != 1 or label["status"] != "complete":
             continue
-        example = load_conversation(save_conversation(triage_dir, unit["example"]))
+        if frozen["schema_version"] == 3:
+            example = {**unit["example"], "metadata": dict(unit["example"]["metadata"])}
+        else:
+            example = load_conversation(save_conversation(triage_dir, unit["example"]))
         contract = parse_inference_contract(unit["contract"])
         example["metadata"]["smithtune_triage"] = {"identity_sha256": json_sha256(identity),
             "messages_sha256": json_sha256(example["inputs"]["messages"]), "contract": contract.to_dict()}
@@ -372,42 +374,17 @@ def create_triaged_dataset(triage_dir: Path, name: str | None = None, *, dataset
     if not confirm:
         raise PipelineError("importing into a LangSmith dataset requires --confirm")
     name, dataset_id = _destination(name, dataset_id)
-    examples = selected_examples(triage_dir)
     frozen = load_snapshot(triage_dir)
+    examples = selected_examples(triage_dir, frozen=frozen)
     workspace = frozen["source"]["workspace_id"]
     receipt_path = triage_dir / "dataset-import.json"
-    if dataset_id is not None:
-        from smithtune.dataset_import import update_dataset
+    from smithtune.dataset_import import import_dataset
 
-        keys = {_source_key(example, workspace, None) for example in examples}
-        return update_dataset(workspace, dataset_id, examples, keys, triage_dir, receipt_path, runner=runner, triaged=True)
-    receipt = {"dataset_name": name, "dataset_id": None, "status": "creating", "confirmed_example_ids": [],
-               "examples_sha256": json_sha256(examples), "pending_write": "dataset"}
-    _write_new(receipt_path, receipt)
-    try:
-        created = _api(workspace, "POST", "/api/v1/datasets", {"name": name, "data_type": "kv"}, runner=runner)
-        dataset_id = _uuid(created.get("id"), "dataset id")
-        receipt.update(dataset_id=dataset_id, status="importing", pending_write=None)
-        _json_dump(receipt_path, receipt)
-        for example in examples:
-            # IDs include the destination dataset so the same reviewed snapshot
-            # can be imported into independent datasets without ID collisions.
-            example_id = str(uuid5(NAMESPACE_URL, dataset_id + ":" + example["id"]))
-            receipt["pending_write"] = example_id
-            _json_dump(receipt_path, receipt)
-            result = _api(workspace, "POST", "/api/v1/examples", {**example, "id": example_id, "dataset_id": dataset_id}, runner=runner)
-            if not isinstance(result, dict) or result.get("id") != example_id:
-                raise PipelineError("example import did not confirm the requested ID")
-            receipt["confirmed_example_ids"].append(example_id)
-            receipt["pending_write"] = None
-            _json_dump(receipt_path, receipt)
-        receipt["status"] = "complete"
-        _json_dump(receipt_path, receipt)
-    except BaseException:
-        receipt["status"] = "incomplete"
-        _json_dump(receipt_path, receipt)
-        raise PipelineError(f"dataset import incomplete; inspect {receipt_path} before retrying") from None
-    return {"dataset_id": dataset_id, "example_count": len(examples), "receipt": str(receipt_path)}
+    keys = {_source_key(example, workspace, None) for example in examples}
+    saved_inputs = {_source_key(unit["example"], workspace, None): triage_dir / path
+                    for unit, path in zip(frozen["units"], frozen.get("unit_files", []), strict=False)}
+    return import_dataset(workspace, examples, keys, triage_dir, receipt_path, name=name, dataset_id=dataset_id,
+                          runner=runner, triaged=True, saved_inputs=saved_inputs)
 
 
 def export_skill(output: Path) -> dict:

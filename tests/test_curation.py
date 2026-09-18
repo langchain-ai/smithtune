@@ -56,6 +56,7 @@ class API:
             {"role": "ai", "content": "102."},
         ]
         self.failure = None
+        self.datasets = {}
 
     def __call__(self, command, *, capture=False, input=None):
         assert capture
@@ -81,16 +82,32 @@ class API:
             page = int(body.get("cursor", 0))
             result = {"items": self.pages[page], "next_cursor": str(page + 1) if page + 1 < len(self.pages) else None}
         elif path == "/api/v1/datasets":
-            result = {"id": uid(200)}
+            result = copy.deepcopy(body)
+            self.datasets[body["id"]] = result
         elif path == "/v1/trajectory":
             assert body["format"] == "messages" and body["include"] == {"system_messages": True}
             assert sum(key in body for key in curation.TRAJECTORY_KEYS) == 1
             result = {"messages": copy.deepcopy(self.messages), "next_cursor": None, "prev_cursor": None}
         elif path == "/api/v1/examples":
-            result = {"id": uid(300 + len(self.examples)), "inputs": body["inputs"],
+            result = {"id": body["id"], "dataset_id": body["dataset_id"], "inputs": body["inputs"],
                       "outputs": body["outputs"], "metadata": body["metadata"]}
             self.examples.append(result)
             result = {"id": result["id"]}
+        elif path.endswith("/versions?limit=1"):
+            result = [{"as_of": "2026-09-15T00:00:00+00:00"}] if self.examples else []
+        elif path.startswith("/api/v1/datasets/"):
+            result = self.datasets.get(path.rsplit("/", 1)[1])
+            if result is None:
+                raise PipelineError("HTTP 404")
+        elif path.startswith("/api/v1/examples?"):
+            from urllib.parse import parse_qs, urlsplit
+            query = parse_qs(urlsplit(path).query)
+            offset = int(query["offset"][0])
+            result = self.examples[offset:offset + 100]
+        elif path.startswith("/api/v1/examples/"):
+            result = next((ex for ex in self.examples if ex["id"] == path.rsplit("/", 1)[1]), None)
+            if result is None:
+                raise PipelineError("HTTP 404")
         else:
             raise AssertionError(path)
         return SimpleNamespace(stdout=json.dumps(result))
@@ -223,49 +240,48 @@ def test_import_fetches_each_trajectory_and_creates_one_example(tmp_path):
     result = curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=api)
     assert result["example_count"] == 2
     assert api.calls == [
-        ("/api/v1/datasets", {"name": "new", "data_type": "kv"}),
+        ("/api/v1/datasets", {"id": result["dataset_id"], "name": "new", "data_type": "kv"}),
         ("/v1/trajectory", {"project_id": uid(101), "thread_id": "a",
                             "format": "messages", "include": {"system_messages": True}}),
-        ("/api/v1/examples", {"dataset_id": uid(200), "inputs": {"messages": api.messages}, "outputs": None,
+        ("/api/v1/examples", {"id": api.examples[0]["id"], "dataset_id": result["dataset_id"], "inputs": {"messages": api.messages}, "outputs": None,
                               "metadata": {**COMMON_METADATA, "source_scope": "thread", "source_scope_id": "a"}}),
         ("/v1/trajectory", {"project_id": uid(101), "trace_id": uid(3),
                             "format": "messages", "include": {"system_messages": True}}),
-        ("/api/v1/examples", {"dataset_id": uid(200), "inputs": {"messages": api.messages}, "outputs": None,
+        ("/api/v1/examples", {"id": api.examples[1]["id"], "dataset_id": result["dataset_id"], "inputs": {"messages": api.messages}, "outputs": None,
                               "metadata": {**COMMON_METADATA, "source_scope": "trace", "source_scope_id": uid(3)}}),
     ]
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["status"] == "complete"
-    assert receipt["pending_write"] is None and receipt["in_flight"] == [] and receipt["concurrency"] == 1
+    assert receipt["pending_write"] is None
     assert "messages" not in receipt
     assert "What is 17" not in json.dumps(receipt)
     calls = len(api.calls)
-    with pytest.raises(PipelineError, match="new writable path"):
+    with pytest.raises(PipelineError, match="destination or selection changed"):
         curation._import_selection(selection=tmp_path / "selection.json", name="again", runner=api)
     assert len(api.calls) == calls
 
 
-def test_partial_failure_has_receipt_and_never_retries(tmp_path):
+def test_partial_failure_records_saved_input_and_pending_write(tmp_path):
     api = API([[root(1, "a"), root(2, "b")]])
     select(tmp_path, api)
     def fail(path, body):
         if path == "/api/v1/examples" and body["metadata"]["source_scope_id"] == "b":
             raise subprocess.CalledProcessError(1, "langsmith", stderr="request timed out; private message")
     api.failure = fail
-    with pytest.raises(PipelineError, match="confirmed=1.*source=thread_id=b") as error:
+    with pytest.raises(PipelineError, match="request failed.*import incomplete") as error:
         curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=api)
     assert "private message" not in str(error.value)
-    assert "outcome may be unknown" in str(error.value)
     assert api.trajectory_calls() == [{"thread_id": "a"}, {"thread_id": "b"}]
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "failed" and receipt["pending_write"] is None
-    pending, = receipt["in_flight"]
-    saved = load_conversation(Path(pending.pop("conversation")))
-    assert pending == {"key": "thread_id", "id": "b", "pending_write": "example"}
+    assert receipt["status"] == "incomplete"
+    pending = receipt["pending_write"]
+    saved = load_conversation(Path(pending["conversation"]))["example"]
+    assert pending["source"]["scope_id"] == "b"
     assert saved["inputs"]["messages"] == api.messages
     assert saved["metadata"]["source_scope_id"] == "b"
     assert len(list((tmp_path / "conversations").glob("*.json"))) == 2
-    assert receipt["dataset_id"] == uid(200)
-    assert receipt["example_ids"] == [uid(300)]
+    assert receipt["dataset_id"] == next(iter(api.datasets))
+    assert receipt["confirmed_example_ids"] == [api.examples[0]["id"]]
 
 
 @pytest.mark.parametrize("response", [
@@ -284,8 +300,8 @@ def test_incomplete_trajectory_fails_before_the_example_write(tmp_path, response
     assert not any(path == "/api/v1/examples" for path, _ in api.calls)
     assert not (tmp_path / "conversations").exists()
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "failed" and receipt["pending_write"] is None
-    assert receipt["example_ids"] == [] and receipt["in_flight"] == [{"key": "thread_id", "id": "a", "pending_write": None}]
+    assert receipt["status"] == "incomplete" and receipt["pending_write"] is None
+    assert receipt["confirmed_example_ids"] == []
 
 
 @pytest.mark.parametrize("response", [{}, {"id": "invalid"}, None])
@@ -295,13 +311,13 @@ def test_unconfirmed_example_write_records_pending_write(tmp_path, response):
     def runner(command, **kwargs):
         result = api(command, **kwargs)
         return SimpleNamespace(stdout=json.dumps(response)) if command[2] == "/api/v1/examples" else result
-    with pytest.raises(PipelineError, match="outcome may be unknown"):
+    with pytest.raises(PipelineError, match="did not confirm its saved ID"):
         curation._import_selection(selection=tmp_path / "selection.json", name="new", runner=runner)
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "failed"
-    pending, = receipt["in_flight"]
-    assert load_conversation(Path(pending.pop("conversation")))["inputs"]["messages"] == api.messages
-    assert receipt["example_ids"] == [] and pending == {"key": "thread_id", "id": "a", "pending_write": "example"}
+    assert receipt["status"] == "incomplete"
+    pending = receipt["pending_write"]
+    assert load_conversation(Path(pending["conversation"]))["example"]["inputs"]["messages"] == api.messages
+    assert receipt["confirmed_example_ids"] == [] and pending["source"]["scope_id"] == "a"
 
 
 def test_saved_v1_thread_selection_must_be_regenerated(tmp_path):
@@ -383,7 +399,7 @@ def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     assert "Selecting conversations" in captured.err
-    assert result["dataset_id"] == uid(200) and result["example_count"] == 1
+    assert result["dataset_id"] == next(iter(api.datasets)) and result["example_count"] == 1
     assert result["matching_roots"] == 3 and result["distinct_conversations"] == 2
     assert result["trace_keyed_examples"] == 0
     assert "preview" not in result
@@ -421,13 +437,13 @@ def test_create_download_prepare(tmp_path):
     assert imported["example_count"] == 12 and imported["trace_keyed_examples"] == 4
     def download(command, *, capture=False):
         if command[1:3] == ["dataset", "get"]:
-            return SimpleNamespace(stdout=json.dumps({"id": uid(200), "name": "new", "example_count": len(api.examples)}))
+            return SimpleNamespace(stdout=json.dumps({"id": imported["dataset_id"], "name": "new", "example_count": len(api.examples)}))
         if command[1:3] == ["dataset", "export"]:
             Path(command[4]).write_text(json.dumps([{"inputs": ex["inputs"], "outputs": ex["outputs"]} for ex in api.examples]))
             return SimpleNamespace(stdout="")
         assert command[1] == "api" and command[2].startswith("/api/v1/examples?")
         query = parse_qs(urlparse(command[2]).query)
-        assert query["dataset"] == [uid(200)]
+        assert query["dataset"] == [imported["dataset_id"]]
         offset, limit = int(query["offset"][0]), int(query["limit"][0])
         return SimpleNamespace(stdout=json.dumps(api.examples[offset:offset + limit]))
     data_dir = tmp_path / "data"
@@ -480,7 +496,7 @@ def test_create_default_paths_are_unique(tmp_path, monkeypatch):
         assert run_dir.parent == Path("data/datasets")
         assert Path(result["selection"]) == run_dir / "selection.json"
         conversation, = (run_dir / "conversations").glob("*.json")
-        assert load_conversation(conversation)["metadata"]["source_scope_id"] == "a"
+        assert load_conversation(conversation)["example"]["metadata"]["source_scope_id"] == "a"
         assert json.loads(Path(result["receipt"]).read_text())["status"] == "complete"
 
 
@@ -490,7 +506,7 @@ def test_create_explicit_run_directory_and_conflicting_output(tmp_path):
     def check_saved_before_upload(path, body):
         if path == "/api/v1/examples":
             saved, = (tmp_path / "conversations").glob("*.json")
-            assert load_conversation(saved) == {key: value for key, value in body.items() if key != "dataset_id"}
+            assert load_conversation(saved)["example"] == {key: value for key, value in body.items() if key not in {"dataset_id", "id"}}
 
     api.failure = check_saved_before_upload
     result = create(tmp_path, api, output=None, run_dir=tmp_path)
@@ -530,11 +546,11 @@ def test_create_failure_reports_partial_dataset_and_saved_receipt(tmp_path, monk
             raise subprocess.CalledProcessError(1, "langsmith", stderr="timeout")
     api.failure = fail
     monkeypatch.setattr(curation, "_sleep", lambda seconds: None)
-    with pytest.raises(PipelineError, match=f"confirmed=1.*source=trace_id={uid(2)}.*receipt="):
+    with pytest.raises(PipelineError, match="after 3 attempt.*receipt="):
         create(tmp_path, api)
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "failed" and receipt["dataset_id"] == uid(200)
-    assert receipt["example_ids"] == [uid(300)]
+    assert receipt["status"] == "incomplete" and receipt["dataset_id"] == next(iter(api.datasets))
+    assert receipt["confirmed_example_ids"] == [api.examples[0]["id"]]
     assert api.trajectory_calls() == [{"thread_id": "a"}] + [{"trace_id": uid(2)}] * 3
 
 
@@ -551,7 +567,7 @@ def test_transient_trajectory_failures_are_retried_but_example_writes_are_not(tm
         if path == "/api/v1/examples" and body["metadata"]["source_scope_id"] == "b":
             raise subprocess.CalledProcessError(1, "langsmith", stderr="connection reset")
     api.failure = flaky
-    with pytest.raises(PipelineError, match="request failed; dataset=.*confirmed=1.*source=thread_id=b.*outcome may be unknown"):
+    with pytest.raises(PipelineError, match="request failed.*import incomplete"):
         create(tmp_path, api)
     assert attempts == {"a": 3, "b": 1}
     assert sleeps == [1.0, 2.0]
@@ -589,7 +605,7 @@ def test_concurrent_import_bounds_in_flight_work_and_drains_after_failure(tmp_pa
         with gate:
             active[0] -= 1
     api.failure = fail_first_and_slow_others
-    with pytest.raises(PipelineError, match="HTTP 500.*source=thread_id=thread-1") as error:
+    with pytest.raises(PipelineError, match="HTTP 500.*after 3 attempt") as error:
         create(tmp_path, api, concurrency=4)
     assert "outcome may be unknown" not in str(error.value)
     assert 1 < peak[0] <= 3
@@ -599,10 +615,9 @@ def test_concurrent_import_bounds_in_flight_work_and_drains_after_failure(tmp_pa
     assert sorted(set(started)) == [f"thread-{i}" for i in range(1, 5)]
     assert started.count("thread-1") == 3 and len(started) == 6
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "failed" and receipt["concurrency"] == 4
-    assert receipt["in_flight"] == [{"key": "thread_id", "id": "thread-1", "pending_write": None}]
-    assert sorted(receipt["example_ids"]) == sorted(ex["id"] for ex in api.examples)
-    assert len(receipt["example_ids"]) == 3
+    assert receipt["status"] == "incomplete" and receipt["pending_write"] is None
+    assert sorted(receipt["confirmed_example_ids"]) == sorted(ex["id"] for ex in api.examples)
+    assert len(receipt["confirmed_example_ids"]) == 0
 
 
 def test_concurrent_import_completes_every_selected_conversation(tmp_path):
@@ -610,8 +625,8 @@ def test_concurrent_import_completes_every_selected_conversation(tmp_path):
     result = create(tmp_path, api, concurrency=3)
     assert result["example_count"] == 12 and len(api.examples) == 12
     receipt = json.loads(Path(result["receipt"]).read_text())
-    assert receipt["status"] == "complete" and receipt["in_flight"] == []
-    assert sorted(receipt["example_ids"]) == sorted(ex["id"] for ex in api.examples)
+    assert receipt["status"] == "complete" and receipt["pending_write"] is None
+    assert sorted(receipt["confirmed_example_ids"]) == sorted(ex["id"] for ex in api.examples)
     assert sorted(json.dumps(call, sort_keys=True) for call in api.trajectory_calls()) == sorted(
         json.dumps({"thread_id": f"thread-{i}"}) for i in range(1, 10)) + sorted(
         json.dumps({"trace_id": uid(i)}) for i in range(10, 13))

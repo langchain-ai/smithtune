@@ -4,9 +4,10 @@ import json
 import sys
 from types import SimpleNamespace
 from urllib.parse import urlencode
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from smithtune.artifacts import _json_dump, _utc_now
-from smithtune.curation import _api, _time, _uuid, _write_new
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _utc_now
+from smithtune.curation import _api, _time, _uuid
 from smithtune.dataset import (
     _malformed_trajectory_reason,
     _recorded_tool_call_reason,
@@ -19,7 +20,7 @@ from smithtune.inference_contract import ContractError, json_sha256
 from smithtune.providers.base import PipelineError
 
 
-def import_rejection(example, workspace, *, runner):
+def import_rejection(example, workspace, *, runner, captured=None):
     """Return a source-only rejection record before uploading a whole trajectory."""
     source = dict(zip(("workspace", "project", "scope", "scope_id"), _source_key(example, workspace, None), strict=True))
     example = {**example, "id": example.get("id") or json_sha256(source)}
@@ -42,6 +43,8 @@ def import_rejection(example, workspace, *, runner):
         if warnings:
             reason = warnings[0]["reason"]
         else:
+            if captured is not None:
+                captured.update(contracts[example["id"]].to_dict())
             try:
                 contracts[example["id"]].validate_messages(messages)
             except ContractError as exc:
@@ -116,62 +119,176 @@ def _action(incoming, existing, *, triaged):
     return "updated", {"inputs": inputs, "outputs": None, "metadata": {**old_metadata, **metadata}}
 
 
-def update_dataset(workspace, dataset_id, examples, source_keys, run_dir, receipt_path, *, runner, triaged=False):
-    """Consume bounded incoming downloads; never retry an ambiguous write."""
-    actions_path = receipt_path.with_suffix(".actions.jsonl")
-    receipt = {"dataset_id": dataset_id, "status": "indexing", "created": 0, "updated": 0, "skipped": 0, "rejected": 0,
-               "actions": str(actions_path), "pending_write": None, "created_at_utc": _utc_now()}
-    _write_new(receipt_path, receipt)
+def _payload(example):
+    return {"inputs": example.get("inputs"), "outputs": example.get("outputs"), "metadata": example.get("metadata") or {}}
+
+
+def _lookup(workspace, path, *, runner):
     try:
-        index = _destination_index(workspace, dataset_id, source_keys, run_dir, runner=runner)
-        existing_ids = {item[0] for item in index.values()}
-        with actions_path.open("x", encoding="utf-8"):
-            pass
-        receipt["status"] = "importing"
+        return _api(workspace, "GET", path, runner=runner)
+    except PipelineError as exc:
+        if "HTTP 404" in str(exc):
+            return None
+        raise
+
+
+def _resolve_destination(workspace, name, receipt, receipt_path, *, runner):
+    if receipt.get("dataset_id"):
+        return receipt["dataset_id"]
+    pending = receipt.get("pending_write")
+    if pending is not None:
+        if pending.get("kind") != "dataset" or pending.get("name") != name:
+            raise PipelineError("pending dataset creation uses another destination")
+        current = _lookup(workspace, f"/api/v1/datasets/{pending['id']}", runner=runner)
+        if current is not None:
+            if current.get("id") != pending["id"] or current.get("name") != name or current.get("data_type") != "kv":
+                raise PipelineError("pending dataset creation conflicts with the recorded destination")
+            receipt.update(dataset_id=pending["id"], pending_write=None)
+            _json_dump(receipt_path, receipt)
+            return pending["id"]
+    else:
+        pending = {"kind": "dataset", "id": str(uuid4()), "name": name}
+        receipt["pending_write"] = pending
         _json_dump(receipt_path, receipt)
+    result = _api(workspace, "POST", "/api/v1/datasets", {"id": pending["id"], "name": name, "data_type": "kv"}, runner=runner)
+    if not isinstance(result, dict) or result.get("id") != pending["id"]:
+        raise PipelineError("dataset creation did not confirm its saved ID; rerun to reconcile")
+    receipt.update(dataset_id=pending["id"], pending_write=None)
+    _json_dump(receipt_path, receipt)
+    return pending["id"]
+
+
+def import_dataset(workspace, examples, source_keys, run_dir, receipt_path, *, name=None, dataset_id=None,
+                   runner, triaged=False, validation=None, saved_inputs=None, on_index=None):
+    """Resume frozen uploads, reconciling a pending write by ID before retrying it."""
+    request = {"workspace": workspace, "name": name, "dataset_id": dataset_id,
+               "sources": sorted(source_keys), "triaged": triaged}
+    request_hash = json_sha256(request)
+    if receipt_path.exists():
+        receipt = _load_json(receipt_path)
+        if receipt.get("schema_version") != 2:
+            raise PipelineError("legacy import receipt cannot resume automatically; inspect the destination and use a new run directory with --dataset-id")
+        if receipt.get("request_sha256") != request_hash or (dataset_id is not None and receipt.get("dataset_id") != dataset_id):
+            raise PipelineError("import destination or selection changed; use the original settings or a new run directory")
+    else:
+        receipt = {"schema_version": 2, "request_sha256": request_hash, "dataset_id": dataset_id,
+                   "dataset_name": name, "status": "indexing", "pending_write": None,
+                   "outcomes": {}, "created_at_utc": _utc_now()}
+        _json_dump(receipt_path, receipt)
+    actions_path = receipt_path.with_suffix(".actions.jsonl")
+
+    def save():
+        entries = list(receipt["outcomes"].values())
+        receipt.update({key: sum(e["action"] == key for e in entries) for key in ("created", "updated", "skipped", "rejected")})
+        receipt["actions"] = str(actions_path)
+        receipt["rejections"] = [e for e in entries if e["action"] == "rejected"]
+        receipt["confirmed_example_ids"] = [e["example_id"] for e in entries if e["action"] != "rejected"]
+        # The receipt is authoritative; regenerate the human-readable action log.
+        _json_dump(receipt_path, receipt)
+        _jsonl_dump(actions_path, entries)
+
+    try:
+        was_complete = receipt["status"] == "complete"
+        dataset_id = _resolve_destination(workspace, name, receipt, receipt_path, runner=runner)
+        # Newly created empty datasets need no index. Resumes query their state.
+        index = {} if name and not receipt["outcomes"] and receipt.get("status") == "indexing" and not was_complete else None
+        if index is None and not was_complete:
+            index = _destination_index(workspace, dataset_id, source_keys, run_dir, runner=runner)
+        if on_index is not None:
+            on_index(index)
+        receipt["status"] = "importing"
+        save()
         seen = set()
         for incoming in examples:
             key = _source_key(incoming, workspace, None)
             if key not in source_keys or key in seen:
                 raise PipelineError("incoming conversations must have unique, selected source identities")
             seen.add(key)
-            incoming_path = save_conversation(run_dir, incoming)
-            incoming = load_conversation(incoming_path)
+            identity = json_sha256(key)
+            digest = json_sha256(incoming)
+            previous = receipt["outcomes"].get(identity)
+            if previous is not None:
+                if previous["payload_sha256"] != digest:
+                    raise PipelineError("saved import trajectory changed; use a new run directory")
+                continue
+            if was_complete:
+                raise PipelineError("completed import is missing a selected source")
+            incoming_path = (saved_inputs or {}).get(key)
+            if incoming_path is None:
+                incoming_path = save_conversation(run_dir, incoming)
+                incoming = load_conversation(incoming_path)
+            else:
+                saved = load_conversation(incoming_path)["example"]
+                comparable = {**incoming, "metadata": {k: v for k, v in incoming["metadata"].items() if k != "smithtune_triage"}}
+                if comparable != saved:
+                    raise PipelineError("saved trajectory differs from import input")
             example_id, existing_path = index.get(key, (None, None))
-            existing = load_conversation(existing_path) if existing_path is not None else None
+            existing = load_conversation(existing_path) if existing_path else None
+            pending = receipt.get("pending_write")
+            if pending is not None:
+                if pending.get("identity") != identity or pending.get("payload_sha256") != digest:
+                    raise PipelineError("pending upload differs from the saved trajectory; restore the original input")
+                example_id = pending["example_id"]
+                existing = _lookup(workspace, f"/api/v1/examples/{example_id}", runner=runner)
+                if existing is not None:
+                    if existing.get("id") != example_id or existing.get("dataset_id") != dataset_id or _source_key(existing, workspace, None) != key:
+                        raise PipelineError("pending upload belongs to a different destination or source")
+                    current_hash = json_sha256(_payload(existing))
+                    if current_hash == pending["body_sha256"]:
+                        receipt["outcomes"][identity] = {k: v for k, v in pending.items() if k not in ("before_sha256", "body_sha256", "identity")}
+                        receipt["pending_write"] = None
+                        save()
+                        continue
+                    if pending["action"] == "created" or current_hash != pending["before_sha256"]:
+                        raise PipelineError("pending upload conflicts with changed destination content; inspect the receipt before retrying")
+                elif pending["action"] == "updated":
+                    raise PipelineError("pending update destination no longer exists")
             action, body = _action(incoming, existing, triaged=triaged)
-            rejection = import_rejection(incoming, workspace, runner=runner) if action != "skipped" else None
+            rejection = None
+            if action != "skipped":
+                rejection = validation(incoming) if validation is not None else import_rejection(incoming, workspace, runner=runner)
             if rejection is not None:
                 action = "rejected"
-            entry = {"action": action, "example_id": example_id, "conversation": str(incoming_path),
-                     "source": dict(zip(("workspace", "project", "scope", "scope_id"), key, strict=True)),
-                     **(rejection or {})}
+            if pending is not None and action != pending["action"]:
+                raise PipelineError("pending upload action changed; inspect the saved receipt")
+            if action == "created":
+                example_id = str(uuid5(NAMESPACE_URL, dataset_id + ":" + identity))
+            entry = {"action": action, "example_id": example_id, "conversation": str(incoming_path), "payload_sha256": digest,
+                     "source": dict(zip(("workspace", "project", "scope", "scope_id"), key, strict=True)), **(rejection or {})}
             if action in ("created", "updated"):
-                receipt["pending_write"] = entry
-                _json_dump(receipt_path, receipt)
+                write = {**entry, "identity": identity, "body_sha256": json_sha256(body),
+                         "before_sha256": json_sha256(_payload(existing)) if existing else None}
+                if pending is not None and write != pending:
+                    raise PipelineError("pending upload payload changed; inspect the saved receipt")
+                receipt["pending_write"] = write
+                save()
                 if action == "created":
-                    result = _api(workspace, "POST", "/api/v1/examples", {**body, "dataset_id": dataset_id}, runner=runner)
-                    entry["example_id"] = _uuid(result.get("id") if isinstance(result, dict) else None, "created example ID")
-                    if entry["example_id"] in existing_ids:
-                        raise PipelineError("destination returned a duplicate example ID")
-                    existing_ids.add(entry["example_id"])
+                    result = _api(workspace, "POST", "/api/v1/examples", {**body, "id": example_id, "dataset_id": dataset_id}, runner=runner)
+                    if not isinstance(result, dict) or result.get("id") != example_id:
+                        raise PipelineError("example import did not confirm its saved ID; rerun to reconcile")
                 else:
                     result = _api(workspace, "PATCH", f"/api/v1/examples/{example_id}", body, runner=runner)
                     if result != {"message": "Example updated"}:
                         raise PipelineError("example update was not confirmed")
-            with actions_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
-            receipt[action] += 1
+            receipt["outcomes"][identity] = entry
             receipt["pending_write"] = None
-            _json_dump(receipt_path, receipt)
+            save()
         if seen != source_keys:
             raise PipelineError("incoming download ended before every selected conversation was imported")
+        if receipt["pending_write"] is not None:
+            raise PipelineError("an upload still needs reconciliation")
         receipt["status"] = "complete"
-        _json_dump(receipt_path, receipt)
+        save()
     except BaseException as exc:
         receipt["status"] = "incomplete"
-        _json_dump(receipt_path, receipt)
+        save()
         detail = str(exc) if isinstance(exc, PipelineError) else type(exc).__name__
-        raise PipelineError(f"{detail}; dataset import incomplete; inspect {receipt_path} before retrying") from exc
+        location = f"--triage-dir {run_dir}" if triaged else f"--output {receipt_path.with_suffix('').with_suffix('.json')}"
+        raise PipelineError(f"{detail}; dataset import incomplete; rerun with the same settings and {location} to resume; receipt={receipt_path}") from exc
     return {"dataset_id": dataset_id, "example_count": sum(receipt[key] for key in ("created", "updated", "skipped")),
             **{key: receipt[key] for key in ("created", "updated", "skipped", "rejected")}, "receipt": str(receipt_path), "run_dir": str(run_dir)}
+
+
+def update_dataset(workspace, dataset_id, examples, source_keys, run_dir, receipt_path, *, runner, triaged=False, validation=None, saved_inputs=None):
+    return import_dataset(workspace, examples, source_keys, run_dir, receipt_path, dataset_id=dataset_id,
+                          runner=runner, triaged=triaged, validation=validation, saved_inputs=saved_inputs)

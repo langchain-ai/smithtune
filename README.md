@@ -123,6 +123,10 @@ tool-schema checks. Saved conversations remain unchanged; the result reports a
 `rejected` count and the import receipt records reasons. Model-specific rendering
 and context limits are still checked by `prepare`.
 
+Keep the returned run directory. To resume an interrupted `dataset create`, repeat
+its settings with `--run-dir <saved-directory>`; completed downloads and uploads
+are reused.
+
 For an optional model review before import, use
 [dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council).
 For additions to an existing dataset, see [dataset curation](docs/datasets.md).

@@ -33,6 +33,7 @@ class API:
         self.calls = []
         self.imported = []
         self.failure = None
+        self.datasets = {}
         self.root_pages = [[{"trace_id": uid(2), "thread_id": "conversation-a", "start_time": "2026-09-02T00:00:00Z", "feedback_stats": None}]]
         self.trajectory_pages = {
             None: {"messages": SYSTEM + messages(1), "next_cursor": "next"},
@@ -76,10 +77,23 @@ class API:
         elif path.startswith("/api/v1/sessions/"):
             value = {"id": uid(101), "start_time": "2026-08-01T00:00:00+00:00"}
         elif path == "/api/v1/datasets":
-            value = {"id": uid(200)}
+            value = copy.deepcopy(body)
+            self.datasets[body["id"]] = value
         elif path == "/api/v1/examples":
             self.imported.append(body)
             value = {"id": body["id"]}
+        elif path.endswith("/versions?limit=1"):
+            value = [{"as_of": "2026-09-15T00:00:00+00:00"}] if self.imported else []
+        elif path.startswith("/api/v1/datasets/"):
+            value = self.datasets.get(path.rsplit("/", 1)[1])
+            if value is None:
+                raise PipelineError("HTTP 404")
+        elif path.startswith("/api/v1/examples?"):
+            value = self.imported
+        elif path.startswith("/api/v1/examples/"):
+            value = next((ex for ex in self.imported if ex["id"] == path.rsplit("/", 1)[1]), None)
+            if value is None:
+                raise PipelineError("HTTP 404")
         else:
             raise AssertionError(path)
         return SimpleNamespace(stdout=json.dumps(value))
@@ -97,15 +111,15 @@ def run(tmp_path, api=None, **kwargs):
     return triage.run_triage(source(), tmp_path, runner=api or API(), judge_call=judge_call, confirm=True, sleeper=lambda _: None, **kwargs)
 
 
-def test_snapshot_expands_to_earlier_turns_and_preserves_tree(tmp_path):
+def test_snapshot_expands_to_earlier_turns_without_persisting_raw_trees(tmp_path):
     api = API()
     frozen = triage_source.snapshot(source(), tmp_path, runner=api)
     assert frozen["selected_trace_ids"] == [uid(2)]
     assert [trace["trace_id"] for trace in frozen["traces"]] == [uid(1), uid(2)]
-    assert frozen["traces"][1]["runs"][1]["parent_run_id"] == uid(2)
+    assert all("runs" not in trace for trace in frozen["traces"])
     assert frozen["units"][0]["example"]["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
     conversation, = (tmp_path / "conversations").glob("*.json")
-    assert load_conversation(conversation) == frozen["units"][0]["example"]
+    assert load_conversation(conversation) == frozen["units"][0]
     api.calls.clear()
     assert triage_source.snapshot(source(), tmp_path, runner=api) == frozen
     assert api.calls == []
@@ -399,7 +413,7 @@ def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
     run(tmp_path)
     path, = (tmp_path / "conversations").glob("*.json")
     example = load_conversation(path)
-    example["inputs"]["messages"][-1]["content"] = "changed since judging"
+    example["example"]["inputs"]["messages"][-1]["content"] = "changed since judging"
     path.write_text(json.dumps(example))
     with pytest.raises(PipelineError, match="saved conversation has changed"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=True,
@@ -407,7 +421,18 @@ def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
 
 
 def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
-    run(tmp_path)
+    frozen = triage_source.snapshot(source(), tmp_path, runner=API())
+    frozen.pop("unit_files")
+    frozen.pop("snapshot_sha256")
+    frozen["schema_version"] = 2
+    for unit in frozen["units"]:
+        unit.pop("traces")
+        unit.pop("multimodal_types")
+    for trace in frozen["traces"]:
+        trace["runs"] = []
+    frozen["snapshot_sha256"] = json_sha256(frozen)
+    (tmp_path / "snapshot.json").write_text(json.dumps(frozen))
+    run(tmp_path, api=lambda *_a, **_kw: pytest.fail("legacy snapshot must not refetch"))
     snapshot_bytes = (tmp_path / "snapshot.json").read_bytes()
     for path in (tmp_path / "conversations").glob("*.json"):
         path.unlink()
@@ -493,7 +518,7 @@ def test_resume_and_import_reject_mixed_or_tampered_artifacts(tmp_path, changed)
     elif changed == "snapshot":
         path = tmp_path / "snapshot.json"
         value = json.loads(path.read_text())
-        value["units"][0]["example"]["inputs"]["messages"][0]["content"] = "edited"
+        value["source"]["project_id"] = uid(999)
         path.write_text(json.dumps(value))
         with pytest.raises(PipelineError, match="hash mismatch"):
             run(tmp_path)
@@ -607,7 +632,7 @@ def test_cli_incomplete_triage_prints_summary_and_exits_nonzero(tmp_path, monkey
     assert json.loads(capsys.readouterr().out)["incomplete"] == 1
 
 
-def test_dataset_import_failure_has_receipt_and_cannot_repeat_writes(tmp_path):
+def test_dataset_import_failure_resumes_with_saved_destination(tmp_path):
     run(tmp_path)
     api = API()
 
@@ -619,12 +644,13 @@ def test_dataset_import_failure_has_receipt_and_cannot_repeat_writes(tmp_path):
     with pytest.raises(PipelineError, match="import incomplete"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=True, runner=api)
     receipt = json.loads((tmp_path / "dataset-import.json").read_text())
-    assert receipt["dataset_id"] == uid(200)
+    assert receipt["dataset_id"] == next(iter(api.datasets))
     assert receipt["status"] == "incomplete" and receipt["pending_write"]
-    count = len(api.calls)
-    with pytest.raises(PipelineError, match="cannot create"):
-        triage.create_triaged_dataset(tmp_path, "selected", confirm=True, runner=api)
-    assert len(api.calls) == count
+    api.failure = None
+    result = triage.create_triaged_dataset(tmp_path, "selected", confirm=True, runner=api)
+    assert result["example_count"] == 1
+    assert len(api.imported) == 1
+    assert len(api.datasets) == 1
 
 
 def test_concurrent_output_use_is_rejected_before_fetch_or_inference(tmp_path):
@@ -834,9 +860,7 @@ def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume)
     if resume:
         with pytest.raises(KeyboardInterrupt):
             triage_source.snapshot(source(), tmp_path, runner=api)
-        api.failure = None
-        api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
-        api.trajectory_pages["next"]["messages"] += messages(3)
+        resume = False  # Interrupt only the first attempt; grow during the next read.
     with pytest.raises(PipelineError, match="conversation-a changed during download"):
         triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()

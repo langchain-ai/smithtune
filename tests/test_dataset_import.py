@@ -50,11 +50,21 @@ class API:
             self.writes.append((method, path, body))
             if self.before_write:
                 self.before_write(method, path, body)
-            value = {"id": uid(1000 + len(self.writes))} if method == "POST" else {"message": "Example updated"}
+            if method == "POST":
+                self.existing.append(copy.deepcopy(body))
+                value = {"id": body["id"]}
+            else:
+                old = next(ex for ex in self.existing if ex["id"] == path.rsplit("/", 1)[1])
+                old.update(copy.deepcopy(body))
+                value = {"message": "Example updated"}
         elif path == f"/api/v1/datasets/{uid(200)}":
             value = {"id": uid(200), "data_type": "kv"}
         elif path.endswith("/versions?limit=1"):
             value = [{"as_of": self.version}] if self.existing else []
+        elif path.startswith("/api/v1/examples/"):
+            value = next((ex for ex in self.existing if ex["id"] == path.rsplit("/", 1)[1]), None)
+            if value is None:
+                raise PipelineError("HTTP 404")
         else:
             assert urlsplit(path).path == "/api/v1/examples"
             query = parse_qs(urlsplit(path).query)
@@ -95,7 +105,7 @@ def test_mixed_create_skip_update_preserves_ids_and_metadata(tmp_path):
     assert receipt(tmp_path)["pending_write"] is None
     actions = [json.loads(line) for line in (tmp_path / "receipt.actions.jsonl").read_text().splitlines()]
     assert [row["action"] for row in actions] == ["skipped", "updated", "created"]
-    assert [row["example_id"] for row in actions] == [uid(1), uid(2), uid(1002)]
+    assert [row["example_id"] for row in actions] == [uid(1), uid(2), post[2]["id"]]
 
 
 def test_destination_pagination_is_pinned_and_only_matches_saved(tmp_path):
@@ -149,7 +159,7 @@ def test_ordinary_import_skips_unchanged_triaged_but_cannot_extend(tmp_path):
 
 
 @pytest.mark.parametrize("method", ["POST", "PATCH"])
-def test_failed_write_keeps_pending_and_prior_success_without_retry(tmp_path, method):
+def test_failed_write_resumes_pending_and_retains_prior_success(tmp_path, method):
     api = API([example(1)] if method == "PATCH" else [])
 
     def fail_second(*args):
@@ -165,9 +175,11 @@ def test_failed_write_keeps_pending_and_prior_success_without_retry(tmp_path, me
     assert saved["pending_write"]["source"]["scope_id"] == "thread-1"
     assert load_conversation(Path(saved["pending_write"]["conversation"])) == example(1, 2)
     assert len((tmp_path / "receipt.actions.jsonl").read_text().splitlines()) == 1
-    with pytest.raises(PipelineError, match="use a new writable path"):
-        update(tmp_path, api, [example(2), example(1, 2)])
-    assert len(api.writes) == 2
+    api.before_write = None
+    result = update(tmp_path, api, [example(2), example(1, 2)])
+    assert result["example_count"] == 2
+    assert len(api.writes) == 3
+    assert api.writes[-1] == api.writes[-2]
 
 
 def test_missing_incoming_source_does_not_mark_complete(tmp_path):
@@ -315,5 +327,5 @@ def test_failed_upload_retains_completed_bounded_downloads(tmp_path, monkeypatch
         curation._import_selection(selection=tmp_path / "selection.json", dataset_id=uid(200), concurrency=2, runner=api)
     assert set(fetched) == {"thread-1", "thread-2"}
     saved = [load_conversation(path) for path in (tmp_path / "conversations").glob("*.json")]
-    assert {item["metadata"]["source_scope_id"] for item in saved} == set(fetched)
+    assert {item["example"]["metadata"]["source_scope_id"] for item in saved} == set(fetched)
     assert len(api.writes) == 1

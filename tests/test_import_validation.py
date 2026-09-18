@@ -103,7 +103,7 @@ def uploaded(api, destination):
 
 def rejection_entries(receipt, destination):
     if destination == "new":
-        assert receipt["in_flight"] == []
+        assert receipt["pending_write"] is None
         return receipt["rejections"]
     actions = [json.loads(line) for line in Path(receipt["actions"]).read_text().splitlines()]
     assert [item["action"] for item in actions] == ["rejected"] + [
@@ -171,8 +171,8 @@ def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp
         "source": {"workspace": uid(100), "project": uid(101), "scope": "trace", "scope_id": uid(1)},
         "reason": reason,
     }
-    assert load_conversation(Path(rejection["conversation"]))["inputs"] == original[0]["inputs"]
-    saved = [load_conversation(path) for path in (tmp_path / "conversations").glob("*.json")]
+    assert (lambda v: v.get("example", v))(load_conversation(Path(rejection["conversation"])))["inputs"] == original[0]["inputs"]
+    saved = [value.get("example", value) for path in (tmp_path / "conversations").glob("*.json") if (value := load_conversation(path))]
     assert {item["metadata"]["source_scope_id"]: item["inputs"] for item in saved} == {
         item["metadata"]["source_scope_id"]: item["inputs"] for item in original
     }
@@ -185,12 +185,15 @@ def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp
     if case == "uncalled-conflict":
         assert [body.get("cursor") for body in source.tool_queries if body.get("trace_id") == uid(1)] == [None, "1"]
     if destination == "new":
-        assert receipt["example_ids"] == [item["id"] for item in api.examples]
+        assert receipt["confirmed_example_ids"] == [item["id"] for item in api.examples]
     else:
         assert (result["created"], result["updated"], result["skipped"]) == (
             (2, 0, 0) if destination == "existing-post" else (0, 2, 0)
         )
-        assert api.existing == previous
+        if destination == "existing-patch":
+            assert api.existing[0] == previous[0]  # Rejected source was not overwritten.
+        else:
+            assert len(api.existing) == len(previous) + 2
     assert incoming == original
 
 
@@ -213,7 +216,7 @@ def test_all_rejected_import_completes_without_example_writes(tmp_path, destinat
     assert rejection["source"] == {
         "workspace": uid(100), "project": uid(101), "scope": "thread", "scope_id": "thread-1",
     }
-    assert load_conversation(Path(rejection["conversation"]))["inputs"] == original[0]["inputs"]
+    assert (lambda v: v.get("example", v))(load_conversation(Path(rejection["conversation"])))["inputs"] == original[0]["inputs"]
     assert uploaded(api, destination) == []
     assert incoming == original
 
@@ -235,16 +238,14 @@ def test_tool_read_failure_stops_import_without_pruning_or_example_writes(tmp_pa
     source = api if destination == "new" else api.source
     assert len(source.tool_queries) == 1
     if destination == "new":
-        assert receipt["status"] == "failed" and receipt["rejections"] == [] and receipt["example_ids"] == []
-        pending, = receipt["in_flight"]
-        assert pending["pending_write"] is None
-        assert pending["key"] == "trace_id" and pending["id"] == uid(1)
+        assert receipt["status"] == "incomplete" and receipt["rejections"] == [] and receipt["confirmed_example_ids"] == []
     else:
         assert receipt["status"] == "incomplete"
         assert (receipt["created"], receipt["updated"], receipt["skipped"], receipt["rejected"]) == (0, 0, 0, 0)
         assert Path(receipt["actions"]).read_text() == ""
-    saved, = (tmp_path / "conversations").glob("*.json")
-    assert load_conversation(saved)["inputs"] == incoming[0]["inputs"]
+    if destination != "new":
+        saved, = (tmp_path / "conversations").glob("*.json")
+        assert load_conversation(saved)["inputs"] == incoming[0]["inputs"]
 
 
 def test_unchanged_examples_skip_without_source_tool_reads(tmp_path):
@@ -269,5 +270,5 @@ def test_unresolvable_schema_is_not_reported_as_invalid_arguments(tmp_path):
         create(tmp_path, api)
 
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "failed" and receipt["rejections"] == []
+    assert receipt["status"] == "incomplete" and receipt["rejections"] == []
     assert api.examples == []
