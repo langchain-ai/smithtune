@@ -121,6 +121,8 @@ calls. Read `report.md` for results, `labels.jsonl` for keep/drop labels, and
 `judgments.jsonl` for individual votes.
 
 - Multimodal trajectories are excluded before judging.
+- Conversations that fail provider-neutral training validation are excluded
+  before judging, with the validation reason saved in their label.
 - If any judge rejects a trajectory as too long, the whole trajectory is
   excluded without truncation.
 - Other request failures remain incomplete and can be retried.
@@ -131,8 +133,8 @@ calls. Read `report.md` for results, `labels.jsonl` for keep/drop labels, and
 smithtune dataset create --triage-dir data/datasets/my-sft --name selected-sft --confirm
 ```
 
-Import uses the saved messages and tool schemas; unsupported training content
-is excluded. Pass the returned dataset ID to `prepare`. To add to an existing
+Import uses the saved messages and tool schemas. Pass the returned dataset ID
+to `prepare`. To add to an existing
 dataset, replace `--name` with `--dataset-id '<dataset-id>'`.
 
 Use a new triage directory when trajectories or judging settings change.

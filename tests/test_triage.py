@@ -97,6 +97,22 @@ def run(tmp_path, api=None, **kwargs):
     return triage.run_triage(source(), tmp_path, runner=api or API(), judge_call=judge_call, confirm=True, sleeper=lambda _: None, **kwargs)
 
 
+def use_legacy_prefilter_artifacts(path):
+    """Model a completed run written before training validation became a prefilter."""
+    manifest = path / "triage-config.json"
+    identity = json.loads(manifest.read_text())
+    identity["prefilter"] = "multimodal-and-provider-context-v1"
+    identity_hash = json_sha256(identity)
+    manifest.write_text(json.dumps(identity))
+    judgments = [json.loads(line) for line in (path / "judgments.jsonl").read_text().splitlines()]
+    for judgment in judgments:
+        judgment["identity_sha256"] = identity_hash
+    (path / "judgments.jsonl").write_text("".join(json.dumps(judgment) + "\n" for judgment in judgments))
+    summary = json.loads((path / "summary.json").read_text())
+    summary["identity_sha256"] = identity_hash
+    (path / "summary.json").write_text(json.dumps(summary))
+
+
 def test_snapshot_expands_to_earlier_turns_and_preserves_tree(tmp_path):
     api = API()
     frozen = triage_source.snapshot(source(), tmp_path, runner=api)
@@ -136,7 +152,7 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     assert triage_source.snapshot(source(), tmp_path, runner=only_membership) == frozen
 
 
-def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
+def test_snapshot_filters_missing_root_before_judging_and_blocks_import(tmp_path):
     api = API()
 
     def missing_root(command, **kwargs):
@@ -147,11 +163,15 @@ def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
             response.stdout = json.dumps(page)
         return response
 
-    result = run(tmp_path, missing_root)
+    result = triage.run_triage(source(), tmp_path, runner=missing_root, confirm=True,
+                               judge_call=lambda *_: pytest.fail("training-ineligible conversation reached a judge"))
     frozen = triage_source.load_snapshot(tmp_path)
     assert all(trace["root_run_id"] is None and trace["source_warnings"] for trace in frozen["traces"])
-    assert result["kept"] == 1 and result["eligible_conversations"] == 0
+    assert result["kept"] == 0 and result["eligible_conversations"] == 0
+    assert result["filtered_training"] == result["unsupported_training_conversations"] == 1
     assert frozen["units"][0]["training_error"] == "conversation source has a missing root run"
+    label = json.loads((tmp_path / "labels.jsonl").read_text())
+    assert frozen["units"][0]["training_error"] in label["reason"]
     with pytest.raises(PipelineError, match="no complete, kept"):
         triage.selected_examples(tmp_path)
 
@@ -165,7 +185,8 @@ def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
     assert frozen["units"][0]["training_error"]
     result = triage.run_triage(source(), tmp_path, runner=api, confirm=True,
                               judge_call=lambda *_: pytest.fail("multimodal trace reached a judge"))
-    assert result["filtered_multimodal"] == 1 and result["incomplete"] == 0
+    assert result["filtered_multimodal"] == 1 and result["filtered_training"] == 0 and result["incomplete"] == 0
+    assert result["unsupported_training_conversations"] == 1
     assert (tmp_path / "judgments.jsonl").read_text() == ""
     assert all(json.loads(line)["keep"] == 0 and "Filtered before judging" in json.loads(line)["reason"]
                for line in (tmp_path / "labels.jsonl").read_text().splitlines())
@@ -199,31 +220,44 @@ def tool_conversation(name="lookup", args=None, result=True):
     ({"args": {"limit": "many"}}, "do not match its JSON Schema"),
     ({"result": False}, "unmatched tool calls or results"),
 ])
-@pytest.mark.parametrize("cached", [False, True])
-def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, error, cached):
+def test_triage_filters_preparation_incompatibilities_before_judging(tmp_path, kwargs, error):
     api = tool_conversation(**kwargs)
-    if cached:
-        # Simulate a snapshot saved before tool-call validation was introduced.
-        with monkeypatch.context() as patch:
-            patch.setattr(triage_source, "training_error", lambda _: None)
-            patch.setattr(triage, "training_error", lambda _: None)
-            assert run(tmp_path, api)["eligible_conversations"] == 1
-        original = (tmp_path / "snapshot.json").read_bytes()
-        with pytest.raises(PipelineError, match="no complete, kept"):
-            triage.selected_examples(tmp_path)
-
-        def api(*_a, **_kw):
-            pytest.fail("cached source was fetched again")
-    summary = run(tmp_path, api)
+    summary = triage.run_triage(source(), tmp_path, runner=api, confirm=True,
+        judge_call=lambda *_: pytest.fail("training-ineligible conversation reached a judge"))
     frozen = triage_source.load_snapshot(tmp_path)
     assert error in triage_source.training_error(frozen["units"][0])
-    assert summary["kept"] == 1  # Compatibility does not change the quality votes.
-    assert summary["eligible_conversations"] == 0
-    assert summary["unsupported_training_conversations"] == 1
+    assert summary["kept"] == summary["eligible_conversations"] == 0
+    assert summary["filtered_training"] == summary["unsupported_training_conversations"] == 1
+    assert json.loads((tmp_path / "plan.json").read_text())["judge_tasks"] == 0
+    assert (tmp_path / "judgments.jsonl").read_text() == ""
+    label = json.loads((tmp_path / "labels.jsonl").read_text())
+    assert label["keep"] == 0 and error in label["reason"]
+    assert error in (tmp_path / "report.md").read_text()
+    assert triage.run_triage(source(), tmp_path, confirm=True,
+        judge_call=lambda *_: pytest.fail("filtered conversation reached a judge on resume"))["filtered_training"] == 1
     with pytest.raises(PipelineError, match="no complete, kept"):
         triage.selected_examples(tmp_path)
-    if cached:
-        assert (tmp_path / "snapshot.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"name": "missing_tool"},
+    {"args": {"limit": "many"}},
+    {"result": False},
+])
+def test_legacy_completed_triage_keeps_vote_semantics_and_revalidates_before_import(tmp_path, monkeypatch, kwargs):
+    api = tool_conversation(**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(triage_source, "training_error", lambda _: None)
+        patch.setattr(triage, "training_error", lambda _: None)
+        assert run(tmp_path, api)["eligible_conversations"] == 1
+    use_legacy_prefilter_artifacts(tmp_path)
+    original = (tmp_path / "snapshot.json").read_bytes()
+    summary = run(tmp_path, lambda *_a, **_kw: pytest.fail("cached source was fetched again"))
+    assert summary["kept"] == 1 and summary["eligible_conversations"] == 0
+    assert summary["filtered_training"] == 0 and summary["unsupported_training_conversations"] == 1
+    with pytest.raises(PipelineError, match="no complete, kept"):
+        triage.selected_examples(tmp_path)
+    assert (tmp_path / "snapshot.json").read_bytes() == original
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -234,6 +268,7 @@ def test_cached_triage_prunes_misplaced_system_messages_before_upload(tmp_path, 
         patch.setattr(triage_source, "training_error", lambda _: None)
         patch.setattr(triage, "training_error", lambda _: None)
         assert run(tmp_path, api)["eligible_conversations"] == 1
+    use_legacy_prefilter_artifacts(tmp_path)
     original = (tmp_path / "snapshot.json").read_bytes()
     api.calls.clear()
     destination = {"dataset_id": uid(200)} if existing else {"name": "new"}
@@ -779,6 +814,47 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
         judged = [e for _, e in seen if e == example["inputs"]["messages"]]
         assert len(judged) == 3
         assert all(e == example["inputs"]["messages"] for e in judged)
+
+
+def test_training_prefilter_reduces_votes_and_imports_valid_conversation(tmp_path):
+    api = API()
+    api.root_pages[0].append({**api.root_pages[0][0], "trace_id": uid(3), "thread_id": None})
+
+    def source_api(command, **kwargs):
+        response = api(command, **kwargs)
+        body = json.loads(kwargs["input"]) if kwargs.get("input") else None
+        if command[2] == "/v1/trajectory" and body and body.get("trace_id") == uid(3):
+            page = json.loads(response.stdout)
+            page["messages"].insert(2, {"role": "system", "content": "Late instructions."})
+            response.stdout = json.dumps(page)
+        return response
+
+    path = config(tmp_path, count=2)
+    work = tmp_path / "work"
+    plan = triage.run_triage(source(), work, runner=source_api, dry_run=True, config_path=path)
+    assert plan["trajectories"] == 2 and plan["filtered_training"] == 1 and plan["judge_tasks"] == 2
+    seen = []
+
+    def judge(slot, prompt, tokens):
+        evidence = json.loads(prompt[-1]["content"])["untrusted_trajectory"]
+        assert not any(message["role"] == "system" for message in evidence[1:])
+        seen.append(slot["name"])
+        return judge_call(slot, prompt, tokens)
+
+    summary = triage.run_triage(source(), work, runner=source_api, judge_call=judge, confirm=True, config_path=path)
+    assert len(seen) == 2
+    assert summary["kept"] == summary["eligible_conversations"] == 1
+    assert summary["filtered_training"] == summary["unsupported_training_conversations"] == 1
+    labels = [json.loads(line) for line in (work / "labels.jsonl").read_text().splitlines()]
+    assert sum(label["keep"] for label in labels) == 1
+    assert sum("misplaced system message" in label["reason"] for label in labels) == 1
+    example, = triage.selected_examples(work)
+    assert not any(message["role"] == "system" for message in example["inputs"]["messages"][1:])
+    saved = (work / "judgments.jsonl").read_bytes()
+    resumed = triage.run_triage(source(), work, config_path=path, confirm=True,
+        runner=lambda *_a, **_kw: pytest.fail("cached source was fetched again"),
+        judge_call=lambda *_: pytest.fail("completed or filtered conversation reached a judge"))
+    assert resumed["filtered_training"] == 1 and (work / "judgments.jsonl").read_bytes() == saved
 
 
 def test_old_trace_votes_cannot_be_reused_or_imported(tmp_path):

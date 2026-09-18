@@ -606,7 +606,8 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
                 if args.confirm:
-                    value = {key: value[key] for key in ("status", "trajectories", "filtered_multimodal", "filtered_context", "kept", "dropped", "incomplete", "labels", "report")}
+                    value = {key: value[key] for key in ("status", "trajectories", "filtered_multimodal", "filtered_training",
+                                                         "filtered_context", "kept", "dropped", "incomplete", "labels", "report")}
                 value["run_dir"] = str(directory)
             elif args.triage_dir is not None:
                 if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output, args.run_dir)):
