@@ -110,7 +110,8 @@ smithtune dataset create data/datasets/my-sft --confirm
 
 The first command downloads and previews; `--confirm` runs the saved workflow.
 An explicit filter with no judging criteria creates the dataset without model
-calls. Add `--rule 'Keep answers grounded in documentation'` to judge the filtered
+calls. Add `--rubric ./rubric.md` for an agreed selection document, or
+`--rule 'Keep answers grounded in documentation'`, to judge the filtered
 candidates. Without a filter, `create` defaults to council review; `--no-triage`
 explicitly skips it. The preview shows the selected path before paid work.
 

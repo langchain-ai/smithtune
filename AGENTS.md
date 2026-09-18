@@ -11,7 +11,7 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
 
 ## Choose the starting point
 
-- Tracing project: use `dataset create DIR` to preview the saved workflow, then repeat with `--confirm`. Explicit `--filter` without council criteria skips model calls; `--rule` applies council judging after filtering. Without a filter, create defaults to council review; `--no-triage` explicitly skips it.
+- Tracing project: use `dataset create DIR` to preview the saved workflow, then repeat with `--confirm`. Explicit `--filter` without council criteria skips model calls; `--rubric FILE` or `--rule` applies council judging after filtering. Without a filter, create defaults to council review; `--no-triage` explicitly skips it.
 - For staged curation: `dataset pull DIR` downloads; `dataset triage DIR` previews local judging, and `--confirm` runs it; `dataset push DIR --name NAME` (or `--dataset-id ID`) previews upload, and `--confirm` uploads. Source flags belong to pull/create. Pass the resulting dataset ID to prepare. See [dataset curation](docs/datasets.md) for council models, rules, and labels; explain the saved counts and reasons after judging.
 - Existing dataset: start at `prepare`; reuse `metadata.smithtune_source` per-assistant tool evidence. Unbound exports need source scope/project metadata, stable assistant output-message IDs, and producing LLM runs with recorded tools for automatic capture.
 - Prepared data: start at `plan`, then `train` using the same provider and data directory.

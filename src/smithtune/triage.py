@@ -62,7 +62,7 @@ def validate_config(value: dict) -> dict:
     return {"judges": judges, "rules": rules}
 
 
-def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=None, saved_settings=None, **overrides) -> dict:
+def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=None, rubric_path=None, saved_settings=None, **overrides) -> dict:
     """Reuse the preview on confirm/resume; explicit options replace defaults."""
     path = output_dir / "plan.json"
     saved = _load_json(path) if path.exists() else {}
@@ -91,11 +91,21 @@ def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=N
         config["judges"] = slots
     if rules is not None:
         config["rules"] = rules
+    selection_rubric = saved.get("selection_rubric")
+    if rubric_path is not None:
+        try:
+            selection_rubric = rubric_path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise PipelineError("--rubric must be a readable UTF-8 file") from exc
+        if not selection_rubric.strip():
+            raise PipelineError("--rubric must contain non-empty text")
     settings = {"config": validate_config(config),
                 "runner_mode": saved.get("runner", "deepagent"),
                 "concurrency": saved.get("concurrency", 4),
                 "attempts": saved.get("max_attempts_per_task", 3),
                 "max_output_tokens": saved.get("max_output_tokens", 4096)}
+    if selection_rubric is not None:
+        settings["selection_rubric"] = selection_rubric
     settings.update({key: value for key, value in overrides.items() if value is not None})
     return settings
 
@@ -140,8 +150,11 @@ def _result(label: dict) -> dict:
 
 def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = None, runner_mode="api", dry_run=False,
                confirm=False, concurrency=4, max_output_tokens=4096, attempts=3,
-               runner=_run, judge_call=None, sleeper=time.sleep, config: dict | None = None, frozen: dict | None = None) -> dict:
+               runner=_run, judge_call=None, sleeper=time.sleep, config: dict | None = None, frozen: dict | None = None,
+               selection_rubric: str | None = None) -> dict:
     config = validate_config(config) if config is not None else load_config(config_path)
+    if selection_rubric is not None and (not isinstance(selection_rubric, str) or not selection_rubric.strip()):
+        raise PipelineError("selection rubric must be non-empty text")
     if runner_mode not in {"api", "deepagent"}:
         raise PipelineError("triage runner must be api or deepagent")
     if not 1 <= concurrency <= 16 or not 1 <= attempts <= 5 or not 128 <= max_output_tokens <= 16384:
@@ -163,10 +176,14 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     rejections = [_result(_label(trajectory, {}, config["judges"], error=training_errors[trajectory["trajectory_id"]]))
                   for trajectory in judging if trajectory["trajectory_id"] in filtered]
     rubric = rubric_text()
+    if selection_rubric is not None:
+        rubric += "\nTask-specific selection rubric:\n" + selection_rubric
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
                 "runner": runner_mode, "max_output_tokens": max_output_tokens,
                 "reasoning": {"fireworks": "none", "gpt-5.6-terra": "none"},
                 "prefilter": "multimodal-and-provider-context-v1", "judging_unit": "conversation-v1"}
+    if selection_rubric is not None:
+        identity["selection_rubric"] = selection_rubric
     if any("assistant_runs" in trajectory for trajectory in judging):
         identity["tool_evidence"] = "per-assistant-v1"
     identity["reasoning"].update({judge["model"]: FIREWORKS_REASONING[judge["model"]] for judge in config["judges"]
