@@ -162,29 +162,32 @@ class InferenceContract:
     contract_sha256: str
 
     def validate_tool_arguments(self, name: str, arguments: Any) -> None:
-        tool = next(
-            (item for item in self.tools if item["function"]["name"] == name),
+        tool_index = next(
+            (index for index, item in enumerate(self.tools) if item["function"]["name"] == name),
             None,
         )
-        if tool is None:
-            raise ContractError(f"unknown tool {name}")
-        schema = tool["function"]["parameters"]
+        if tool_index is None:
+            raise ContractError("unknown tool in recorded tool call")
+        schema = self.tools[tool_index]["function"]["parameters"]
         validator = validator_for(schema)(schema, registry=Registry())
         try:
             errors = sorted(
                 validator.iter_errors(arguments),
                 key=lambda error: tuple(str(part) for part in error.path),
             )
-        except Unresolvable as exc:
+        except Unresolvable:
             raise ContractError(
-                f"cannot resolve schema reference {exc.ref!r} for tool {name}; "
+                f"cannot resolve schema reference for tool at index {tool_index}; "
                 "external retrieval is disabled; include the definition in the saved tool schema"
-            ) from exc
-        except Exception as exc:
-            raise ContractError(f"cannot validate arguments for tool {name}: {exc}") from exc
+            ) from None
+        except Exception:
+            raise ContractError(f"cannot validate arguments for tool at index {tool_index}") from None
         if errors:
+            # Instance paths can contain sensitive dynamic keys, not just values.
+            keyword = errors[0].validator
+            reason = keyword if keyword in validator.VALIDATORS else "validation"
             raise ContractError(
-                f"arguments for tool {name} do not match its JSON Schema: {errors[0].message}"
+                f"arguments for tool at index {tool_index} do not match its JSON Schema ({reason})"
             )
 
     def validate_messages(self, messages: Sequence[Mapping[str, Any]]) -> None:

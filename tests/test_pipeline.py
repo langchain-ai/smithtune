@@ -1453,6 +1453,7 @@ def test_fireworks_inference_uses_recorded_messages_with_contract_tools(
             json.dumps({"choices": [{"message": {"role": "assistant", "content": "done"}}]}).encode()
         )
 
+    monkeypatch.setattr(inference_transport, "open_without_redirects", fake_urlopen)
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "session-id")
@@ -1572,6 +1573,7 @@ def test_inference_transport_reports_failures_as_pipeline_errors(
             raise failure
         return Response(failure)
 
+    monkeypatch.setattr(inference_transport, "open_without_redirects", fake_urlopen)
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "session-id")

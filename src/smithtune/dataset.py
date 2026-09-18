@@ -71,10 +71,23 @@ class Audit:
 
 def _run_langsmith(command: list[str], *, capture: bool = False, input: str | None = None) -> subprocess.CompletedProcess[str]:
     try:
-        return _run(command, capture=capture, **({"input": input} if input is not None else {}))
+        # Export commands must not bypass sanitization by inheriting stderr.
+        result = _run(command, capture=True, **({"input": input} if input is not None else {}))
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
-        raise PipelineError(detail) from None
+        diagnostic = (exc.stderr or "").strip() or (exc.stdout or "").strip()
+        status = re.search(r"\bHTTP [45]\d\d\b", diagnostic, re.I)
+        timeout = re.search(
+            r"\b(context deadline exceeded|Client\.Timeout exceeded|request timed out|Query timeout exceeded)\b",
+            diagnostic, re.I,
+        )
+        details = [status.group().upper()] if status else []
+        if timeout:
+            details.append("request timed out")
+        detail = "; ".join(details) or f"exited with status {exc.returncode}"
+        raise PipelineError(f"langsmith failed: {detail}") from None
+    if not capture:
+        return subprocess.CompletedProcess(result.args, result.returncode)
+    return result
 
 
 def _langsmith_dataset_command(workspace_id: str, dataset_id: str) -> list[str]:

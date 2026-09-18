@@ -51,7 +51,7 @@ def test_replay_temperature_default_survives_automatic_contracts(monkeypatch, te
         requests.append(json.loads(request.data))
         return io.BytesIO(json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}).encode())
 
-    monkeypatch.setattr(inference.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(inference, "open_without_redirects", urlopen)
     inference._fireworks_chat_completion("model", [{"role": "user", "content": "hi"}], 128, request_contract=contract)
     assert requests[0]["temperature"] == (0 if temperature is None else temperature)
 
