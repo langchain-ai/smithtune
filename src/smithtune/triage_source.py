@@ -21,7 +21,8 @@ from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc
 from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
-from smithtune.bindings import capture_bindings, validate_bound_messages
+from smithtune.bindings import BindingCapture, validate_bound_messages
+from smithtune.dataset_artifacts import LazySequence
 from smithtune.providers.base import PipelineError
 
 
@@ -248,7 +249,9 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
         if tid not in unit_traces:
             raise PipelineError("selected root was not found in its conversation")
         all_messages = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
-        all_runs, unit_records = [], []
+        capture = BindingCapture(all_messages)
+        unit_records = []
+        error = None
         for trace_id in unit_traces:
             if len(unit_records) >= MAX_EXPANDED_TRACES:
                 raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
@@ -258,7 +261,11 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
             roots_for_trace = [run for run in runs if not run.get("parent_run_id")]
             if len(roots_for_trace) > 1:
                 raise PipelineError("trace has multiple root runs")
-            all_runs.extend(runs)
+            if error is None:
+                try:
+                    capture.add(runs)
+                except PipelineError as exc:
+                    error = str(exc)
             record = {"trace_id": trace_id, "root_run_id": roots_for_trace[0]["id"] if roots_for_trace else None, "thread_id": thread,
                       "project_id": project, "runs": runs}
             if not roots_for_trace:
@@ -267,6 +274,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
             record["source_sha256"] = json_sha256(record)
             record.pop("runs")
             unit_records.append(record)
+            del runs, roots_for_trace
         if thread:
             # The trajectory is live; verify membership again without cached reads.
             current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
@@ -281,15 +289,16 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
                                 "source_scope_id": thread or unit_traces[0],
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
         contract = None
-        error = None
-        try:
-            example["metadata"]["smithtune_source"] = capture_bindings(all_messages, all_runs)
-        except PipelineError as exc:
-            error = str(exc)
+        if error is None:
+            try:
+                example["metadata"]["smithtune_source"] = capture.finish()
+            except PipelineError as exc:
+                error = str(exc)
         if any(trace["root_run_id"] is None for trace in unit_records):
             error = "conversation source has a missing root run"
         unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error,
-                "traces": unit_records, "multimodal_types": multimodal_types({"messages": all_messages, "runs": all_runs})}
+                "traces": unit_records, "multimodal_types": sorted(set(multimodal_types({"messages": all_messages})).union(
+                    *(record["multimodal_types"] for record in unit_records)))}
         unit["training_error"] = training_error(unit)
         return key, unit
 
@@ -344,12 +353,12 @@ def load_snapshot(output_dir: Path) -> dict:
         paths = value.get("unit_files")
         if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths) or len(set(paths)) != len(paths):
             raise PipelineError("invalid triage snapshot file references")
-        units = [storage.read_file(output_dir, path) for path in paths]
+        units = LazySequence(len(paths), lambda index: storage.read_file(output_dir, paths[index]))
         value = {**value, "units": units, "traces": [trace for unit in units for trace in unit["traces"]]}
     return value
 
 
-def conversation_trajectories(frozen: dict) -> list[dict]:
+def conversation_trajectories(frozen: dict, *, summaries=False) -> list[dict]:
     """Use the existing training conversations as the judging units."""
     traces = {trace["trace_id"]: trace for trace in frozen["traces"]}
     trajectories = []
@@ -362,7 +371,10 @@ def conversation_trajectories(frozen: dict) -> list[dict]:
             runs = [run for tid in unit["trace_ids"] for run in traces[tid]["runs"]]
             trajectory["multimodal_types"] = multimodal_types({**trajectory, "runs": runs})
         source = unit["example"].get("metadata", {}).get("smithtune_source")
-        if source is not None:
+        if summaries:
+            trajectory.pop("messages")
+            trajectory["has_assistant_runs"] = source is not None
+        elif source is not None:
             trajectory["assistant_runs"] = source["assistant_runs"]
         trajectories.append(trajectory)
     return trajectories

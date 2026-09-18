@@ -9,7 +9,7 @@ from smithtune import checkpoint as storage, dataset_import, triage, triage_sour
 from smithtune.artifacts import _load_json, _run, output_lock
 from smithtune.curation import MAX_LIMIT, _destination, _time, _uuid
 from smithtune.dataset import _source_key
-from smithtune.dataset_artifacts import new_run_directory
+from smithtune.dataset_artifacts import LazySequence, new_run_directory
 from smithtune.providers.base import PipelineError
 
 
@@ -125,7 +125,8 @@ def _pending(directory, state):
 def _examples(directory, frozen, state):
     if "triage" in state["stages"]:
         return triage.selected_examples(directory, frozen=frozen, require_complete=True, allow_empty=True)
-    return [unit["example"] for unit in frozen["units"] if not triage_source.training_error(unit)]
+    indices = [index for index, unit in enumerate(frozen["units"]) if not triage_source.training_error(unit)]
+    return LazySequence(len(indices), lambda index: frozen["units"][indices[index]]["example"])
 
 
 def _push(directory, frozen, state, *, confirm, runner):

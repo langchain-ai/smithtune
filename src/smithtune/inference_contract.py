@@ -41,7 +41,12 @@ def canonical_json(value: Any) -> str:
 
 
 def json_sha256(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode()).hexdigest()
+    # Preserve canonical fingerprints without whole-document string/byte copies.
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    for chunk in encoder.iterencode(value):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def content_sha256(content: Any) -> str:

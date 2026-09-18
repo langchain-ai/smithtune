@@ -507,7 +507,7 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
 
 def test_changed_triaged_messages_are_rejected(tmp_path):
     run(tmp_path)
-    examples = triage.selected_examples(tmp_path)
+    examples = list(triage.selected_examples(tmp_path))
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     with pytest.raises(PipelineError, match="changed after judging"):
         dataset.capture_example_contracts(uid(100), examples)
@@ -526,6 +526,7 @@ def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
 
 def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
     frozen = triage_source.snapshot(source(), tmp_path, runner=API())
+    frozen["units"] = list(frozen["units"])
     frozen.pop("unit_files")
     frozen.pop("snapshot_sha256")
     frozen["schema_version"] = 2
@@ -597,7 +598,7 @@ def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
 @pytest.mark.parametrize("global_contract", [False, True])
 def test_prepare_always_checks_triaged_message_integrity(tmp_path, monkeypatch, fetch, global_contract):
     run(tmp_path)
-    examples = triage.selected_examples(tmp_path)
+    examples = list(triage.selected_examples(tmp_path))
     contract = tool_contract([]) if global_contract else None
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
