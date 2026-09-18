@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from smithtune import checkpoint, cli, curation, dataset, dataset_import, triage, triage_source
+from smithtune import checkpoint, cli, curation, dataset, dataset_import, dataset_workflow, triage, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
 from test_curation import API as SourceAPI, create, root
@@ -33,7 +33,7 @@ def test_failed_download_resumes_frozen_selection_and_completed_tools(tmp_path, 
             raise PipelineError("HTTP 504")
 
     api.failure = fail
-    with pytest.raises(PipelineError, match="--output"):
+    with pytest.raises(PipelineError, match="dataset resume"):
         create(tmp_path, api, start_time=None, end_time=None)
     api.failure = None
     api.pages = [[root(3, "new")]]
@@ -184,10 +184,10 @@ def test_triage_checkpoint_reuses_complete_units_and_votes(tmp_path):
 
 
 def test_triage_repeat_source_flags_uses_saved_default_window(tmp_path, monkeypatch, capsys):
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *a, **kw: original(*a, **kw, runner=TriageAPI(), judge_call=judge_call))
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *a, **kw: original(*a, **kw, runner=TriageAPI(), judge_call=judge_call))
     monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
-    args = ["dataset", "triage", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101)]
+    args = ["dataset", "create", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101), "--name", "same-window"]
     cli.main(args)
     capsys.readouterr()
     before = (tmp_path / "snapshot.json").read_bytes()

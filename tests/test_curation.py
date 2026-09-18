@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -384,44 +383,34 @@ def test_api_uses_stdin_and_run_passes_it_to_subprocess(monkeypatch):
 
 
 def test_parser_defaults_and_dispatch(tmp_path, monkeypatch, capsys):
-    args = ["dataset", "create", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--name", "new", "--limit", "100"]
+    from smithtune import dataset_workflow
+    from test_triage import API as TriageAPI
+
+    args = ["dataset", "create", "--workspace-id", uid(100), "--project-id", uid(101), "--name", "new"]
     parsed = pipeline._parser().parse_args(args)
-    assert parsed.limit == 100 and parsed.output is None and not hasattr(parsed, "seed")
-    assert parsed.concurrency == 4 and pipeline._parser().parse_args([*args, "--concurrency", "2"]).concurrency == 2
-    api = API([[root(1, "a"), root(2, "a"), root(3, "b")]])
-    create_dataset = curation.create_dataset
+    assert parsed.limit is None and parsed.directory is None and not hasattr(parsed, "seed")
+    assert parsed.concurrency is None and pipeline._parser().parse_args([*args, "--concurrency", "2"]).concurrency == 2
+    api = TriageAPI()
+    original = dataset_workflow.run
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
-    monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: create_dataset(**kwargs, runner=api))
-    monkeypatch.setattr(sys, "argv", ["pipeline.py", *args, "--filter", 'has(tags, "reviewed")', "--limit", "1"])
-    pipeline.main()
+    monkeypatch.setattr(dataset_workflow, "run", lambda *a, **kw: original(*a, **kw, runner=api))
+    pipeline.main([*args, "--filter", 'has(tags, "reviewed")', "--limit", "1", "--confirm"])
     captured = capsys.readouterr()
     result = json.loads(captured.out)
-    assert "Selecting conversations" in captured.err
+    assert "Dataset directory" in captured.err
     assert result["dataset_id"] == next(iter(api.datasets)) and result["example_count"] == 1
-    assert result["matching_roots"] == 3 and result["distinct_conversations"] == 2
-    assert result["trace_keyed_examples"] == 0
-    assert "preview" not in result
-    saved = json.loads(Path(result["selection"]).read_text())
-    assert saved["query"]["limit"] == 1 and saved["query"]["filter"] == 'has(tags, "reviewed")'
-    assert saved["query"]["start_time"] == "2026-09-02T00:00:00+00:00"
-    assert saved["query"]["end_time"] == "2026-09-03T00:00:00+00:00"
-    assert saved["selected"] == [thread("a")]
-    assert api.trajectory_calls() == [{"thread_id": "a"}]
+    assert result["downloaded"] == 1
+    saved = json.loads((Path(result["run_dir"]) / "snapshot.json").read_text())
+    assert saved["source"]["limit"] == 1 and saved["source"]["filter"] == 'has(tags, "reviewed")'
+    assert saved["source"]["start_time"] == "2026-09-02T00:00:00+00:00"
+    assert saved["source"]["end_time"] == "2026-09-03T00:00:00+00:00"
     assert Path(result["receipt"]).exists()
-    assert pipeline._parser().parse_args([*args, "--output", str(tmp_path / "custom.json")]).output == tmp_path / "custom.json"
     for obsolete in (["dataset", "select"], [*args, "--selection", "saved.json"], [*args, "--scope", "trace"],
                      [*args, "--seed", "17"]):
         with pytest.raises(SystemExit) as error:
             pipeline._parser().parse_args(obsolete)
         assert error.value.code == 2
-    for concurrency in (0, 5):
-        with pytest.raises(PipelineError, match="concurrency must be"):
-            create_dataset(workspace_id=uid(100), project_id=uid(101), name="new", limit=1,
-                           start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z",
-                           output=tmp_path / "never.json", concurrency=concurrency, runner=api)
-    assert not (tmp_path / "never.json").exists()
 
 
 def test_create_download_prepare(tmp_path):

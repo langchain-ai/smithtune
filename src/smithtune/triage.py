@@ -23,6 +23,11 @@ from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROV
 from smithtune.triage_source import conversation_trajectories, load_snapshot, multimodal_types, snapshot, training_error
 
 
+# Accept known whole-file hashes for vote recovery only when the coordinator
+# instructions match. Operator guidance does not affect council decisions.
+LEGACY_COORDINATOR_SKILLS = {"2c32f652cb3c3ae3e2155125c892a1fff2e24d4912dea4a9bbcb75135617632b": "a50b912941ff1bd49ceb4cc7e6b0dd0c084590c6651716ed2042cc26c89b1627"}
+
+
 JUDGE_ALIASES = {
     "muse-glimmer-30b": ("fireworks", "accounts/fireworks/models/muse-glimmer-30b"),
     "deepseek-v4.1-flash": ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
@@ -57,10 +62,12 @@ def validate_config(value: dict) -> dict:
     return {"judges": judges, "rules": rules}
 
 
-def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=None, **overrides) -> dict:
+def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=None, saved_settings=None, **overrides) -> dict:
     """Reuse the preview on confirm/resume; explicit options replace defaults."""
     path = output_dir / "plan.json"
     saved = _load_json(path) if path.exists() else {}
+    if saved_settings is not None:
+        saved = {**saved_settings, "runner": saved_settings["runner_mode"], "max_attempts_per_task": saved_settings["attempts"]}
     if not isinstance(saved, dict):
         raise PipelineError("invalid saved council plan")
     config = copy.deepcopy(saved["config"]) if "config" in saved else load_config(None)
@@ -128,10 +135,9 @@ def _result(label: dict) -> dict:
     return {"trajectory_id": label["trajectory_id"], "keep": label["keep"], "reason": reason}
 
 
-@exclusive_output("output_dir")
-def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = None, runner_mode="api", dry_run=False,
+def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = None, runner_mode="api", dry_run=False,
                confirm=False, concurrency=4, max_output_tokens=4096, attempts=3,
-               runner=_run, judge_call=None, sleeper=time.sleep, config: dict | None = None) -> dict:
+               runner=_run, judge_call=None, sleeper=time.sleep, config: dict | None = None, frozen: dict | None = None) -> dict:
     config = validate_config(config) if config is not None else load_config(config_path)
     if runner_mode not in {"api", "deepagent"}:
         raise PipelineError("triage runner must be api or deepagent")
@@ -139,7 +145,9 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         raise PipelineError("invalid triage concurrency, retry, or input/output limits")
     if not dry_run and not confirm:
         raise PipelineError("trajectory judging incurs cost; review --dry-run, then use --confirm")
-    frozen = snapshot(source, output_dir, runner=runner)
+    frozen = snapshot(source, output_dir, runner=runner) if frozen is None else frozen
+    if frozen["source"] != source:
+        raise PipelineError("triage snapshot uses a different source query; use a new directory")
     judging = conversation_trajectories(frozen)
     filtered = {trajectory["trajectory_id"] for trajectory in judging
                 if (trajectory["multimodal_types"] if "multimodal_types" in trajectory else multimodal_types(trajectory))}
@@ -158,7 +166,12 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
         # The coordinator skill changes scheduling decisions and belongs in
         # the resume identity just like the judge rubric.
         skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        identity.update(agent_version=11, skill_sha256=json_sha256(skill))
+        skill_hash = json_sha256(skill.partition("## Agent helping a user")[0])
+        saved_identity = _load_json(output_dir / "triage-config.json") if (output_dir / "triage-config.json").exists() else {}
+        previous = saved_identity.get("skill_sha256")
+        if LEGACY_COORDINATOR_SKILLS.get(previous) == skill_hash:
+            skill_hash = previous
+        identity.update(agent_version=11, skill_sha256=skill_hash)
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(filtered),
@@ -304,6 +317,9 @@ def run_triage(source: dict, output_dir: Path, *, config_path: Path | None = Non
     return summary
 
 
+run_triage = exclusive_output("output_dir")(_run_triage)
+
+
 def _run_direct(pending, judge_one, save_record, concurrency):
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = []
@@ -317,7 +333,7 @@ def _run_direct(pending, judge_one, save_record, concurrency):
                 future.cancel()
 
 
-def selected_examples(triage_dir: Path, *, frozen: dict | None = None) -> list[dict]:
+def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_complete=False, allow_empty=False) -> list[dict]:
     frozen = load_snapshot(triage_dir) if frozen is None else frozen
     judging = conversation_trajectories(frozen)
     identity = _load_json(triage_dir / "triage-config.json")
@@ -349,6 +365,8 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None) -> list[d
         calculated = _label(trajectory, records, identity["config"]["judges"])
         if _result(calculated) != by_id[tid]:
             raise PipelineError("labels do not match validated judge votes")
+        if require_complete and calculated["status"] == "incomplete":
+            raise PipelineError("council judging is incomplete; run dataset resume DIR --confirm before pushing")
         by_id[tid] = calculated
     selected = []
     for unit in frozen["units"]:
@@ -363,9 +381,10 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None) -> list[d
         example["metadata"]["smithtune_triage"] = {"identity_sha256": json_sha256(identity),
             "messages_sha256": json_sha256(example["inputs"]["messages"]), "contract": contract.to_dict()}
         selected.append(example)
-    if not selected:
+    if not selected and not allow_empty:
         raise PipelineError("no complete, kept conversations are eligible for training")
-    validate_trajectories(selected, len(selected))
+    if selected:
+        validate_trajectories(selected, len(selected))
     return selected
 
 
