@@ -100,11 +100,14 @@ def council_settings(output_dir: Path, *, judges=None, rules=None, config_path=N
     return settings
 
 
-def _label(trajectory: dict, records: dict, judges: list[dict]) -> dict:
+def _label(trajectory: dict, records: dict, judges: list[dict], *, error: str | None = None) -> dict:
     media = trajectory["multimodal_types"] if "multimodal_types" in trajectory else multimodal_types(trajectory)
     if media:
         return {"trajectory_id": trajectory["trajectory_id"], "keep": 0, "status": "filtered", "votes": [],
                 "disagreement": False, "reason": "Filtered before judging: multimodal content (" + ", ".join(media) + ")."}
+    if error:
+        return {"trajectory_id": trajectory["trajectory_id"], "keep": 0, "status": "filtered", "votes": [],
+                "disagreement": False, "reason": "Filtered before judging: " + error}
     votes = [records.get((trajectory["trajectory_id"], judge["name"])) for judge in judges]
     context_error = next((vote for vote in votes if vote and vote["status"] == "context_exceeded"), None)
     if context_error:
@@ -151,6 +154,14 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     judging = conversation_trajectories(frozen)
     filtered = {trajectory["trajectory_id"] for trajectory in judging
                 if (trajectory["multimodal_types"] if "multimodal_types" in trajectory else multimodal_types(trajectory))}
+    multimodal_filtered = filtered.copy()
+    # Recheck cached snapshots before paid work without changing frozen evidence
+    # or vote identity: provider-neutral eligibility does not change judge inputs.
+    training_errors = {unit["example"]["id"]: training_error(unit) for unit in frozen["units"]}
+    training_filtered = {tid for tid, error in training_errors.items() if error} - filtered
+    filtered |= training_filtered
+    rejections = [_result(_label(trajectory, {}, config["judges"], error=training_errors[trajectory["trajectory_id"]]))
+                  for trajectory in judging if trajectory["trajectory_id"] in filtered]
     rubric = rubric_text()
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
                 "runner": runner_mode, "max_output_tokens": max_output_tokens,
@@ -176,8 +187,10 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
         identity.update(agent_version=11, skill_sha256=skill_hash)
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
-            "filtered_multimodal": len(filtered),
+            "filtered_multimodal": len(multimodal_filtered),
+            "filtered_training": len(training_filtered),
             "judge_tasks": (len(judging) - len(filtered)) * len(config["judges"]), "max_attempts_per_task": attempts,
+            "rejections": rejections,
             "concurrency": concurrency, "aggregation": "all slots required; strict majority; ties drop",
             "training_selection": "whole frozen conversation with a complete majority keep vote",
             "cost": "one request per trajectory/judge attempt, plus coordinator calls in deepagent mode"}
@@ -190,7 +203,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     _json_dump(output_dir / "plan.json", plan)
     if dry_run:
         print(f"Preview: {plan['trajectories']} trajectories, {plan['judges']} judges, {plan['judge_tasks']} votes. No judge calls made.", file=sys.stderr)
-        print(f"Filtered {len(filtered)} trajectories with multimodal content before judging.", file=sys.stderr)
+        print(f"Filtered before judging: {len(multimodal_filtered)} multimodal, {len(training_filtered)} with structural or tool errors.", file=sys.stderr)
         print(f"Run: smithtune dataset triage {shlex.quote(str(output_dir))} --confirm", file=sys.stderr)
         return plan
     identity_hash = json_sha256(identity)
@@ -264,7 +277,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     if not results_path.exists():
         _jsonl_dump(results_path, [])
     total = plan["judge_tasks"]
-    print(f"Filtered {len(filtered)} trajectories with multimodal content before judging.", file=sys.stderr)
+    print(f"Filtered before judging: {len(multimodal_filtered)} multimodal, {len(training_filtered)} with structural or tool errors.", file=sys.stderr)
     print(f"Council: {len(config['judges'])} judges; {len(pending)}/{total} votes pending.", file=sys.stderr)
     record_lock = Lock()
 
@@ -272,7 +285,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
         with record_lock:
             records[(record["trajectory_id"], record["judge"])] = record
             _jsonl_dump(results_path, [records[key] for key in sorted(records)])
-            completed = sum(r["status"] == "complete" for r in records.values())
+            completed = sum(r["status"] == "complete" and r["trajectory_id"] not in filtered for r in records.values())
             print(f"Saved judge result: {record['status']}; {completed}/{total} valid votes.", file=sys.stderr)
 
     try:
@@ -283,30 +296,28 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
         elif pending:
             _run_direct(pending, judge_one, save_record, concurrency)
     finally:
-        labels = [_label(trajectory, records, config["judges"]) for trajectory in judging]
+        labels = [_label(trajectory, records, config["judges"], error=training_errors[trajectory["trajectory_id"]]) for trajectory in judging]
         results = [_result(label) for label in labels]
         _jsonl_dump(output_dir / "labels.jsonl", results)
         summary = {"trajectories": len(labels), "kept": sum(label["keep"] for label in labels),
                    "dropped": sum(label["status"] == "complete" and not label["keep"] for label in labels),
                    "incomplete": sum(label["status"] == "incomplete" for label in labels),
-                   "filtered_multimodal": len(filtered),
+                   "filtered_multimodal": len(multimodal_filtered),
+                   "filtered_training": len(training_filtered),
                    "filtered_context": sum(label["status"] == "context_exceeded" for label in labels),
                    "disagreement": sum(label["disagreement"] for label in labels),
                    "identity_sha256": identity_hash, "labels_sha256": json_sha256(results),
                    "labels": str(output_dir / "labels.jsonl"), "report": str(output_dir / "report.md")}
         summary["status"] = "complete" if summary["incomplete"] == 0 else "incomplete"
         by_id = {label["trajectory_id"]: label for label in labels}
-        # Recheck cached snapshots without changing their frozen evidence or hashes.
-        training_errors = [training_error(unit) for unit in frozen["units"]]
         summary["eligible_conversations"] = sum(
-            not error and by_id[unit["example"]["id"]]["keep"]
-            for unit, error in zip(frozen["units"], training_errors, strict=True)
+            not error and by_id[tid]["keep"] for tid, error in training_errors.items()
         )
-        summary["unsupported_training_conversations"] = sum(bool(error) for error in training_errors)
-        summary["unsupported_tool_contracts"] = sum(error == "tool schemas cannot be represented by the current training contract" for error in training_errors)
+        summary["unsupported_training_conversations"] = sum(bool(error) for error in training_errors.values())
+        summary["unsupported_tool_contracts"] = sum(error == "tool schemas cannot be represented by the current training contract" for error in training_errors.values())
         _json_dump(output_dir / "summary.json", summary)
         eligible = summary["trajectories"] - len(filtered) - summary["filtered_context"]
-        explanation = f"Labeled {eligible - summary['incomplete']}/{eligible} text trajectories: {summary['kept']} with 1, {summary['dropped']} with 0. Filtered {len(filtered)} multimodal trajectories before judging."
+        explanation = f"Labeled {eligible - summary['incomplete']}/{eligible} text trajectories: {summary['kept']} with 1, {summary['dropped']} with 0. Filtered before judging: {len(multimodal_filtered)} multimodal, {len(training_filtered)} with structural or tool errors."
         if summary["filtered_context"]:
             explanation += f" Filtered {summary['filtered_context']} trajectories that exceed a council model's context window."
         if summary["incomplete"]:
@@ -363,17 +374,22 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_c
         if record.get("status") == "complete":
             validate_judgment(record.get("judgment"))
         records[key] = record
+    training_errors = {unit["example"]["id"]: training_error(unit) for unit in frozen["units"]}
     for tid, trajectory in trajectories.items():
-        calculated = _label(trajectory, records, identity["config"]["judges"])
+        calculated = _label(trajectory, records, identity["config"]["judges"], error=training_errors[tid])
         if _result(calculated) != by_id[tid]:
-            raise PipelineError("labels do not match validated judge votes")
+            # Older runs could judge invalid trajectories. Verify their historical
+            # quality label against the saved votes, but still exclude them.
+            historical = _label(trajectory, records, identity["config"]["judges"])
+            if not training_errors[tid] or _result(historical) != by_id[tid]:
+                raise PipelineError("labels do not match validated judge votes")
         if require_complete and calculated["status"] == "incomplete":
             raise PipelineError("council judging is incomplete; run dataset resume DIR --confirm before pushing")
         by_id[tid] = calculated
     selected = []
     for unit in frozen["units"]:
         label = by_id[unit["example"]["id"]]
-        if training_error(unit) or label["keep"] != 1 or label["status"] != "complete":
+        if training_errors[unit["example"]["id"]] or label["keep"] != 1 or label["status"] != "complete":
             continue
         if frozen["schema_version"] == 3:
             example = {**unit["example"], "metadata": dict(unit["example"]["metadata"])}

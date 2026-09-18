@@ -69,7 +69,8 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
   different project, time window, filter, or limit.
 
 Whole trajectories with invalid messages or unsupported tool evidence are
-excluded from upload. Recorded messages are preserved. The result includes
+excluded before council calls and upload. The triage preview lists rejection
+reasons and counts only eligible judge tasks. Recorded messages are preserved. The result includes
 `eligible` and `rejected` counts; saved units retain validation errors. Model-specific
 rendering and context checks remain in `prepare`.
 
