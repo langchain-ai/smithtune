@@ -319,7 +319,11 @@ def _run_direct(pending, judge_one, save_record, concurrency):
 
 
 def selected_examples(triage_dir: Path) -> list[dict]:
-    frozen = load_snapshot(triage_dir)
+    return _selected_examples(triage_dir, load_snapshot(triage_dir))
+
+
+def _selected_examples(triage_dir: Path, frozen: dict) -> list[dict]:
+    """Select from an already hash-validated snapshot; retain all vote checks."""
     judging = conversation_trajectories(frozen)
     identity = _load_json(triage_dir / "triage-config.json")
     if not isinstance(identity, dict) or identity.get("judging_unit") != "conversation-v1":
@@ -372,9 +376,12 @@ def create_triaged_dataset(triage_dir: Path, name: str | None = None, *, dataset
     if not confirm:
         raise PipelineError("importing into a LangSmith dataset requires --confirm")
     name, dataset_id = _destination(name, dataset_id)
-    examples = selected_examples(triage_dir)
     frozen = load_snapshot(triage_dir)
     workspace = frozen["source"]["workspace_id"]
+    examples = _selected_examples(triage_dir, frozen)
+    # Release bulky source-run evidence before indexing the destination or
+    # uploading. The selected examples retain their saved messages and schemas.
+    del frozen
     receipt_path = triage_dir / "dataset-import.json"
     if dataset_id is not None:
         from smithtune.dataset_import import update_dataset

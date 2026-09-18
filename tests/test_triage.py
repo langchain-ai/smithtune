@@ -1,6 +1,7 @@
 import copy
 import json
 import subprocess
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -385,6 +386,55 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     manifest = dataset.prepare_dataset(uid(100), uid(200), DEFAULT_MODEL, tmp_path / "data", fetch=True, check_render=False)
     assert manifest["prepared"]["accepted"] == 3
     assert sum(manifest["split"][name] for name in dataset.SPLIT_NAMES) == 3
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_import_loads_snapshot_once_and_releases_evidence_before_destination(tmp_path, monkeypatch, existing):
+    from smithtune import dataset_import
+
+    api = API()
+    run(tmp_path, api)
+    original = (tmp_path / "snapshot.json").read_bytes()
+    load = triage.load_snapshot
+    snapshots = []
+
+    class Snapshot(dict):
+        pass
+
+    def counted_load(directory):
+        frozen = Snapshot(load(directory))
+        snapshots.append(weakref.ref(frozen))
+        return frozen
+
+    def checked_runner(command, **kwargs):
+        assert len(snapshots) == 1 and snapshots[0]() is None
+        return api(command, **kwargs)
+
+    def checked_update(workspace, dataset_id, examples, *args, **kwargs):
+        assert len(snapshots) == 1 and snapshots[0]() is None
+        assert workspace == uid(100) and dataset_id == uid(200)
+        assert examples[0]["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
+        assert kwargs["triaged"] is True
+        return {"example_count": len(examples)}
+
+    monkeypatch.setattr(triage, "load_snapshot", counted_load)
+    monkeypatch.setattr(dataset_import, "update_dataset", checked_update)
+    destination = {"dataset_id": uid(200)} if existing else {"name": "selected"}
+    result = triage.create_triaged_dataset(tmp_path, confirm=True, runner=checked_runner, **destination)
+    assert result["example_count"] == 1 and len(snapshots) == 1
+    assert (tmp_path / "snapshot.json").read_bytes() == original
+
+
+def test_import_rejects_changed_snapshot_evidence_before_any_write(tmp_path):
+    run(tmp_path)
+    path = tmp_path / "snapshot.json"
+    frozen = json.loads(path.read_text())
+    frozen["traces"][0]["runs"][0]["outputs"] = {"tampered": True}
+    path.write_text(json.dumps(frozen))
+    with pytest.raises(PipelineError, match="snapshot hash mismatch"):
+        triage.create_triaged_dataset(tmp_path, "selected", confirm=True,
+            runner=lambda *_a, **_kw: pytest.fail("changed evidence reached destination"))
+    assert not (tmp_path / "dataset-import.json").exists()
 
 
 def test_changed_triaged_messages_are_rejected(tmp_path):

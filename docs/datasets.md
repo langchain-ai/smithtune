@@ -135,6 +135,12 @@ Import uses the saved messages and tool schemas; unsupported training content
 is excluded. Pass the returned dataset ID to `prepare`. To add to an existing
 dataset, replace `--name` with `--dataset-id '<dataset-id>'`.
 
+Import validates the saved snapshot once and releases its run evidence before
+accessing the destination. Snapshot fingerprints are computed incrementally,
+without making additional whole-snapshot JSON copies. Hashes and saved votes
+remain compatible with earlier runs; the parsed snapshot still needs to fit in
+memory.
+
 Use a new triage directory when trajectories or judging settings change.
 Extended trajectories need fresh passing triage. After a partial import,
 inspect `dataset-import.json` before retrying; uploads do not resume automatically.

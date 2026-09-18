@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import tracemalloc
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -26,6 +28,34 @@ TOOLS = [
 ]
 TOOLS_SHA256 = "e80fa6320e88f14fe6aece5340b20bd3445f7cb6c36cac78b8bee20cfc5702ed"
 SYSTEM_PROMPT_SHA256 = "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812"
+
+
+@pytest.mark.parametrize("value", [
+    None, True, False, 0, -12, 2**80, -0.0, 1e-100,
+    float("inf"), float("-inf"), float("nan"), "", [], {},
+    {"z": [None, True, 0.25, {"b": "café 中文 🙂", "a": "\n\t\"\\\u0000\u2028\u2029"}], "a": {}},
+    {3: "three", 1: "one"}, ("tuple", {"nested": [1, 2, 3]}),
+])
+def test_incremental_json_hash_matches_existing_canonical_bytes(value):
+    expected = hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    assert inference_contract.json_sha256(value) == expected
+
+
+def test_json_hash_does_not_materialize_the_whole_canonical_document(monkeypatch):
+    value = [{"message": "trace α🙂\n" * 256} for _ in range(256)]
+    expected = hashlib.sha256(inference_contract.canonical_json(value).encode()).hexdigest()
+    monkeypatch.setattr(inference_contract, "canonical_json", lambda _: pytest.fail("whole-document copy"))
+    tracemalloc.start()
+    try:
+        assert inference_contract.json_sha256(value) == expected
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # The previous implementation allocates several MB for this document.
+    # Streaming needs only encoder state and the largest individual JSON token.
+    assert peak < 512 * 1024
 
 
 def contract_payload() -> dict:
