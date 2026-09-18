@@ -24,14 +24,15 @@ timestamps with timezones. These defaults also apply to a new `dataset triage` r
 
 - Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
 - `--limit` is required, at most 2000. Querying stops once that many distinct trajectories are found, in the order LangSmith returns roots; no sampling is applied
-- Each trajectory is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
-- Use `--name` for a new dataset or `--dataset-id` for an existing dataset in the same workspace. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
+- Each trajectory is fetched with the trajectory API and stored as one example; `--concurrency` downloads up to 4 at once (the default), with sequential uploads. Transient fetch failures are retried up to three times
+- Use `--name` for a new dataset or `--dataset-id` for an existing dataset in the same workspace. To resume an interrupted import, repeat its settings with the saved `--run-dir` (or original `--output` path)
 
-Direct creation and triage both save complete examples under `conversations/` in a local run
-directory, defaulting to `data/datasets/<generated-id>/`. Creation saves each
-trajectory before uploading it, alongside the selection and import receipt.
-Use `dataset create --run-dir <directory>` to choose a location. The returned
-`run_dir` identifies the saved files; they remain on disk after upload or failure.
+Direct creation and triage save each trajectory and its captured tool contract
+under `conversations/`, with progress in `checkpoint.json`. The run directory
+defaults to `data/datasets/<generated-id>/`; use `--run-dir` to choose one for
+creation. Keep the returned directory to resume: the original selection, completed
+downloads, and council votes are reused. New triage snapshots contain file
+references instead of duplicating messages and raw run trees.
 
 Before each example upload, creation validates the saved messages and captures
 the tool union from all source LLM runs, including tools that were not called.
@@ -69,12 +70,14 @@ metadata. Shorter or conflicting snapshots, or duplicate sources already in the
 destination, stop the import. Extending a triaged example requires fresh passing
 triage. Run only one import into a dataset at a time.
 
-Existing-dataset imports download with bounded concurrency and write sequentially.
-The receipt records created, updated, skipped and rejected counts, an action log,
+The import receipt records created, updated, skipped and rejected counts, an action log,
 and any pending write whose outcome needs checking. Rejected actions record their
 reason and saved conversation path without creating or updating an example.
 Existing remote examples are never deleted. Earlier successful writes remain if a
-later trajectory fails.
+later trajectory fails. On resume, uncertain writes are checked in LangSmith by
+their saved IDs before retrying. Different remote content stops recovery for
+inspection. Older import receipts cannot resume automatically; inspect the
+destination and use a new run directory with `--dataset-id`.
 
 ## Label full trajectories with an agent council
 
@@ -136,8 +139,9 @@ is excluded. Pass the returned dataset ID to `prepare`. To add to an existing
 dataset, replace `--name` with `--dataset-id '<dataset-id>'`.
 
 Use a new triage directory when trajectories or judging settings change.
-Extended trajectories need fresh passing triage. After a partial import,
-inspect `dataset-import.json` before retrying; uploads do not resume automatically.
+Extended trajectories need fresh passing triage. After a partial import, repeat
+`dataset create --triage-dir` with the same destination to resume. Existing V2
+triage snapshots and their saved votes remain usable.
 
 ### Change the council or selection rules
 

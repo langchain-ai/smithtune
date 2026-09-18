@@ -13,10 +13,10 @@ from pathlib import Path
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
+from smithtune import checkpoint as storage
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
 from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
-from smithtune.dataset_artifacts import save_conversation
 from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 
@@ -204,39 +204,44 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         if value["source"] != source:
             raise PipelineError("triage snapshot uses a different source query; use a new output directory")
         return value
-    cache_dir = output_dir / "download"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    source_path = cache_dir / "source.json"
-    if source_path.exists() and _load_json(source_path) != source:
-        raise PipelineError("partial download uses a different source query; use a new output directory")
-    _json_dump(source_path, source)
-    live_runner = partial(_fetch, runner=runner, cache_dir=cache_dir, use_cache=False)
-    runner = partial(_fetch, runner=runner, cache_dir=cache_dir)
-    captured_path = cache_dir / "captured-at.json"
-    if not captured_path.exists():
-        _json_dump(captured_path, _utc_now())
-    captured_at = _load_json(captured_path)
-    roots = _root_selection(source, runner=runner)
+    checkpoint = storage.open_checkpoint(output_dir, "triage", source)
+    # Raw API pages and run trees are temporary. Resume reuses complete units,
+    # never stitches an interrupted conversation to newly fetched pages.
+    live_runner = partial(_fetch, runner=runner, cache_dir=output_dir, use_cache=False)
+    runner = live_runner
+    if "roots" not in checkpoint:
+        checkpoint.update(roots=_root_selection(source, runner=runner), captured_at=_utc_now())
+        storage.save(output_dir, checkpoint)
+    roots = checkpoint["roots"]
+    captured_at = checkpoint["captured_at"]
     if not roots:
         raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
     print(f"Downloading conversations for {len(roots)} selected traces...", file=sys.stderr)
     units, traces, visited = [], [], set()
-    project_start = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
+    if "project_start" not in checkpoint:
+        checkpoint["project_start"] = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
+        storage.save(output_dir, checkpoint)
+    project_start = checkpoint["project_start"]
     for root in roots:
         thread, tid = root["thread_id"], root["trace_id"]
         key = ("thread", thread) if thread else ("trace", tid)
         if key in visited:
             continue
         visited.add(key)
+        saved = storage.downloaded(output_dir, checkpoint, key)
+        if saved is not None:
+            units.append(saved)
+            traces.extend(saved["traces"])
+            continue
         unit_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
                                        end_time=captured_at, runner=runner) if thread else [tid]
         if tid not in unit_traces:
             raise PipelineError("selected root was not found in its conversation")
         all_messages = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
-        all_runs = []
+        all_runs, unit_records = [], []
         for trace_id in unit_traces:
-            if len(traces) >= MAX_EXPANDED_TRACES:
+            if len(traces) + len(unit_records) >= MAX_EXPANDED_TRACES:
                 raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
             runs = query_runs(workspace, project, {"trace": trace_id}, runner=runner)
             if not runs or any(run.get("trace_id") != trace_id for run in runs):
@@ -251,7 +256,8 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
                 record["source_warnings"] = ["Root run missing from the saved source; assess only the available evidence."]
             record["multimodal_types"] = multimodal_types(record)
             record["source_sha256"] = json_sha256(record)
-            traces.append(record)
+            record.pop("runs")
+            unit_records.append(record)
         if thread:
             # The trajectory is live; verify membership again without cached reads.
             current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
@@ -265,36 +271,45 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
                                 "source_workspace_id": workspace, "source_scope": "thread" if thread else "trace",
                                 "source_scope_id": thread or unit_traces[0],
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
-        save_conversation(output_dir, example)
         contract = None
         error = None
         try:
             contract = contract_from_runs([run for run in all_runs if run.get("run_type") == "llm"], workspace_id=workspace, thread_id=thread)
         except ContractError:
             error = "tool schemas cannot be represented by the current training contract"
-        if any(trace["root_run_id"] is None for trace in traces if trace["trace_id"] in unit_traces):
+        if any(trace["root_run_id"] is None for trace in unit_records):
             error = "conversation source has a missing root run"
-        unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error}
+        unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error,
+                "traces": unit_records, "multimodal_types": multimodal_types({"messages": all_messages, "runs": all_runs})}
         unit["training_error"] = training_error(unit)
+        storage.record_download(output_dir, checkpoint, key, unit)
         units.append(unit)
+        traces.extend(unit_records)
         if len(units) % 10 == 0:
             print(f"Downloaded {len(units)} conversations, {len(traces)} traces.", file=sys.stderr)
-    value = {"schema_version": 2, "source": source, "selected_trace_ids": [root["trace_id"] for root in roots],
-             "traces": traces, "units": units}
+    value = {"schema_version": 3, "source": source,
+             "selected_trace_ids": [root["trace_id"] for root in roots],
+             "unit_files": list(checkpoint["downloads"].values())}
     value["snapshot_sha256"] = json_sha256(value)
     _json_dump(path, value)
-    return value
+    return load_snapshot(output_dir)
 
 
 def load_snapshot(output_dir: Path) -> dict:
     value = _load_json(output_dir / "snapshot.json")
     if isinstance(value, dict) and value.get("schema_version") == 1:
         raise PipelineError("this triage snapshot predates system-message capture; use a new output directory to download and judge again")
-    if not isinstance(value, dict) or value.get("schema_version") != 2:
+    if not isinstance(value, dict) or value.get("schema_version") not in (2, 3):
         raise PipelineError("unsupported triage snapshot")
     expected = value.get("snapshot_sha256")
     if expected != json_sha256({key: item for key, item in value.items() if key != "snapshot_sha256"}):
         raise PipelineError("triage snapshot hash mismatch")
+    if value["schema_version"] == 3:
+        paths = value.get("unit_files")
+        if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths) or len(set(paths)) != len(paths):
+            raise PipelineError("invalid triage snapshot file references")
+        units = [storage.read_file(output_dir, path) for path in paths]
+        value = {**value, "units": units, "traces": [trace for unit in units for trace in unit["traces"]]}
     return value
 
 
@@ -305,7 +320,10 @@ def conversation_trajectories(frozen: dict) -> list[dict]:
     for unit in frozen["units"]:
         trajectory = {"trajectory_id": unit["example"]["id"],
                       "messages": unit["example"]["inputs"]["messages"]}
-        runs = [run for tid in unit["trace_ids"] for run in traces[tid]["runs"]]
-        trajectory["multimodal_types"] = multimodal_types({**trajectory, "runs": runs})
+        if "multimodal_types" in unit:
+            trajectory["multimodal_types"] = unit["multimodal_types"]
+        else:
+            runs = [run for tid in unit["trace_ids"] for run in traces[tid]["runs"]]
+            trajectory["multimodal_types"] = multimodal_types({**trajectory, "runs": runs})
         trajectories.append(trajectory)
     return trajectories

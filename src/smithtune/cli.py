@@ -588,14 +588,21 @@ def main(argv: list[str] | None = None) -> None:
                         raise PipelineError("supply a saved run directory to resume, or both source IDs to start a new run")
                     directory = new_run_directory()
                 print(f"Dataset run directory: {directory}", file=sys.stderr)
+                saved_source = {}
+                if (directory / "snapshot.json").exists():
+                    saved_source = load_snapshot(directory)["source"]
+                elif (directory / "checkpoint.json").exists():
+                    from smithtune.checkpoint import load
+                    saved_source = load(directory)["source"]
                 if all(source_ids):
-                    source = source_options(*source_ids, args.start_time, args.end_time, filter=args.filter,
+                    source = source_options(*source_ids, args.start_time or saved_source.get("start_time"),
+                                            args.end_time or saved_source.get("end_time"), filter=args.filter,
                                             limit=100 if args.limit is None else args.limit,
                                             seed=42 if args.seed is None else args.seed)
                 elif any(source_ids) or any(v is not None for v in (args.start_time, args.end_time, args.filter, args.limit, args.seed)):
                     raise PipelineError("supply both source IDs, or omit source flags to use the saved local snapshot")
-                elif (directory / "snapshot.json").exists():
-                    source = load_snapshot(directory)["source"]
+                elif saved_source:
+                    source = saved_source
                 else:
                     raise PipelineError("no local snapshot; supply workspace and project to download traces")
                 settings = triage.council_settings(
