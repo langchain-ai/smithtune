@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 
-from smithtune import cli, curation, dataset, dataset_import, triage
+from smithtune import cli, curation, dataset, dataset_import, dataset_workflow, triage
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
 
@@ -190,34 +190,29 @@ def test_missing_incoming_source_does_not_mark_complete(tmp_path):
     assert receipt(tmp_path)["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("targets", [[], ["--name", "new", "--dataset-id", uid(200)]])
-def test_cli_requires_exactly_one_destination(targets):
+@pytest.mark.parametrize("targets", [["--name", "new", "--dataset-id", uid(200)]])
+def test_cli_rejects_conflicting_destinations(targets):
     with pytest.raises(SystemExit) as exc:
         cli._parser().parse_args(["dataset", "create", *targets])
     assert exc.value.code == 2
 
 
 def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
-    from test_curation import API as SourceAPI, root
+    from smithtune.triage_source import load_snapshot
+    from test_triage import API as SourceAPI, source
 
-    source = SourceAPI([[root(1, "thread-1")]])
-    destination = API([example(1)])
-    source.messages = example(1, 2)["inputs"]["messages"]
-
-    def runner(command, **kwargs):
-        if command[2] in ("/api/v2/runs/query", "/v1/trajectory"):
-            return source(command, **kwargs)
-        return destination(command, **kwargs)
-
-    original = curation.create_dataset
-    monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: original(**kwargs, runner=runner))
-    cli.main(["dataset", "create", "--workspace-id", uid(100), "--project-id", uid(101),
-              "--dataset-id", uid(200), "--start-time", "2026-09-01T00:00:00Z",
-              "--end-time", "2026-09-08T00:00:00Z", "--limit", "1", "--run-dir", str(tmp_path)])
+    dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), **{key: value for key, value in source().items() if key != "seed"})
+    old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
+    old.update(id=uid(1), dataset_id=uid(200))
+    old["inputs"]["messages"] = old["inputs"]["messages"][:2]
+    destination = API([old])
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *a, **kw: original(*a, **kw, runner=destination))
+    cli.main(["dataset", "push", str(tmp_path), "--dataset-id", uid(200), "--confirm"])
     result = json.loads(capsys.readouterr().out)
     assert result["updated"] == 1
     assert destination.writes[0][0] == "PATCH"
-    assert (tmp_path / "selection.json").exists()
+    assert (tmp_path / "snapshot.json").exists()
 
 
 def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypatch, capsys):
@@ -230,9 +225,9 @@ def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypat
     old["inputs"]["messages"] = old["inputs"]["messages"][:2]
     old["metadata"].update(note="retain", smithtune_triage={"identity_sha256": "old", "contract": {"old": True}})
     api = API([old])
-    original = triage.create_triaged_dataset
-    monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: original(*args, **kwargs, runner=api))
-    cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--dataset-id", uid(200), "--confirm"])
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=api))
+    cli.main(["dataset", "push", str(tmp_path), "--dataset-id", uid(200), "--confirm"])
     assert json.loads(capsys.readouterr().out)["updated"] == 1
     method, path, body = api.writes[0]
     assert (method, path) == ("PATCH", f"/api/v1/examples/{uid(1)}")

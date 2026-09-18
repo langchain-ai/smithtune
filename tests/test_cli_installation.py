@@ -10,6 +10,7 @@ from importlib.metadata import version
 import pytest
 
 from smithtune import artifacts, cli, curation, doctor
+from smithtune.dataset_artifacts import new_run_directory
 from smithtune.providers.base import PipelineError
 
 
@@ -90,7 +91,7 @@ def test_default_and_explicit_data_paths_follow_invocation(tmp_path, monkeypatch
         }[command]
         assert cli._parser().parse_args([command, *extras]).data_dir == tmp_path / "data"
         assert cli._parser().parse_args([command, *extras, "--data-dir", "custom"]).data_dir == Path("custom")
-    assert cli.new_run_directory().resolve().parent == tmp_path / "data/datasets"
+    assert new_run_directory().resolve().parent == tmp_path / "data/datasets"
 
 
 def test_dataset_publish_splits_dispatches_without_preparation(tmp_path, monkeypatch, capsys):

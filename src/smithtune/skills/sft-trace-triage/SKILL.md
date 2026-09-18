@@ -46,28 +46,40 @@ should explain the saved counts and remaining failures to the user.
 
 ## Agent helping a user
 
-Run `smithtune doctor` and `smithtune dataset triage --help` for setup and source
-options. The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks,
-plus GPT-5.6 Terra on OpenAI. Use one `--judges` list to choose models; other
-models use `provider:model`. Use `--rule` for project selection rules.
+Run `smithtune doctor` and `smithtune dataset create --help` for setup. Use one
+saved directory across `pull`, `triage`, `push`, `create`, and `resume`.
 
-1. Download and preview: `smithtune dataset triage <directory>` with source IDs,
-   time window, and optional `--limit` / `--filter`. Roots from the same thread
-   form one full trajectory. Review the conversation and vote counts.
-2. When paid judging is authorized: `smithtune dataset triage <directory> --confirm`.
-   Repeat this command to resume. Completed votes are retained.
-3. Read `labels.jsonl` and `report.md`. Each row has `trajectory_id`, `keep`
-   (1 or 0), and `reason`. Explain the counts and main reasons to the user.
-   Request errors have a clear incomplete reason and do not count as votes.
-4. When upload is authorized: `smithtune dataset create --triage-dir <directory>
-   --name <name> --confirm`. This imports kept conversations with the exact saved
-   messages and tool schemas. Inspect `dataset-import.json` after a partial write.
-5. Pass the dataset ID to the existing `prepare -> plan -> train` flow.
+First map the user's selection criteria to the project's actual feedback,
+metadata, tags, and error fields. Use `--filter` for criteria those fields express.
+Do not invent feedback keys, thresholds, or the meaning of missing values.
+Use `--rule` for criteria requiring the content of a trajectory to be judged.
 
-Do not refetch or edit messages after judging. Changed source, rubric, or models
-need a new run. Labels remain local; this command does not write trace feedback.
-Fireworks calls always use its official API. Replay evaluation is a separate
-flow under `evaluate`.
+- `dataset create DIR` composes downloading, optional judging, and uploading.
+  A filter with no council criteria skips inference. Without a filter, create
+  defaults to council judging. `--rule` or `--judges` requests judging even with
+  a filter; filtering always happens before trajectory downloads and judging.
+  `--no-triage` explicitly skips council and cannot discard judging criteria.
+- Preview without `--confirm`: review the selected path and pending work. When
+  the planned judging and uploads are authorized, repeat with `--confirm`.
+- For staged work, use `dataset pull DIR` with source IDs, time window, and
+  optional `--filter` / `--limit`. Then use `dataset triage DIR` to preview and
+  `dataset triage DIR --confirm` to judge. Read `labels.jsonl` and `report.md`
+  and explain the counts and reasons. Failed judge requests remain incomplete.
+- Preview upload with `dataset push DIR --name NAME` (or `--dataset-id ID`).
+  Add `--confirm` when upload is authorized. Push respects any council plan
+  already attached to the directory. Pull followed directly by push uses the
+  source filters and structural checks without model calls.
+- `dataset resume DIR` shows pending stages without network calls. With
+  `--confirm`, it continues the saved workflow and reuses completed work.
+- Pass the resulting dataset ID to `prepare -> plan -> train`.
 
-Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses
-`LANGSMITH_GATEWAY_API_KEY`.
+The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks plus
+GPT-5.6 Terra on OpenAI. Choose models with `--judges`; other models use
+`provider:model`. Rules apply to whole trajectories. Source and destination
+are frozen; council rules can change before judging starts. Use a new directory
+to change rules after votes or to review a different source selection.
+
+Preserve recorded messages and saved tool contracts. Labels remain local; these
+commands do not write trace feedback. Replay evaluation is separate under
+`evaluate`. Fireworks judging uses its official API. Direct Anthropic uses
+`ANTHROPIC_API_KEY`; `anthropic-gateway` uses `LANGSMITH_GATEWAY_API_KEY`.

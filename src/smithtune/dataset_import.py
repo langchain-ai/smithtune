@@ -1,6 +1,7 @@
 """Match saved trajectories to an existing dataset and record every write."""
 
 import json
+import shlex
 import sys
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -283,8 +284,7 @@ def import_dataset(workspace, examples, source_keys, run_dir, receipt_path, *, n
         receipt["status"] = "incomplete"
         save()
         detail = str(exc) if isinstance(exc, PipelineError) else type(exc).__name__
-        location = f"--triage-dir {run_dir}" if triaged else f"--output {receipt_path.with_suffix('').with_suffix('.json')}"
-        raise PipelineError(f"{detail}; dataset import incomplete; rerun with the same settings and {location} to resume; receipt={receipt_path}") from exc
+        raise PipelineError(f"{detail}; dataset import incomplete; run smithtune dataset resume {shlex.quote(str(run_dir))} --confirm; receipt={receipt_path}") from exc
     return {"dataset_id": dataset_id, "example_count": sum(receipt[key] for key in ("created", "updated", "skipped")),
             **{key: receipt[key] for key in ("created", "updated", "skipped", "rejected")}, "receipt": str(receipt_path), "run_dir": str(run_dir)}
 

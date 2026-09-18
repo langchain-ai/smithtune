@@ -8,7 +8,10 @@ import re
 import subprocess
 import sys
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
@@ -136,7 +139,7 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
             "min_start_time": source["start_time"], "max_start_time": source["end_time"],
             "filter": f"and({user_filter},{bound})" if user_filter else bound,
             "page_size": 100, "selects": ["ID", "TRACE_ID", "THREAD_ID", "START_TIME", "FEEDBACK_STATS"]}
-    rows, cursors = {}, set()
+    rows, cursors, trajectories = {}, set(), {}
     while True:
         if len(cursors) >= MAX_SOURCE_PAGES:
             raise PipelineError("root query exceeds the page limit; narrow the time window or filter")
@@ -147,6 +150,10 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
             if tid in rows and rows[tid] != row:
                 raise PipelineError("root changed during selection")
             rows[tid] = row
+            key = ("thread", row["thread_id"]) if row["thread_id"] else ("trace", tid)
+            trajectories.setdefault(key, row)
+        if source.get("selection_mode") == "trajectories" and len(trajectories) >= source["limit"]:
+            break
         cursor = page.get("next_cursor")
         if cursor is None:
             break
@@ -154,6 +161,8 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
             raise PipelineError("invalid root query cursor")
         cursors.add(cursor)
         body["cursor"] = cursor
+    if source.get("selection_mode") == "trajectories":
+        return list(trajectories.values())[:source["limit"]]
     roots = sorted(rows.values(), key=lambda r: r["trace_id"])
     return sorted(random.Random(source["seed"]).sample(roots, min(source["limit"], len(roots))), key=lambda r: r["trace_id"]) if source["limit"] else roots
 
@@ -197,7 +206,9 @@ def training_error(unit: dict) -> str | None:
     return None
 
 
-def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
+def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> dict:
+    if type(concurrency) is not int or not 1 <= concurrency <= 4:
+        raise PipelineError("download concurrency must be between 1 and 4")
     path = output_dir / "snapshot.json"
     if path.exists():
         value = load_snapshot(output_dir)
@@ -218,22 +229,16 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
     print(f"Downloading conversations for {len(roots)} selected traces...", file=sys.stderr)
-    units, traces, visited = [], [], set()
     if "project_start" not in checkpoint:
         checkpoint["project_start"] = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
         storage.save(output_dir, checkpoint)
     project_start = checkpoint["project_start"]
-    for root in roots:
+    def download(entry):
+        key, root = entry
         thread, tid = root["thread_id"], root["trace_id"]
-        key = ("thread", thread) if thread else ("trace", tid)
-        if key in visited:
-            continue
-        visited.add(key)
         saved = storage.downloaded(output_dir, checkpoint, key)
         if saved is not None:
-            units.append(saved)
-            traces.extend(saved["traces"])
-            continue
+            return key, saved
         unit_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
                                        end_time=captured_at, runner=runner) if thread else [tid]
         if tid not in unit_traces:
@@ -241,7 +246,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         all_messages = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
         all_runs, unit_records = [], []
         for trace_id in unit_traces:
-            if len(traces) + len(unit_records) >= MAX_EXPANDED_TRACES:
+            if len(unit_records) >= MAX_EXPANDED_TRACES:
                 raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
             runs = query_runs(workspace, project, {"trace": trace_id}, runner=runner)
             if not runs or any(run.get("trace_id") != trace_id for run in runs):
@@ -282,14 +287,41 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
         unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error,
                 "traces": unit_records, "multimodal_types": multimodal_types({"messages": all_messages, "runs": all_runs})}
         unit["training_error"] = training_error(unit)
-        storage.record_download(output_dir, checkpoint, key, unit)
-        units.append(unit)
-        traces.extend(unit_records)
-        if len(units) % 10 == 0:
-            print(f"Downloaded {len(units)} conversations, {len(traces)} traces.", file=sys.stderr)
+        return key, unit
+
+    selected = {}
+    for root in roots:
+        key = ("thread", root["thread_id"]) if root["thread_id"] else ("trace", root["trace_id"])
+        selected.setdefault(key, root)
+    remaining = iter(selected.items())
+    downloaded = trace_count = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        pending = deque(pool.submit(download, entry) for entry in islice(remaining, concurrency))
+        try:
+            while pending:
+                key, unit = pending.popleft().result()
+                trace_count += len(unit["traces"])
+                if trace_count > MAX_EXPANDED_TRACES:
+                    raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
+                storage.record_download(output_dir, checkpoint, key, unit)
+                downloaded += 1
+                if downloaded % 10 == 0:
+                    print(f"Downloaded {downloaded} trajectories, {trace_count} traces.", file=sys.stderr)
+                entry = next(remaining, None)
+                if entry is not None:
+                    pending.append(pool.submit(download, entry))
+        finally:
+            for future in pending:
+                if future.cancel():
+                    continue
+                try:
+                    key, unit = future.result()
+                except Exception:
+                    continue
+                storage.record_download(output_dir, checkpoint, key, unit)
     value = {"schema_version": 3, "source": source,
              "selected_trace_ids": [root["trace_id"] for root in roots],
-             "unit_files": list(checkpoint["downloads"].values())}
+             "unit_files": [checkpoint["downloads"][json_sha256(key)] for key in selected]}
     value["snapshot_sha256"] = json_sha256(value)
     _json_dump(path, value)
     return load_snapshot(output_dir)

@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 
-from smithtune import cli, curation, dataset, triage, triage_judges, triage_source
+from smithtune import cli, curation, dataset, dataset_workflow, triage, triage_judges, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
@@ -445,10 +445,10 @@ def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
 def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(
         *args, **kwargs, runner=API(), judge_call=judge_call))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101)]
+    args = ["dataset", "pull", "--workspace-id", uid(100), "--project-id", uid(101)]
     directories = []
     for _ in range(2):
         cli.main(args)
@@ -465,7 +465,7 @@ def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeyp
     assert json.loads(capsys.readouterr().out)["run_dir"] == str(directories[0])
     with pytest.raises(SystemExit):
         cli.main(["dataset", "triage", "--confirm"])
-    assert "supply a saved run directory" in capsys.readouterr().err
+    assert "requires a saved directory" in capsys.readouterr().err
 
 
 def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
@@ -577,21 +577,22 @@ def test_skill_export_works_outside_checkout(tmp_path):
 
 def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     api = API()
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"], str(tmp_path),
-            "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra", "--rule", "Keep supported answers."]
-    cli.main(args)
-    plan = json.loads(capsys.readouterr().out)
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
+    cli.main(["dataset", "pull", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101),
+              "--start-time", source()["start_time"], "--end-time", source()["end_time"]])
+    capsys.readouterr()
+    cli.main(["dataset", "triage", str(tmp_path), "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra",
+              "--rule", "Keep supported answers."])
+    plan = json.loads(capsys.readouterr().out)["triage"]
     assert plan["judges"] == 3 and plan["runner"] == "deepagent"
     assert plan["config"]["rules"] == ["Keep supported answers."]
     assert plan["config"]["judges"] == triage.load_config(None)["judges"]
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["kept"] == 1
     saved = (tmp_path / "judgments.jsonl").read_bytes()
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["kept"] == 1
     assert (tmp_path / "judgments.jsonl").read_bytes() == saved
     labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
     assert all(set(label) == {"trajectory_id", "keep", "reason"} for label in labels)
@@ -599,9 +600,7 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     # A changed package default must not replace a saved council.
     monkeypatch.setattr(triage, "load_config", lambda *_: pytest.fail("saved council ignored"))
     assert triage.council_settings(tmp_path)["config"] == plan["config"]
-    create = triage.create_triaged_dataset
-    monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: create(*args, **kwargs, runner=api))
-    cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--name", "selected", "--confirm"])
+    cli.main(["dataset", "push", str(tmp_path), "--name", "selected", "--confirm"])
     assert json.loads(capsys.readouterr().out)["example_count"] == 1
 
 
@@ -622,14 +621,14 @@ def test_council_model_selection(tmp_path, judges, expected):
 
 
 def test_cli_incomplete_triage_prints_summary_and_exits_nonzero(tmp_path, monkeypatch, capsys):
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=API(), judge_call=lambda *_: {}))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"], "--output-dir", str(tmp_path), "--confirm", "--attempts", "1"]
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=API(), judge_call=lambda *_: {}))
+    triage_source.snapshot(source(), tmp_path, runner=API())
+    args = ["dataset", "triage", str(tmp_path), "--confirm", "--attempts", "1"]
     with pytest.raises(SystemExit) as exc:
         cli.main(args)
     assert exc.value.code == 1
-    assert json.loads(capsys.readouterr().out)["incomplete"] == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["incomplete"] == 1
 
 
 def test_dataset_import_failure_resumes_with_saved_destination(tmp_path):
@@ -741,18 +740,18 @@ def test_judge_can_drop_a_trajectory_with_missing_evidence(tmp_path):
 
 def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, capsys):
     triage_source.snapshot(source(), tmp_path, runner=API())
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(
         *args, **kwargs, judge_call=judge_call,
         runner=lambda *_a, **_kw: pytest.fail("local snapshot must not query LangSmith")))
-    cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 1
+    cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["triage"]["kept"] == 1
 
 
 def test_cli_requires_source_when_no_snapshot_exists(tmp_path, capsys):
     with pytest.raises(SystemExit):
-        cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--dry-run"])
-    assert "no local snapshot" in capsys.readouterr().err
+        cli.main(["dataset", "triage", str(tmp_path)])
+    assert "start with dataset pull" in capsys.readouterr().err
 
 
 def test_empty_source_does_not_create_a_misleading_completed_run(tmp_path):

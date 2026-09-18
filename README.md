@@ -94,42 +94,37 @@ provider and existing directories instead.
 
 ## Create a dataset from trajectories
 
-Skip this step if you already have a LangSmith dataset. Otherwise, select
-trajectories from a tracing project in the workspace above. Replace the project
-ID with your source, and choose a feedback filter your project uses:
+Skip this step if you already have a LangSmith dataset. Otherwise, choose a tracing
+project and a feedback filter that represents the trajectories you want:
 
 ```bash
 project_id='<project-id>'
 
-smithtune dataset create \
+smithtune dataset create data/datasets/my-sft \
   --workspace-id "$workspace_id" --project-id "$project_id" \
   --name my-sft-dataset \
-  --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
+
+smithtune dataset create data/datasets/my-sft --confirm
 ```
 
-Without time flags, creation selects roots from the last 24 hours: `--end-time`
-defaults to now and `--start-time` defaults to 24 hours before the resolved end.
-Pass either or both flags to choose another ISO 8601 window.
+The first command downloads and previews; `--confirm` runs the saved workflow.
+An explicit filter with no judging criteria creates the dataset without model
+calls. Add `--rule 'Keep answers grounded in documentation'` to judge the filtered
+candidates. Without a filter, `create` defaults to council review; `--no-triage`
+explicitly skips it. The preview shows the selected path before paid work.
 
-The filter matches feedback on trace root runs. Each matching root selects its
-whole thread when it has one, otherwise its single trace. Each trajectory
-becomes one dataset example, including earlier turns outside the time window.
-`--limit 100` selects at most 100 distinct trajectories. Remove `--filter` to
-select without a feedback threshold; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
+Filters apply to trace root runs. Each match selects its whole thread when it has
+one, otherwise its single trace, including earlier turns outside the time window.
+The default is up to 100 distinct trajectories from the last 24 hours. Set
+`--limit`, `--start-time`, and `--end-time` to change that selection.
+Invalid trajectories are excluded before upload; preparation still checks
+model-specific rendering and context limits.
 
-Invalid whole trajectories are pruned before upload using message and captured
-tool-schema checks. Saved conversations remain unchanged; the result reports a
-`rejected` count and the import receipt records reasons. Model-specific rendering
-and context limits are still checked by `prepare`.
-
-Keep the returned run directory. To resume an interrupted `dataset create`, repeat
-its settings with `--run-dir <saved-directory>`; completed downloads and uploads
-are reused.
-
-For an optional model review before import, use
-[dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council).
-For additions to an existing dataset, see [dataset curation](docs/datasets.md).
+To recover, run `smithtune dataset resume data/datasets/my-sft --confirm`.
+Completed downloads, votes, and uploads are reused. For separate `pull`, `triage`,
+and `push` steps, existing-dataset updates, and filter syntax, see
+[dataset curation](docs/datasets.md).
 
 ## Prepare data
 
