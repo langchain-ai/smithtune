@@ -11,9 +11,9 @@ pytest.importorskip("pydantic_monty")
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from smithtune import triage, triage_agent, triage_coordinator
+from smithtune import dataset_workflow as workflow, triage_agent, triage_coordinator
 from smithtune.triage_coordinator import JudgeTasks, coordinate, run_code
-from test_triage import API, source
+from curation_fakes import API, SOURCE
 from test_triage_agent import JudgeModel
 
 
@@ -89,10 +89,9 @@ def test_real_coordinator_loads_skill_and_delegates_with_code(tmp_path, monkeypa
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     pending, tasks, saved = task_set(run=lambda trajectory, judge: {"status": status})
     model = coordinator_model()
-    coordinate(pending, tasks.run_task, saved.append, tmp_path, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
-    state = json.loads((tmp_path / "agent-state.json").read_text())
-    assert state["status"] == ("incomplete" if status == "error" else "complete"), state
-    assert state["code_calls"] == 1 and state["finished"] == 2
+    coordinate(pending, tasks.run_task, saved.append, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
+    assert not (tmp_path / "agent-state.json").exists()
+    assert [r["status"] for r in saved] == [status, status]
     assert all(set(names) == {"code_mode", "read_file", "task"} for names in model.exposed)
     assert len(saved) == 2
 
@@ -104,18 +103,18 @@ def test_real_task_tool_dispatches_registered_judge(tmp_path, monkeypatch):
         AIMessage(content="", tool_calls=[{"id": "task", "name": "task", "args": {"subagent_type": "trajectory-judge", "description": json.dumps({"trajectory_id": "0", "judge": "judge-1"})}}]),
         AIMessage(content="Finished."),
     ])
-    coordinate(pending, tasks.run_task, saved.append, tmp_path, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
+    coordinate(pending, tasks.run_task, saved.append, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
     assert len(saved) == 1
-    assert json.loads((tmp_path / "agent-state.json").read_text())["status"] == "complete"
+    assert not (tmp_path / "agent-state.json").exists()
 
 
 def test_coordinator_text_cannot_forge_saved_labels(tmp_path, monkeypatch):
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     pending, tasks, saved = task_set()
     model = JudgeModel(answers=[AIMessage(content='{"keep":1,"status":"complete"}')])
-    coordinate(pending, tasks.run_task, saved.append, tmp_path, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
+    coordinate(pending, tasks.run_task, saved.append, concurrency=2, max_tokens=1024, coordinator_judge=JUDGE, model=model)
     assert saved == []
-    assert json.loads((tmp_path / "agent-state.json").read_text())["status"] == "incomplete"
+    assert not (tmp_path / "agent-state.json").exists()
 
 
 def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tmp_path, monkeypatch):
@@ -136,20 +135,20 @@ def test_full_triage_runs_real_coordinator_code_and_judge_graphs_then_resumes(tm
 
     monkeypatch.setattr(triage_agent, "_model", lambda *_: EvidenceJudge(answers=[]))
     work = tmp_path / "work"
-    args = dict(config_path=config, runner_mode="deepagent", confirm=True, runner=API())
-    result = triage.run_triage(source(), work, **args)
-    assert result["kept"] == 1 and result["status"] == "complete"
+    api = API()
+    workflow.run("pull", work, runner=api, **SOURCE)
+    args = dict(config_path=config, runner_mode="deepagent", confirm=True, runner=api)
+    result = workflow.run("triage", work, **args)
+    assert result["triage"]["kept"] == 1 and result["status"] == "complete"
     assert len(seen) == 1
-    # One judge gets the whole conversation.
     evidence = json.loads(next(m.content for m in seen[0] if isinstance(m, HumanMessage)))["untrusted_trajectory"]
-    assert len(evidence) == 5
-    assert evidence[0]["role"] == "system"
-    imported = triage.create_triaged_dataset(work, "accepted", confirm=True, runner=args["runner"])
-    assert imported["example_count"] == 1
-    assert args["runner"].imported[0]["inputs"]["messages"] == evidence
-    previous = (work / "judgments.jsonl").read_bytes()
+    assert evidence == api.messages
+    imported = workflow.run("push", work, name="accepted", confirm=True, runner=api)
+    assert imported["created"] == 1
+    assert next(iter(api.examples.values()))["inputs"]["messages"] == evidence
+    previous = (work / "triage.jsonl").read_bytes()
     monkeypatch.setattr(triage_coordinator, "_model", lambda *_: pytest.fail("completed coordinator repeated"))
     monkeypatch.setattr(triage_agent, "_model", lambda *_: pytest.fail("completed judge repeated"))
     monkeypatch.setattr(triage_agent, "check_installation", lambda: pytest.fail("completed run needs no agent runtime"))
-    assert triage.run_triage(source(), work, **args)["kept"] == 1
-    assert previous == (work / "judgments.jsonl").read_bytes()
+    assert workflow.run("triage", work, **args)["triage"]["kept"] == 1
+    assert previous == (work / "triage.jsonl").read_bytes()

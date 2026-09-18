@@ -66,10 +66,12 @@ test uses paid inference or creates a live deployment.
 The default council is read from the packaged `config.example.json`; CLI,
 Python, and exported skill defaults must agree. Terra uses OpenAI Responses
 with `reasoning.effort=none`; Fireworks calls set `reasoning_effort=none`.
-GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the saved plan
+GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the request policy
 records that exception.
-Keep the request checks when changing either transport. Bump the triage agent version
-when model transport or evidence presentation changes.
+Keep the request checks when changing either transport. Durable votes resume from
+saved rubric, models, request settings, and conversation hashes. Coordinator and
+skill revisions do not gate resume; do not add software identity checks or an
+agent-state file.
 
 `sfw` is used for contributor dependency installation. It is not a smithtune runtime
 prerequisite. Companion CLIs and provider credentials are only needed for live
@@ -113,8 +115,8 @@ unrecognized unannotated templates fail preparation. The model support registry
 remains separate from upstream template coverage.
 
 The additional Baseten models use `native_rendering.py`: it calls the official
-formatter, verifies each response against its inference prompt, and coalesces
-only identical token prefixes. Keep its implementation version in the prepared
+formatter and verifies each target response against its inference prompt. The
+training boundary renders each assistant target separately with zero history loss. Keep its implementation version in the prepared
 identity when changing formatting or masks. Test model-specific stop tokens,
 empty reasoning, history changes, and Unicode against the pinned real tokenizers.
 
@@ -172,3 +174,22 @@ the next tag to upgrade; `smithtune --version` reads the installed version metad
 No PyPI projects, publishing environments, or second-package releases are needed.
 PyPI does not accept the direct Git dependency in smithtune's package metadata, so
 these distributions are intended for GitHub/direct installation.
+
+## Curation and target bindings
+
+Use `checkpoint.py` for small curation bookkeeping and one command-level lock.
+Keep each unchanged conversation and its per-assistant bindings in one file;
+source run trees and API pages stay in memory. `bindings.py` is shared by source
+capture, preparation, and replay. Missing provenance is not an empty tool set.
+See `tests/fixtures/README.md` for the inspected wire schemas and conservative
+output-identity mapping. Never use run order, timestamps, or input-history IDs
+as producing-run evidence.
+
+Prepared version 2 keeps parent conversations in split files. Both actual provider
+training/validation loaders derive target-only datums at the rendering boundary.
+When changing rendering, test changing/removed/empty tools and verify previous
+assistant turns receive zero loss. `test_assistant_bindings.py` checks installed
+renderer interfaces; `test_curation_roundtrip.py` crosses fake upload/export,
+fresh prepare, pinned split publication, both samplers, scoring, reporting, and
+publication-only resume. Real tokenizers remain the opt-in checks above.
+Run `git diff --check` with pytest and Ruff before submitting changes.

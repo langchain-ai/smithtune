@@ -358,6 +358,8 @@ class FireworksProvider:
         manifest = _load_json(data_dir / "prepared" / "manifest.json")
         if not isinstance(manifest, dict):
             raise PipelineError("prepared manifest is not an object")
+        from smithtune.dataset import require_current_preparation
+        require_current_preparation(manifest)
         split = _prepared_split(manifest)
         for partition in ("train", "validation"):
             if split[partition] < 1:
@@ -389,7 +391,7 @@ class FireworksProvider:
                 "tokenizer_revision": model.tokenizer_revision,
                 "renderer": model.renderer,
                 "thinking_trace_history_mode": model.thinking_trace_history_mode,
-                "loss_target": "all assistant text and tool calls",
+                "loss_target": "each assistant target once, with zero loss on history",
                 "max_seq_len": model.max_seq_len,
                 "lora_rank": lora_rank,
                 "lora_alpha": settings.lora_alpha,

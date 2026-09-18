@@ -9,7 +9,8 @@ from importlib.metadata import version
 
 import pytest
 
-from smithtune import artifacts, cli, curation, doctor
+from smithtune import artifacts, cli, doctor
+from smithtune.dataset_artifacts import new_run_directory
 from smithtune.providers.base import PipelineError
 
 
@@ -90,7 +91,7 @@ def test_default_and_explicit_data_paths_follow_invocation(tmp_path, monkeypatch
         }[command]
         assert cli._parser().parse_args([command, *extras]).data_dir == tmp_path / "data"
         assert cli._parser().parse_args([command, *extras, "--data-dir", "custom"]).data_dir == Path("custom")
-    assert cli.new_run_directory().resolve().parent == tmp_path / "data/datasets"
+    assert new_run_directory().resolve().parent == tmp_path / "data/datasets"
 
 
 def test_dataset_publish_splits_dispatches_without_preparation(tmp_path, monkeypatch, capsys):
@@ -112,18 +113,12 @@ def test_dataset_publish_splits_dispatches_without_preparation(tmp_path, monkeyp
 
 
 def test_default_selection_is_written_in_working_directory(tmp_path, monkeypatch):
-    from test_curation import API, root, uid
-
+    from curation_fakes import API, SOURCE
+    from smithtune import dataset_workflow
     monkeypatch.chdir(tmp_path)
-    # Use the same service boundary fake as the behavioral curation tests.
-    api = API([[root(1, "a")]])
-    result = curation.create_dataset(
-        workspace_id=uid(100), project_id=uid(101), name="local-output",
-        start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z",
-        limit=1, runner=api,
-    )
-    assert Path(result["selection"]).resolve().is_relative_to(tmp_path / "data/datasets")
-    assert Path(result["selection"]).is_file()
+    result = dataset_workflow.run('pull', runner=API(), **SOURCE)
+    assert Path(result['checkpoint']).resolve().is_relative_to(tmp_path / 'data/datasets')
+    assert (Path(result['checkpoint']) / 'checkpoint.json').is_file()
 
 
 def test_doctor_redacts_configuration_and_is_offline(monkeypatch, capsys):

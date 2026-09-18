@@ -6,7 +6,6 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import BoundedSemaphore, Lock
 
-from smithtune.artifacts import _json_dump
 from smithtune.triage_agent import _model, skill_files
 
 
@@ -87,7 +86,7 @@ def run_code(code: str, tasks: JudgeTasks) -> dict:
     return execute_code(code, {"pending_tasks": tasks.pending_tasks, "judge_batch": tasks.judge_batch})
 
 
-def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_tokens, coordinator_judge, model=None):
+def coordinate(pending, run_task, save_record, *, concurrency, max_tokens, coordinator_judge, model=None):
     """Run one coordinator. Missing tasks remain incomplete and can be resumed."""
     from deepagents import create_deep_agent
     from deepagents.backends import StateBackend
@@ -100,7 +99,6 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
     from smithtune.triage_agent import allowed_tools
 
     tasks = JudgeTasks(pending, run_task, save_record, concurrency)
-    code_calls = 0
 
     @tool
     def code_mode(code: str) -> dict:
@@ -109,8 +107,6 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
         Example: jobs = pending_tasks(); judge_batch(jobs) if jobs else []
         Each call has fresh Python state. Return counts or compact task status.
         """
-        nonlocal code_calls
-        code_calls += 1
         return run_code(code, tasks)
 
     chat_model = model if model is not None else _model(coordinator_judge, max_tokens)
@@ -134,18 +130,10 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
             allowed_tools({"read_file", "code_mode", "task"}),
         ],
     )
-    state = {"status": "running", "tasks": len(pending), "coordinator": coordinator_judge, "code_calls": 0}
-    path = output_dir / "agent-state.json"
-    _json_dump(path, state)
     try:
         agent.invoke({"messages": [{"role": "user", "content": f"Label all {len(pending)} pending trajectory/judge pairs. Use code mode and judge subagents; concurrency is {concurrency}."}],
                       "files": skill_files()}, config={"recursion_limit": min(1000, 24 + 4 * len(pending)), "max_concurrency": concurrency})
-        state["status"] = "complete" if len(tasks.finished) == len(pending) and all(r["status"] in {"complete", "context_exceeded"} for r in tasks.finished.values()) else "incomplete"
     except Exception:
-        state.update(status="incomplete", error="coordinator stopped; rerun the same command to finish pending votes")
-    except BaseException:
-        state["status"] = "interrupted"
-        raise
-    finally:
-        state.update(code_calls=code_calls, attempted=len(tasks.claimed), finished=len(tasks.finished))
-        _json_dump(path, state)
+        # Durable votes are the only state. A fresh coordinator resumes missing
+        # pairs, including after coordinator/software changes.
+        pass

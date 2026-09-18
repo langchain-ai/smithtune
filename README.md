@@ -57,8 +57,9 @@ provider's key, and a judge key** in your environment:
 You need the key for the training provider you choose. The default judge calls
 Anthropic. [Other judge routes](docs/reference.md#replay-options) include
 Fireworks and the internal LangSmith gateway (`LANGSMITH_GATEWAY_API_KEY`).
-Optional [dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council)
-uses a Fireworks/OpenAI council by default and also requires `OPENAI_API_KEY`.
+The default [dataset curation council](docs/datasets.md#label-full-trajectories-with-an-agent-council)
+uses Fireworks and OpenAI, requiring both `FIREWORKS_API_KEY` and `OPENAI_API_KEY`
+and the optional Deep Agents extra. Use `create --no-triage` to skip this review.
 
 Check local setup:
 
@@ -101,7 +102,7 @@ ID with your source, and choose a feedback filter your project uses:
 ```bash
 project_id='<project-id>'
 
-smithtune dataset create \
+smithtune dataset create data/datasets/my-sft \
   --workspace-id "$workspace_id" --project-id "$project_id" \
   --name my-sft-dataset \
   --limit 100 \
@@ -118,14 +119,28 @@ becomes one dataset example, including earlier turns outside the time window.
 `--limit 100` selects at most 100 distinct trajectories. Remove `--filter` to
 select without a feedback threshold; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
 
-Invalid whole trajectories are pruned before upload using message and captured
-tool-schema checks. Saved conversations remain unchanged; the result reports a
-`rejected` count and the import receipt records reasons. Model-specific rendering
-and context limits are still checked by `prepare`.
+This first command downloads and previews the default council work. It makes
+no judge calls or LangSmith writes. Review the candidates and pending votes,
+then authorize judging and upload using the saved settings:
 
-For an optional model review before import, use
-[dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council).
-For additions to an existing dataset, see [dataset curation](docs/datasets.md).
+```bash
+smithtune dataset create data/datasets/my-sft --confirm
+```
+
+Creation includes triage by default. Add `--no-triage` to the first command to
+select only training-valid conversations without council review. The default
+council needs the optional Deep Agents extra and Fireworks/OpenAI credentials;
+see [dataset curation](docs/datasets.md) for setup, staged commands, and recovery.
+
+Selection is a seeded sample of distinct conversations (default 100, maximum
+2000, seed 42). Invalid messages, media, or missing producing-run/tool provenance
+exclude whole conversations before paid judging. Exclusions are reported with
+source identities and reasons. Zero eligible conversations create no dataset.
+Model-specific rendering and context limits are checked by `prepare`.
+
+Continue interrupted work with `smithtune dataset resume data/datasets/my-sft
+--confirm`. Completed downloads and votes are reused, and uncertain uploads are
+reconciled. Use a new checkpoint to select a different source or time window.
 
 ## Prepare data
 
@@ -140,8 +155,9 @@ smithtune prepare \
   --data-dir "$data_dir"
 ```
 
-Preparation downloads the trajectories, captures their tools, and validates the
-training format. It creates approximately 80% training, 10% validation, and 10%
+Preparation downloads whole conversations with their saved per-assistant tool
+bindings and validates the training format. Exported bound examples need no
+source-run reads; unbound examples require verifiable producing-run evidence. It creates approximately 80% training, 10% validation, and 10%
 held-out test data, keeping each source trajectory in one split. These splits
 are also registered on the original LangSmith dataset for evaluation. If local
 preparation succeeds but publication does not, publish and verify only the saved
@@ -155,7 +171,8 @@ The main data requirements are:
 
 - Text and tool trajectories; images are unsupported
 - Recorded system messages are preserved; Qwen requires them at the start
-- All supported assistant messages are training targets, including earlier turns
+- Every supported assistant message is trained once, using its own available tools
+  and recorded prefix; earlier assistant context has zero loss
 
 Whole malformed or incompatible trajectories are excluded unchanged. `prepare`
 prints a warning and records each exclusion in `prepared/warnings.json` and
@@ -163,12 +180,13 @@ prints a warning and records each exclusion in `prepared/warnings.json` and
 
 Examples over the model's context limit are rejected without truncation.
 Reasoning is omitted by default. See the [reference](docs/reference.md) for
-model selection, split settings, and reasoning options.
+`--validation-fraction`, `--test-fraction`, sticky `--split-from` assignments,
+model selection, and reasoning options.
 
 ## Plan and train
 
 **Check the evaluation size before starting paid work.** Replay evaluates the
-next assistant action at multiple points in each test trajectory. For example,
+next assistant action with its recorded tool definitions at multiple points in each test trajectory. For example,
 20 trajectories with 30 eligible actions each produce 600 comparisons. Each
 comparison generates and judges a base response and a tuned response, with
 additional judge calibration calls.

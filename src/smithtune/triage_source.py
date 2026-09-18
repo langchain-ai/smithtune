@@ -1,4 +1,4 @@
-"""Freeze LangSmith conversation messages and run evidence before judging."""
+"""Read source evidence in memory and save one bound conversation at a time."""
 
 from __future__ import annotations
 
@@ -9,15 +9,17 @@ import subprocess
 import sys
 import time
 from functools import partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
-from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
+from smithtune.artifacts import _run, _utc_now
 from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.dataset_artifacts import save_conversation
-from smithtune.inference_contract import ContractError, contract_from_runs, json_sha256, parse_inference_contract
+from smithtune.inference_contract import json_sha256
+from smithtune.bindings import capture_bindings, validate_bound_messages
 from smithtune.providers.base import PipelineError
 
 
@@ -25,32 +27,16 @@ MAX_SOURCE_PAGES = 1000
 MAX_EXPANDED_TRACES = 10_000
 
 
-def _fetch(command, *, runner, cache_dir, use_cache=True, **kwargs):
-    """Retry idempotent source reads; never wrap dataset writes."""
-    path = cache_dir / (json_sha256({"command": command, "input": kwargs.get("input")}) + ".json")
-    if use_cache and path.exists():
-        return subprocess.CompletedProcess(command, 0, stdout=path.read_text(encoding="utf-8"), stderr="")
+def _fetch(command, *, runner, **kwargs):
+    """One retry layer for idempotent source reads; no response cache."""
     for attempt in range(3):
         try:
-            result = runner(command, **kwargs)
-        except subprocess.CalledProcessError as exc:
+            return runner(command, **kwargs)
+        except (subprocess.CalledProcessError, PipelineError, OSError):
             if attempt == 2:
                 raise
-            # The LangSmith CLI can write request errors to stdout.
-            error = (exc.stdout or "") + (exc.stderr or "")
-            limited = bool(re.search(r"\b429\b|rate.limit", error, re.IGNORECASE))
-            delay = 30 * (attempt + 1) if limited else 2 ** attempt
-            print(f"{'LangSmith rate limit. ' if limited else ''}Retrying trace download in {delay}s (attempt {attempt + 2}/3).", file=sys.stderr)
-            time.sleep(delay)
-            continue
-        # Cache only successful JSON responses, never request errors.
-        try:
-            json.loads(result.stdout)
-        except (ValueError, TypeError):
-            return result
-        if use_cache:
-            _atomic_text(path, result.stdout)
-        return result
+            print(f"Retrying source read (attempt {attempt + 2}/3).", file=sys.stderr)
+            time.sleep(2 ** attempt)
 
 
 def query_runs(workspace: str, project: str, query: dict, *, runner=_run) -> list[dict]:
@@ -58,8 +44,10 @@ def query_runs(workspace: str, project: str, query: dict, *, runner=_run) -> lis
     selects = ["ID", "TRACE_ID", "PARENT_RUN_IDS", "PROJECT_ID", "IS_ROOT", "NAME", "RUN_TYPE",
                "START_TIME", "END_TIME", "INPUTS", "OUTPUTS", "ERROR", "EXTRA", "ATTACHMENTS"]
     path = f"/api/v2/traces/{tid}/runs?" + urlencode([("project_id", project), *[("selects", field) for field in selects]])
-    # V2's trace endpoint returns the complete tree. Omit time bounds so turns
-    # outside the root-selection window retain their full evidence too.
+    # QueryTraceRequestQueryParams has no cursor; QueryTraceResponseBody is
+    # one complete items array (unlike /runs/query and /v1/trajectory).
+    # Omit both time bounds to retain evidence outside the selection window.
+    # Fail closed if a future server starts returning a continuation cursor.
     page = _api(workspace, "GET", path, runner=runner)
     if not isinstance(page, dict) or not isinstance(page.get("items"), list) or page.get("next_cursor"):
         raise PipelineError("invalid or incomplete V2 trace run response")
@@ -154,8 +142,15 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
             raise PipelineError("invalid root query cursor")
         cursors.add(cursor)
         body["cursor"] = cursor
-    roots = sorted(rows.values(), key=lambda r: r["trace_id"])
-    return sorted(random.Random(source["seed"]).sample(roots, min(source["limit"], len(roots))), key=lambda r: r["trace_id"]) if source["limit"] else roots
+    # Select distinct conversations before sampling, so busy threads do not
+    # consume multiple slots or gain extra sampling probability.
+    groups = {}
+    for root in sorted(rows.values(), key=lambda r: r["trace_id"]):
+        key = ("thread", root["thread_id"]) if root["thread_id"] else ("trace", root["trace_id"])
+        groups.setdefault(key, root)
+    roots = [groups[key] for key in sorted(groups)]
+    return sorted(random.Random(source["seed"]).sample(roots, min(source["limit"], len(roots))),
+                  key=lambda r: (r["thread_id"] or "", r["trace_id"]))
 
 
 def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: str, end_time: str, runner) -> list[str]:
@@ -166,7 +161,7 @@ def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: s
         "filter": f"eq(thread_id,{json.dumps(thread)})",
         "min_start_time": start_time, "max_start_time": end_time,
         "selects": ["ID", "TRACE_ID", "THREAD_ID", "PROJECT_ID", "START_TIME"],
-    }, runner=runner)
+    }, runner=runner, read_attempts=1)
     if any(root.get("thread_id") != thread for root in roots):
         raise PipelineError("thread source query returned another thread")
     return list(dict.fromkeys(_uuid(root.get("trace_id"), "trace id")
@@ -177,135 +172,86 @@ def source_options(workspace_id, project_id, start_time=None, end_time=None, *, 
     start_time, end_time = resolve_time_window(start_time, end_time)
     value = {"workspace_id": _uuid(workspace_id, "workspace id"), "project_id": _uuid(project_id, "project id"),
              "start_time": start_time, "end_time": end_time, "filter": filter, "limit": limit, "seed": seed}
-    if limit is not None and (type(limit) is not int or limit < 1):
-        raise PipelineError("trace limit must be positive")
+    if type(limit) is not int or not 1 <= limit <= 2000:
+        raise PipelineError("conversation limit must be between 1 and 2000")
     if type(seed) is not int or (filter is not None and (not isinstance(filter, str) or not filter.strip())):
         raise PipelineError("invalid source seed or filter")
     return value
 
 
-def training_error(unit: dict) -> str | None:
-    """Check saved conversations with preparation's provider-neutral validation."""
-    if unit["training_error"]:
-        return unit["training_error"]
-    try:
-        messages = validate_import_messages(unit["example"])
-        contract = parse_inference_contract(unit["contract"])
-        contract.validate_messages(messages)
-    except (PipelineError, ContractError) as exc:
-        return str(exc)
-    return None
 
 
-def snapshot(source: dict, output_dir: Path, *, runner=_run) -> dict:
-    path = output_dir / "snapshot.json"
-    if path.exists():
-        value = load_snapshot(output_dir)
-        if value["source"] != source:
-            raise PipelineError("triage snapshot uses a different source query; use a new output directory")
-        return value
-    cache_dir = output_dir / "download"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    source_path = cache_dir / "source.json"
-    if source_path.exists() and _load_json(source_path) != source:
-        raise PipelineError("partial download uses a different source query; use a new output directory")
-    _json_dump(source_path, source)
-    live_runner = partial(_fetch, runner=runner, cache_dir=cache_dir, use_cache=False)
-    runner = partial(_fetch, runner=runner, cache_dir=cache_dir)
-    captured_path = cache_dir / "captured-at.json"
-    if not captured_path.exists():
-        _json_dump(captured_path, _utc_now())
-    captured_at = _load_json(captured_path)
-    roots = _root_selection(source, runner=runner)
-    if not roots:
-        raise PipelineError("no traces match the source query; check the project, time window, and filter")
+class SourceExclusion(PipelineError):
+    """Terminal evidence failure for one selected conversation."""
+
+
+def _download(source, selected, *, runner):
     workspace, project = source["workspace_id"], source["project_id"]
-    print(f"Downloading conversations for {len(roots)} selected traces...", file=sys.stderr)
-    units, traces, visited = [], [], set()
-    project_start = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
-    for root in roots:
-        thread, tid = root["thread_id"], root["trace_id"]
-        key = ("thread", thread) if thread else ("trace", tid)
-        if key in visited:
-            continue
-        visited.add(key)
-        unit_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
-                                       end_time=captured_at, runner=runner) if thread else [tid]
-        if tid not in unit_traces:
-            raise PipelineError("selected root was not found in its conversation")
-        all_messages = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
-        all_runs = []
-        for trace_id in unit_traces:
-            if len(traces) >= MAX_EXPANDED_TRACES:
-                raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
-            runs = query_runs(workspace, project, {"trace": trace_id}, runner=runner)
-            if not runs or any(run.get("trace_id") != trace_id for run in runs):
-                raise PipelineError("trace run evidence is missing or belongs to another trace")
-            roots_for_trace = [run for run in runs if not run.get("parent_run_id")]
-            if len(roots_for_trace) > 1:
-                raise PipelineError("trace has multiple root runs")
-            all_runs.extend(runs)
-            record = {"trace_id": trace_id, "root_run_id": roots_for_trace[0]["id"] if roots_for_trace else None, "thread_id": thread,
-                      "project_id": project, "runs": runs}
-            if not roots_for_trace:
-                record["source_warnings"] = ["Root run missing from the saved source; assess only the available evidence."]
-            record["multimodal_types"] = multimodal_types(record)
-            record["source_sha256"] = json_sha256(record)
-            traces.append(record)
-        if thread:
-            # The trajectory is live; verify membership again without cached reads.
-            current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
-                                             end_time=_utc_now(), runner=live_runner)
-            if set(current_traces) != set(unit_traces):
-                raise PipelineError(f"conversation {thread} changed during download; start a new triage run in a new output directory")
-        example_id = str(uuid5(NAMESPACE_URL, json_sha256({"workspace": workspace, "project": project, "key": key, "messages": all_messages})))
-        example = {"id": example_id, "inputs": {"messages": all_messages}, "outputs": None,
-                   "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
-                                "source_project_id": project, "source_thread_id": thread,
-                                "source_workspace_id": workspace, "source_scope": "thread" if thread else "trace",
-                                "source_scope_id": thread or unit_traces[0],
-                                "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
-        save_conversation(output_dir, example)
-        contract = None
-        error = None
+    scope, scope_id = selected["scope"], selected["scope_id"]
+    thread = scope == "thread"
+    start = _project_start_time(workspace, project, runner=runner, read_attempts=1) if thread else None
+    traces = thread_trace_ids(workspace, project, scope_id, start_time=start, end_time=_utc_now(), runner=runner) if thread else [scope_id]
+    if selected["trace_id"] not in traces:
+        raise SourceExclusion("selected root no longer belongs to the conversation")
+    if len(traces) > MAX_EXPANDED_TRACES:
+        raise SourceExclusion("conversation exceeds 10000 traces")
+    messages = _fetch_trajectory(workspace, project, {"key": scope + "_id", "id": scope_id}, runner=runner)
+    if not messages:
+        raise SourceExclusion(f"{scope} {scope_id} returned no messages")
+    runs = [run for tid in traces for run in query_runs(workspace, project, {"trace": tid}, runner=runner)]
+    if thread and set(traces) != set(thread_trace_ids(workspace, project, scope_id, start_time=start, end_time=_utc_now(), runner=runner)):
+        raise SourceExclusion("thread membership changed during download; use a fresh checkpoint for this conversation")
+    media = multimodal_types({"messages": messages, "runs": runs})
+    if media:
+        raise SourceExclusion("multimodal content: " + ", ".join(media))
+    example = {"id": str(uuid5(NAMESPACE_URL, json_sha256([workspace, project, scope, scope_id]))),
+               "inputs": {"messages": messages}, "outputs": None,
+               "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
+                            "source_workspace_id": workspace, "source_project_id": project,
+                            "source_scope": scope, "source_scope_id": scope_id}}
+    try:
+        validate_import_messages(example)
+        example["metadata"]["smithtune_source"] = capture_bindings(messages, runs)
+        validate_bound_messages(example)
+    except PipelineError as exc:
+        raise SourceExclusion(str(exc)) from exc
+    return example
+
+
+def pull(directory, checkpoint, *, runner=_run, concurrency=4):
+    """Caller holds the command lock. Completed selections make no source reads."""
+    from smithtune.checkpoint import save, conversations
+
+    if type(concurrency) is not int or not 1 <= concurrency <= 4:
+        raise PipelineError("pull concurrency must be between 1 and 4")
+    # Verify saved evidence even on a no-op; never replace it after voting.
+    conversations(directory, checkpoint)
+    read = partial(_fetch, runner=runner)
+    if checkpoint["selection"] is None:
+        roots = _root_selection(checkpoint["source"], runner=read)
+        checkpoint["selection"] = [{"scope": "thread" if r["thread_id"] else "trace",
+                                    "scope_id": r["thread_id"] or r["trace_id"],
+                                    "trace_id": r["trace_id"], "status": "pending"} for r in roots]
+        save(directory, checkpoint)
+    pending = [s for s in checkpoint["selection"] if s["status"] == "pending"]
+    if pending and (directory / "triage.jsonl").exists():
+        raise PipelineError("cannot refetch conversations after voting starts")
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(_download, checkpoint["source"], selected, runner=read): selected for selected in pending}
         try:
-            contract = contract_from_runs([run for run in all_runs if run.get("run_type") == "llm"], workspace_id=workspace, thread_id=thread)
-        except ContractError:
-            error = "tool schemas cannot be represented by the current training contract"
-        if any(trace["root_run_id"] is None for trace in traces if trace["trace_id"] in unit_traces):
-            error = "conversation source has a missing root run"
-        unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error}
-        unit["training_error"] = training_error(unit)
-        units.append(unit)
-        if len(units) % 10 == 0:
-            print(f"Downloaded {len(units)} conversations, {len(traces)} traces.", file=sys.stderr)
-    value = {"schema_version": 2, "source": source, "selected_trace_ids": [root["trace_id"] for root in roots],
-             "traces": traces, "units": units}
-    value["snapshot_sha256"] = json_sha256(value)
-    _json_dump(path, value)
-    return value
-
-
-def load_snapshot(output_dir: Path) -> dict:
-    value = _load_json(output_dir / "snapshot.json")
-    if isinstance(value, dict) and value.get("schema_version") == 1:
-        raise PipelineError("this triage snapshot predates system-message capture; use a new output directory to download and judge again")
-    if not isinstance(value, dict) or value.get("schema_version") != 2:
-        raise PipelineError("unsupported triage snapshot")
-    expected = value.get("snapshot_sha256")
-    if expected != json_sha256({key: item for key, item in value.items() if key != "snapshot_sha256"}):
-        raise PipelineError("triage snapshot hash mismatch")
-    return value
-
-
-def conversation_trajectories(frozen: dict) -> list[dict]:
-    """Use the existing training conversations as the judging units."""
-    traces = {trace["trace_id"]: trace for trace in frozen["traces"]}
-    trajectories = []
-    for unit in frozen["units"]:
-        trajectory = {"trajectory_id": unit["example"]["id"],
-                      "messages": unit["example"]["inputs"]["messages"]}
-        runs = [run for tid in unit["trace_ids"] for run in traces[tid]["runs"]]
-        trajectory["multimodal_types"] = multimodal_types({**trajectory, "runs": runs})
-        trajectories.append(trajectory)
-    return trajectories
+            for future in as_completed(futures):
+                selected = futures[future]
+                try:
+                    example = future.result()
+                    path = save_conversation(directory, example)
+                    selected.update(status="complete", file=str(path.relative_to(directory)))
+                    selected.pop("error", None)
+                except SourceExclusion as exc:
+                    selected.update(status="excluded", reason=str(exc))
+                except Exception as exc:
+                    selected["error"] = f"source read incomplete ({type(exc).__name__}); retry pull"
+                save(directory, checkpoint)
+        finally:
+            for future in futures:
+                future.cancel()
+    return checkpoint

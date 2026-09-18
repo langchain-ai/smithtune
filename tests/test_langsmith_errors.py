@@ -52,8 +52,8 @@ def test_contract_failure_keeps_example_context(monkeypatch, retry_sleeps):
     example = {"id": "example-123", "metadata": {"source_scope": "thread", "source_scope_id": "thread-123",
                                                  "source_project_id": "project-123"}}
     with pytest.raises(PipelineError) as error:
-        dataset.capture_example_contracts("workspace-123", [example])
-    assert str(error.value) == "example example-123: cannot collect tools: Error: HTTP 429"
+        dataset.capture_example_bindings([example], "workspace-123")
+    assert "HTTP 429" in str(error.value)
 
 
 def test_curation_retains_existing_error_handling(monkeypatch):

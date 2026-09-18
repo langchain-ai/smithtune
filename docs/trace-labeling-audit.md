@@ -1,52 +1,56 @@
 # Trajectory council audit
 
-`dataset triage` selects training examples. `evaluate` tests model responses
-through replay. These are separate flows.
+`dataset triage` selects whole training conversations. `evaluate` scores model
+responses through replay. These are separate flows.
 
 ## Current path
 
-1. Reuse the saved full conversations from the dataset download path.
-2. Filter any conversation with media in its messages or source runs.
-3. Let a Deep Agent coordinator dispatch one task per conversation and council
-   member through Python code mode.
-4. Send the full ordered conversation messages and selection rubric in one
-   request. The judge has no tools and returns only `keep` (0 or 1) and `reason`.
-5. Require a completed council and use its majority label for the conversation.
-6. Import kept conversations with the exact saved messages and tool schemas.
+1. Pull groups distinct threads/traces before seeded selection, freezes source
+   IDs, and fetches full trajectory pages with system messages.
+2. V2 supporting runs are inspected in memory for media and producing-output
+   identities. A unique stable output-message ID plus matching content/calls
+   binds each assistant to its producing run and explicit recorded tools.
+3. Each unchanged conversation and its bindings are saved together. Media,
+   malformed structures, unsupported tools, and unverifiable mappings are
+   terminal exclusions. Source service failures remain retryable incomplete work.
+4. Triage dispatches missing conversation/judge pairs from local files, through
+   a fresh Deep Agent coordinator with Python code mode or the direct runner.
+   Judges receive full messages and bindings as untrusted evidence, no executable
+   tools, and return only `keep` (0/1) and `reason`.
+5. Every slot must succeed before a strict majority can keep a conversation;
+   ties drop. Provider context rejection excludes it without truncation. Other
+   request failures remain incomplete.
+6. Sequential push uploads one whole example with bindings and evidence-bound
+   triage provenance. Deterministic IDs and pending writes support reconciliation.
 
-There are no per-turn votes, message previews, paged reads, or character caps.
-If a provider rejects the full request because it exceeds its context window,
-the whole conversation gets a filter label of 0. Other request failures remain
-incomplete. The CLI never shortens the input or invents a score after a failed
-request. Recorded conversation instructions are data, not judge instructions.
+`checkpoint.json` and `triage.jsonl` are the only bookkeeping files. Completed
+conversations and votes resume without source reads or repeated durable judgments.
+Hashes cover messages and bindings; there are no raw caches, retained run trees,
+software/skill identity gates, or coordinator state files. A lost unsaved response
+may require another paid call. Code upgrades do not promise bit-for-bit judging
+reproducibility.
 
-## Checks
+## Verification and limitations
 
-Local tests cover conversation deduplication, complete message preservation,
-media in early and late turns, provider context rejection, strict majority,
-resume, and unchanged messages through dataset import and preparation. The
-coordinator tests run the real Deep Agents graph with a local model.
+Offline regressions cover selection, source mismatch, interrupted download/write,
+changed threads, media/history checks, vote reuse, ties, context rejection, and
+exact messages/bindings through upload and fresh export. The roundtrip test
+continues through preparation, pinned split publication/verification, both
+providers' actual sampling adapters with fake services, schema scoring, judge
+evidence, parent reference IDs, child provenance, and publication-only resume.
+Installed renderer interfaces test per-target tools and zero loss on history;
+pinned real-tokenizer checks are opt-in. Optional Deep Agents/Monty tests exercise
+the real graph with deterministic local models when that extra is installed.
 
-Provider transport checks cover the official Fireworks endpoint and OpenAI
-Responses for Terra. The Fireworks adapter retains reasoning fields for the
-coordinator's tool calls. Package checks exercise skill export and the optional
-agent dependency outside the checkout.
+Mapping support comes from inspected API schemas and backend fixtures, reproduced
+as synthetic test evidence; this change has no live source/write/inference smoke.
+UI run attribution alone does not prove production because it also attributes
+supplied input history to consumers. Missing or ambiguous stable output identities
+and missing explicit tool availability are excluded, not guessed. Instrumentation
+must supply those fields before such conversations can be used automatically.
+Thread membership checks do not atomically freeze all live run payloads.
 
-The full saved batch contains 100 selected roots in 95 conversations. Three
-conversations contain media. This plans 276 votes for 92 full conversations,
-not one set of votes for each source trace. Private source data and live test
-artifacts stay under ignored run directories. Live validation results are
-recorded in the pull request.
-
-The final council uses DeepSeek, GLM-5.3-Flash, and Terra. A live check used 15
-saved full conversations and 16 concurrent requests. All 42 votes completed on
-the first attempt: 8 kept, 6 dropped, 1 media filter, no context filters, and no
-incomplete labels. GLM used low reasoning; DeepSeek and Terra used reasoning
-off. Resume made no new calls. Four kept conversations passed the training checks.
-
-An earlier Muse council check uploaded its 3 kept conversations and read them
-back with identical messages and saved tool contracts. Re-importing into the
-same dataset skipped all 3 without duplicates or updates.
-
-Label accuracy still needs comparison with a human-reviewed sample. A valid
-JSON score does not establish that the model's quality decision is correct.
+Earlier live council checks used the retired union/snapshot format. Their counts
+and outcomes do not validate this new storage or per-assistant pipeline. Label
+accuracy still needs a human-reviewed sample; valid JSON and completed votes do
+not establish the correctness of a model's quality decision.

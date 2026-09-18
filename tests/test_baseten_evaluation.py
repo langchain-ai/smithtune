@@ -1,3 +1,5 @@
+
+from binding_fixtures import bound_row
 import copy
 import io
 import json
@@ -129,17 +131,18 @@ def replay_data(tmp_path, monkeypatch, model=baseten.DEFAULT_MODEL, *, case_type
     data = tmp_path / "data"
     contract = loaded_contract(tmp_path, legacy=False) if case_type == "tool_call" else None
     write_manifest(data, model=model, contract=contract)
-    row = {
+    row = bound_row({
         "messages": [{"role": "system", "content": "policy"},
                      {"role": "user", "content": "What is x?"},
                      {"role": "assistant", "content": "x is 1"}],
         "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
-    }
+    })
     if contract is not None:
         row["messages"][-1] = tool_call("lookup")
         row["messages"].append({"role": "tool", "content": "x is 1", "tool_call_id": "call-1"})
         row["tools"] = list(contract.tools)
         row["_source"]["contract_sha256"] = contract.contract_sha256
+    bound_row(row)
     (data / "prepared/test.jsonl").write_text(json.dumps(row) + "\n")
     monkeypatch.setattr(rendering, "load_training_renderer", lambda _: SimpleNamespace(prompt_tokens=lambda *_a, **_k: [1, 2, 3]))
     return data

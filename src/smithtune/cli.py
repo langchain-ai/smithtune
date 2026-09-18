@@ -15,9 +15,9 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smithtune import curation, dataset, triage
-from smithtune.dataset_artifacts import new_run_directory
-from smithtune.triage_source import load_snapshot, source_options
+from smithtune import dataset, triage
+from smithtune import dataset_workflow
+from smithtune.checkpoint import CheckpointError
 from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
@@ -81,53 +81,40 @@ def _parser() -> argparse.ArgumentParser:
 
     curate = sub.add_parser("dataset", help="create a conversation trajectory dataset from project filters")
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
-    create = curate_sub.add_parser(
-        "create", help="filter root traces and import their whole conversations into a new dataset",
-        description="Create a dataset from conversations selected through matching root traces. A root selects its whole thread when it has one, otherwise its trace; thread imports include turns outside the time window. Invalid whole trajectories are excluded before upload and recorded in the import receipt.",
-    )
-    create.add_argument("--workspace-id")
-    create.add_argument("--project-id")
-    destination = create.add_mutually_exclusive_group(required=True)
-    destination.add_argument("--name", help="name for a new LangSmith dataset")
-    destination.add_argument("--dataset-id", help="add or extend conversations in an existing dataset in this workspace")
-    create.add_argument("--start-time", help="inclusive root start time, with timezone (default: 24 hours before end time)")
-    create.add_argument("--end-time", help="exclusive root start time, with timezone (default: now)")
-    create.add_argument("--filter", help="LangSmith filter expression evaluated on root runs")
-    create.add_argument("--limit", type=int, help=f"number of distinct conversations to select before validation, at most {curation.MAX_LIMIT}; rejected trajectories are not replaced")
-    create.add_argument("--concurrency", type=int, default=curation.DEFAULT_CONCURRENCY, help=f"conversations fetched and written at once, 1 to {curation.MAX_CONCURRENCY} (default: %(default)s)")
-    create.add_argument("--run-dir", type=Path, help="local run directory (default: data/datasets/<generated-id>)")
-    create.add_argument("--output", type=Path, help="selection file path; its parent becomes the run directory; cannot combine with --run-dir")
-
-    create.add_argument("--triage-dir", type=Path, help="import frozen conversations kept by the council from a completed triage run")
-    create.add_argument("--confirm", action="store_true", help="confirm dataset import from triage labels")
-
-    triage_cmd = curate_sub.add_parser(
-        "triage", help="label full trajectories with an agent council",
-        description="Judge each full conversation once per council model. Preview a council, then add --confirm to label or resume. Defaults to DeepSeek V4.1 Flash, GLM-5.3-Flash, and GPT-5.6 Terra judges managed by a Deep Agent. Source and council settings are saved in the directory.",
-    )
-    triage_cmd.add_argument("directory", nargs="?", type=Path, help="local run directory (default for a new run: data/datasets/<generated-id>)")
-    source = triage_cmd.add_argument_group("Source (first run only)")
-    source.add_argument("--workspace-id")
-    source.add_argument("--project-id")
-    source.add_argument("--start-time", help="inclusive root start time, with timezone (default: 24 hours before end time)")
-    source.add_argument("--end-time", help="exclusive root start time, with timezone (default: now)")
-    source.add_argument("--filter", help="optional root trace filter")
-    source.add_argument("--limit", type=int, help="roots to select; each distinct full conversation is judged once (default: 100)")
-    council = triage_cmd.add_mutually_exclusive_group()
-    council.add_argument("--judges", help="comma-separated models (default: deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra); other models use provider:model")
-    council.add_argument("--judge", action="append", help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--rule", action="append", help="additional selection rule; repeat for multiple rules")
-    triage_cmd.add_argument("--concurrency", type=int, help="maximum concurrent judge tasks (default: 4)")
-    approval = triage_cmd.add_mutually_exclusive_group()
-    approval.add_argument("--confirm", action="store_true", help="run paid judging or resume; without this flag, preview only")
-    # Keep old invocations usable without crowding the normal command surface.
-    approval.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--output-dir", type=Path, help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--config", type=Path, help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--runner", choices=("api", "deepagent"), help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--seed", type=int, help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
-    triage_cmd.add_argument("--attempts", type=int, help=argparse.SUPPRESS)
+    for name in ('pull', 'triage', 'push', 'create', 'resume'):
+        command = curate_sub.add_parser(name, help={
+            'pull': 'download whole conversations and per-assistant tools',
+            'triage': 'preview local council work; --confirm runs paid judging',
+            'push': 'preview destination reconciliation; --confirm uploads',
+            'create': 'pull, triage and push using one resumable checkpoint',
+            'resume': 'show pending stages; --confirm continues saved work',
+        }[name])
+        command.add_argument('directory', nargs='?', type=Path, help='checkpoint directory (generated for a new pull/create)')
+        if name in {'pull', 'create'}:
+            for flag in ('workspace-id', 'project-id', 'start-time', 'end-time', 'filter'):
+                command.add_argument('--' + flag)
+            command.add_argument('--limit', type=int, help='distinct conversations in this checkpoint, default 100, maximum 2000; not destination size')
+            command.add_argument('--seed', type=int, help='selection seed (default 42)')
+        if name in {'push', 'create'}:
+            destination = command.add_mutually_exclusive_group()
+            destination.add_argument('--name', help='name for a new dataset; saved for flagless resume')
+            destination.add_argument('--dataset-id', help='existing dataset to extend')
+        if name == 'create':
+            command.add_argument('--no-triage', action='store_true', default=None, help='pull and push without paid council judging')
+        if name in {'triage', 'create'}:
+            command.add_argument('--judges', help='comma-separated model aliases or provider:model')
+            command.add_argument('--rule', action='append', help='additional whole-conversation selection rule')
+            command.add_argument('--config', type=Path, help=argparse.SUPPRESS)
+            command.add_argument('--runner', choices=('api', 'deepagent'), help=argparse.SUPPRESS)
+            command.add_argument('--max-output-tokens', type=int, help=argparse.SUPPRESS)
+            command.add_argument('--attempts', type=int, help=argparse.SUPPRESS)
+        if name != 'push':
+            command.add_argument('--concurrency', type=int, help='bounded workers: pull at most 4, judges at most 16 (default 4)')
+        if name != 'pull':
+            command.add_argument('--confirm', action='store_true', help='authorize this workflow’s paid judging and remote writes')
+        if name == 'triage':
+            command.add_argument('--output-dir', type=Path, help=argparse.SUPPRESS)
+            command.add_argument('--dry-run', action='store_true', help=argparse.SUPPRESS)
 
     publish_splits = curate_sub.add_parser(
         "publish-splits",
@@ -158,7 +145,7 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
     prep.add_argument("--source-workspace-id", help="default workspace for automatic source tool capture; example metadata.source_workspace_id takes precedence (default: dataset workspace)")
-    prep.add_argument("--inference-contract", type=Path, help="optional global tool-schema override; by default collect tools from each example's source LLM runs")
+    prep.add_argument("--inference-contract", type=Path, help="explicit global tool-schema override; default reads per-assistant bindings or verifies producing-run capture")
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
         help="omit source reasoning from SFT and replay (default), or explicitly preserve readable reasoning",
@@ -549,7 +536,14 @@ def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
-    args = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ['dataset'] and len(arguments) > 1 and arguments[1] in {'create', 'pull', 'triage', 'push', 'resume'}:
+        removed = next((flag for flag in ('--triage-dir', '--run-dir', '--output') if any(a == flag or a.startswith(flag + '=') for a in arguments)), None)
+        if removed:
+            parser.error(f'{removed} was removed; use dataset pull DIR, dataset triage DIR, then dataset push DIR --confirm (or dataset create DIR)')
+        if arguments[1] == 'triage' and any(a.split('=')[0] in {'--workspace-id', '--project-id', '--start-time', '--end-time', '--filter', '--limit', '--seed'} for a in arguments):
+            parser.error('triage uses local conversations; use dataset pull DIR with source flags first')
+    args = parser.parse_args(arguments)
     activity = ExitStack()
     try:
         command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
@@ -578,49 +572,21 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "dataset":
             if args.dataset_command == "publish-splits":
                 value = reporting.publish_prepared_splits(args.data_dir)
-            elif args.dataset_command == "triage":
-                directory = args.directory or args.output_dir
-                if args.directory is not None and args.output_dir is not None:
-                    raise PipelineError("use a directory argument or --output-dir, not both")
-                source_ids = (args.workspace_id, args.project_id)
-                if directory is None:
-                    if not all(source_ids):
-                        raise PipelineError("supply a saved run directory to resume, or both source IDs to start a new run")
-                    directory = new_run_directory()
-                print(f"Dataset run directory: {directory}", file=sys.stderr)
-                if all(source_ids):
-                    source = source_options(*source_ids, args.start_time, args.end_time, filter=args.filter,
-                                            limit=100 if args.limit is None else args.limit,
-                                            seed=42 if args.seed is None else args.seed)
-                elif any(source_ids) or any(v is not None for v in (args.start_time, args.end_time, args.filter, args.limit, args.seed)):
-                    raise PipelineError("supply both source IDs, or omit source flags to use the saved local snapshot")
-                elif (directory / "snapshot.json").exists():
-                    source = load_snapshot(directory)["source"]
-                else:
-                    raise PipelineError("no local snapshot; supply workspace and project to download traces")
-                settings = triage.council_settings(
-                    directory, judges=args.judges.split(",") if args.judges is not None else args.judge,
-                    rules=args.rule, config_path=args.config,
-                    runner_mode=args.runner, concurrency=args.concurrency, attempts=args.attempts,
-                    max_output_tokens=args.max_output_tokens,
-                )
-                value = triage.run_triage(source, directory, dry_run=not args.confirm, confirm=args.confirm, **settings)
-                if args.confirm:
-                    value = {key: value[key] for key in ("status", "trajectories", "filtered_multimodal", "filtered_context", "kept", "dropped", "incomplete", "labels", "report")}
-                value["run_dir"] = str(directory)
-            elif args.triage_dir is not None:
-                if any((args.workspace_id, args.project_id, args.start_time, args.end_time, args.filter, args.limit, args.output, args.run_dir)):
-                    raise PipelineError("--triage-dir uses the saved source; do not combine it with source query options")
-                value = triage.create_triaged_dataset(args.triage_dir, args.name, dataset_id=args.dataset_id, confirm=args.confirm)
             else:
-                if not all((args.workspace_id, args.project_id, args.limit)):
-                    raise PipelineError("dataset create requires workspace, project, and --limit, or --triage-dir")
-                print("Selecting conversations and " + ("updating dataset..." if args.dataset_id else "creating dataset..."), file=sys.stderr)
-                value = curation.create_dataset(
-                    workspace_id=args.workspace_id, project_id=args.project_id,
-                    start_time=args.start_time, end_time=args.end_time, name=args.name, dataset_id=args.dataset_id,
-                    filter=args.filter, limit=args.limit, output=args.output, run_dir=args.run_dir, concurrency=args.concurrency,
-                )
+                directory = args.directory
+                if getattr(args, 'output_dir', None):
+                    if directory is not None:
+                        raise CheckpointError('use DIR or --output-dir, not both')
+                    directory = args.output_dir
+                if getattr(args, 'dry_run', False) and getattr(args, 'confirm', False):
+                    raise CheckpointError('--dry-run cannot be combined with --confirm')
+                options = {key: getattr(args, key, None) for key in (
+                    'workspace_id', 'project_id', 'start_time', 'end_time', 'filter', 'limit', 'seed',
+                    'name', 'dataset_id', 'no_triage', 'concurrency', 'attempts', 'max_output_tokens')}
+                options.update(judges=args.judges.split(',') if getattr(args, 'judges', None) else None,
+                               rules=getattr(args, 'rule', None), config_path=getattr(args, 'config', None),
+                               runner_mode=getattr(args, 'runner', None))
+                value = dataset_workflow.run(args.dataset_command, directory, confirm=getattr(args, 'confirm', False), **options)
         elif args.command == "capture-contract":
             value = dataset.capture_inference_contract(
                 args.workspace_id,
@@ -762,11 +728,14 @@ def main(argv: list[str] | None = None) -> None:
                 value = {"status": "deleted", "deployment_id": args.deployment_id}
     except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
         activity.close()
+        if args.command == 'dataset' and not isinstance(exc, CheckpointError):
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
         parser.error(str(exc))
     finally:
         activity.close()
     print(json.dumps(value, indent=2, sort_keys=True))
-    if args.command == "dataset" and args.dataset_command == "triage" and value.get("status") == "incomplete":
+    if args.command == "dataset" and value.get("status") == "incomplete":
         raise SystemExit(1)
 
 

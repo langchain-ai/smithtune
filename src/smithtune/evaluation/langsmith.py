@@ -407,7 +407,8 @@ class EvaluationPublisher:
                 "parent_run_id": root_id, "trace_id": root_id,
                 "dotted_order": root_order + "." + begin.strftime("%Y%m%dT%H%M%S%fZ") + child_id,
                 "project_name": name, "extra": {"metadata": {**metadata, "case_id": case["id"],
-                    "message_index": case["message_index"], "serving_route": value["serving_route"]}}})
+                    "message_index": case["message_index"], "source_run_id": case.get("source_run_id"),
+                    "source_trace_id": case.get("source_trace_id"), "serving_route": value["serving_route"]}}})
         root = {"id": root_id, "name": "replay_trajectory", "run_type": "chain", "inputs": example.inputs,
                 "outputs": {"steps": steps, "completed_actions": len(steps), "total_actions": total,
                             "status": "complete" if len(steps) == total else "partial"}, "reference_example_id": example.id, "trace_id": root_id,

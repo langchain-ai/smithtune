@@ -1,60 +1,19 @@
-"""Match saved trajectories to an existing dataset and record every write."""
+"""Sequential, reconciled uploads from a local curation checkpoint."""
 
-import json
-import sys
-from types import SimpleNamespace
 from urllib.parse import urlencode
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from smithtune.artifacts import _json_dump, _utc_now
-from smithtune.curation import _api, _time, _uuid, _write_new
-from smithtune.dataset import (
-    _malformed_trajectory_reason,
-    _recorded_tool_call_reason,
-    _source_key,
-    capture_example_contracts,
-    validate_import_messages,
-)
-from smithtune.dataset_artifacts import load_conversation, save_conversation
-from smithtune.inference_contract import ContractError, json_sha256
+from smithtune.artifacts import _run
+from smithtune.bindings import read_bindings, validate_bound_messages
+from smithtune.checkpoint import save
+from smithtune.curation import _api, _time, _uuid
+from smithtune.dataset import _source_key
+from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
+from smithtune.triage import selected_examples
 
 
-def import_rejection(example, workspace, *, runner):
-    """Return a source-only rejection record before uploading a whole trajectory."""
-    source = dict(zip(("workspace", "project", "scope", "scope_id"), _source_key(example, workspace, None), strict=True))
-    example = {**example, "id": example.get("id") or json_sha256(source)}
-    reason = None
-    try:
-        messages = validate_import_messages(example)
-    except PipelineError as exc:
-        reason = _malformed_trajectory_reason(example["id"], exc)
-        if reason is None:
-            raise
-    if reason is None:
-        def read(command, *, capture):
-            body = json.loads(command[command.index("--body") + 1]) if "--body" in command else None
-            value = _api(command[command.index("--workspace") + 1],
-                         command[command.index("--method") + 1], command[2], body, runner=runner)
-            return SimpleNamespace(stdout=json.dumps(value))
-
-        warnings = []
-        contracts = capture_example_contracts(workspace, [example], runner=read, exclusion_warnings=warnings)
-        if warnings:
-            reason = warnings[0]["reason"]
-        else:
-            try:
-                contracts[example["id"]].validate_messages(messages)
-            except ContractError as exc:
-                if str(exc).startswith(("cannot resolve schema reference", "cannot validate arguments")):
-                    raise PipelineError(f"cannot validate source {source['scope_id']}: {exc}") from exc
-                reason = _recorded_tool_call_reason(exc)
-    if reason is None:
-        return None
-    print(f"Warning: excluding {source['scope']} {source['scope_id']} before upload: {reason}", file=sys.stderr)
-    return {"code": "invalid_import_trajectory_excluded", "source": source, "reason": reason}
-
-
-def _destination_index(workspace, dataset_id, source_keys, run_dir, *, runner):
+def _destination_index(workspace, dataset_id, source_keys, *, runner):
     dataset = _api(workspace, "GET", f"/api/v1/datasets/{dataset_id}", runner=runner)
     if not isinstance(dataset, dict) or dataset.get("id") != dataset_id or dataset.get("data_type") != "kv":
         raise PipelineError("destination must be the requested key-value dataset")
@@ -62,9 +21,8 @@ def _destination_index(workspace, dataset_id, source_keys, run_dir, *, runner):
     if not isinstance(versions, list) or len(versions) > 1:
         raise PipelineError("destination returned invalid versions")
     if not versions:
-        return {}
-    # Pin the server's version rather than relying on the client's clock.
-    as_of = _time(versions[0].get("as_of") if isinstance(versions[0], dict) else None)
+        return {}, 0
+    as_of = _time(versions[0].get("as_of"))
     index, ids, offset = {}, set(), 0
     while True:
         query = urlencode({"dataset": dataset_id, "limit": 100, "offset": offset, "as_of": as_of})
@@ -74,104 +32,166 @@ def _destination_index(workspace, dataset_id, source_keys, run_dir, *, runner):
         for example in page:
             if not isinstance(example, dict) or example.get("dataset_id") != dataset_id:
                 raise PipelineError("destination returned an example from another dataset")
-            example_id = _uuid(example.get("id"), "destination example ID")
-            if example_id in ids:
+            eid = _uuid(example.get("id"), "destination example ID")
+            if eid in ids:
                 raise PipelineError("destination pagination repeated an example")
-            ids.add(example_id)
-            key = _source_key(example, workspace, None)
+            ids.add(eid)
+            try:
+                key = _source_key(example, workspace, None)
+            except PipelineError:
+                # Unrelated destination examples still count towards final size.
+                continue
             if key in index:
-                raise PipelineError(f"destination examples {index[key][0]} and {example_id} have the same source conversation")
-            path = save_conversation(run_dir / "destination", example) if key in source_keys else None
-            index[key] = (example_id, path)
+                raise PipelineError("destination has multiple examples for one source conversation")
+            # Only selected payloads are retained, and only in memory.
+            index[key] = example if key in source_keys else None
         if len(page) < 100:
-            return index
+            return index, len(ids)
         offset += len(page)
 
 
 def _action(incoming, existing, *, triaged):
-    inputs = incoming.get("inputs")
-    messages = inputs.get("messages") if isinstance(inputs, dict) else None
-    if not isinstance(messages, list) or not messages or incoming.get("outputs") not in (None, {}):
-        raise PipelineError("incoming example must contain a whole message trajectory without outputs")
-    metadata = incoming.get("metadata") or {}
-    if metadata.get("smithtune_triage") is not None and not triaged:
-        raise PipelineError("triaged updates require --triage-dir")
+    validate_bound_messages(incoming)
+    inputs, metadata = incoming["inputs"], incoming["metadata"]
     if existing is None:
         return "created", {"inputs": inputs, "outputs": None, "metadata": metadata}
     previous = existing.get("inputs")
-    previous_messages = previous.get("messages") if isinstance(previous, dict) else None
-    if not isinstance(previous_messages, list) or not previous_messages or existing.get("outputs") not in (None, {}):
-        raise PipelineError(f"destination example {existing['id']} is not a message trajectory")
-    prefix = {**inputs, "messages": messages[:len(previous_messages)]}
-    if len(messages) < len(previous_messages) or json_sha256(prefix) != json_sha256(previous):
-        raise PipelineError(f"incoming trajectory is shorter or conflicts with destination example {existing['id']}; existing history must be an exact prefix")
+    old_messages = previous.get("messages") if isinstance(previous, dict) else None
+    messages = inputs["messages"]
+    if not isinstance(old_messages, list) or not old_messages or existing.get("outputs") not in (None, {}):
+        raise PipelineError(f"destination example {existing['id']} is not a whole message trajectory")
+    if len(messages) < len(old_messages) or {**inputs, "messages": messages[:len(old_messages)]} != previous:
+        raise PipelineError(f"existing history must be an exact prefix for destination example {existing['id']}")
     old_metadata = existing.get("metadata") or {}
-    same_messages = len(messages) == len(previous_messages)
-    if old_metadata.get("smithtune_triage") is not None and not triaged:
-        if same_messages:
-            return "skipped", None
-        raise PipelineError(f"destination example {existing['id']} was triaged; rerun triage on the extended conversation and import with --triage-dir")
-    if same_messages and (not triaged or old_metadata.get("smithtune_triage") == metadata.get("smithtune_triage")):
+    if "smithtune_source" not in old_metadata:
+        raise PipelineError(f"destination example {existing['id']} lacks bindings; a legacy union cannot prove equivalence. Use a fresh dataset or explicitly validate and upgrade its historical provenance first")
+    old_bindings = read_bindings(old_metadata, old_messages)
+    new_bindings = read_bindings(metadata, messages)
+    if any(binding != new_bindings.get(index) for index, binding in old_bindings.items()):
+        raise PipelineError(f"prior tool bindings changed for destination example {existing['id']}")
+    same = len(messages) == len(old_messages)
+    old_triage, new_triage = old_metadata.get("smithtune_triage"), metadata.get("smithtune_triage")
+    if old_triage is not None and not triaged:
+        raise PipelineError(f"destination example {existing['id']} was triaged; judge the whole incoming conversation before push")
+    if same and old_triage == new_triage:
         return "skipped", None
     return "updated", {"inputs": inputs, "outputs": None, "metadata": {**old_metadata, **metadata}}
 
 
-def update_dataset(workspace, dataset_id, examples, source_keys, run_dir, receipt_path, *, runner, triaged=False):
-    """Consume bounded incoming downloads; never retry an ambiguous write."""
-    actions_path = receipt_path.with_suffix(".actions.jsonl")
-    receipt = {"dataset_id": dataset_id, "status": "indexing", "created": 0, "updated": 0, "skipped": 0, "rejected": 0,
-               "actions": str(actions_path), "pending_write": None, "created_at_utc": _utc_now()}
-    _write_new(receipt_path, receipt)
+def _resolve_destination(directory, checkpoint, *, runner):
+    destination = checkpoint["destination"]
+    if destination.get("dataset_id"):
+        return destination["dataset_id"]
+    workspace = checkpoint["source"]["workspace_id"]
+    name = destination["name"]
+    query = urlencode({"name": name, "limit": 100})
+    matches = _api(workspace, "GET", f"/api/v1/datasets?{query}", runner=runner)
+    if not isinstance(matches, list):
+        raise PipelineError("invalid dataset name lookup")
+    matches = [d for d in matches if d.get("name") == name]
+    pending = checkpoint.get("pending_write")
+    if matches:
+        if (len(matches) != 1 or not pending or pending.get("kind") != "dataset"
+                or matches[0].get("id") != pending.get("id") or matches[0].get("data_type") != "kv"):
+            raise PipelineError("unrelated or ambiguous dataset name collision; explicitly supply --dataset-id after checking the destination")
+        dataset_id = _uuid(matches[0]["id"], "dataset id")
+    else:
+        if pending is None:
+            pending = {"kind": "dataset", "id": str(uuid4()), "name": name}
+            checkpoint["pending_write"] = pending
+            save(directory, checkpoint)
+        if pending.get("kind") != "dataset" or pending.get("name") != name:
+            raise PipelineError("pending dataset creation uses another destination")
+        # The server's DatasetCreate schema supports caller-assigned IDs. The
+        # saved ID proves attribution after a timeout; name equality alone cannot.
+        result = _api(workspace, "POST", "/api/v1/datasets", {"id": pending["id"], "name": name, "data_type": "kv"}, runner=runner)
+        if not isinstance(result, dict) or result.get("id") != pending["id"]:
+            raise PipelineError("dataset creation did not confirm its saved ID; resume to reconcile")
+        dataset_id = pending["id"]
+    destination["dataset_id"] = dataset_id
+    checkpoint["pending_write"] = None
+    save(directory, checkpoint)
+    return dataset_id
+
+
+def push(directory, checkpoint, *, confirm=False, runner=_run):
+    examples = selected_examples(directory, checkpoint)
+    for example in examples:
+        validate_bound_messages(example)
+    result = {"status": "preview" if not confirm else "complete", "eligible": len(examples),
+              "existing_before": 0, "created": 0, "updated": 0, "skipped": 0,
+              "rejected": sum(s["status"] == "excluded" for s in checkpoint["selection"]),
+              "final_size": None,
+              "limit_note": "--limit caps this checkpoint's selected conversations, not destination size; counts assume no concurrent external writer"}
+    if not examples:
+        return result
+    destination = checkpoint.get("destination")
+    if not destination or not any(destination.get(k) for k in ("name", "dataset_id")):
+        return {**result, "status": "incomplete" if confirm else "preview", "next_command": f"smithtune dataset push {directory} --name NAME --confirm (or --dataset-id DATASET_ID)"}
+    workspace = checkpoint["source"]["workspace_id"]
+    keys = {_source_key(e, workspace, None) for e in examples}
+    selected_by_key = {(s["scope"], s["scope_id"]): s for s in checkpoint["selection"]}
+    source = None
     try:
-        index = _destination_index(workspace, dataset_id, source_keys, run_dir, runner=runner)
-        existing_ids = {item[0] for item in index.values()}
-        with actions_path.open("x", encoding="utf-8"):
-            pass
-        receipt["status"] = "importing"
-        _json_dump(receipt_path, receipt)
-        seen = set()
-        for incoming in examples:
+        dataset_id = destination.get("dataset_id")
+        if dataset_id is None and confirm:
+            dataset_id = _resolve_destination(directory, checkpoint, runner=runner)
+        result["dataset_id"] = dataset_id
+        index, count = _destination_index(workspace, dataset_id, keys, runner=runner) if dataset_id else ({}, 0)
+        result["existing_before"] = count
+        # Validate all known conflicts before the first example write.
+        actions = [(incoming, *_action(incoming, index.get(_source_key(incoming, workspace, None)), triaged="triage" in checkpoint["stages"])) for incoming in examples]
+        for incoming, action, body in actions:
             key = _source_key(incoming, workspace, None)
-            if key not in source_keys or key in seen:
-                raise PipelineError("incoming conversations must have unique, selected source identities")
-            seen.add(key)
-            incoming_path = save_conversation(run_dir, incoming)
-            incoming = load_conversation(incoming_path)
-            example_id, existing_path = index.get(key, (None, None))
-            existing = load_conversation(existing_path) if existing_path is not None else None
-            action, body = _action(incoming, existing, triaged=triaged)
-            rejection = import_rejection(incoming, workspace, runner=runner) if action != "skipped" else None
-            if rejection is not None:
-                action = "rejected"
-            entry = {"action": action, "example_id": example_id, "conversation": str(incoming_path),
-                     "source": dict(zip(("workspace", "project", "scope", "scope_id"), key, strict=True)),
-                     **(rejection or {})}
-            if action in ("created", "updated"):
-                receipt["pending_write"] = entry
-                _json_dump(receipt_path, receipt)
-                if action == "created":
-                    result = _api(workspace, "POST", "/api/v1/examples", {**body, "dataset_id": dataset_id}, runner=runner)
-                    entry["example_id"] = _uuid(result.get("id") if isinstance(result, dict) else None, "created example ID")
-                    if entry["example_id"] in existing_ids:
-                        raise PipelineError("destination returned a duplicate example ID")
-                    existing_ids.add(entry["example_id"])
-                else:
-                    result = _api(workspace, "PATCH", f"/api/v1/examples/{example_id}", body, runner=runner)
-                    if result != {"message": "Example updated"}:
-                        raise PipelineError("example update was not confirmed")
-            with actions_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
-            receipt[action] += 1
-            receipt["pending_write"] = None
-            _json_dump(receipt_path, receipt)
-        if seen != source_keys:
-            raise PipelineError("incoming download ended before every selected conversation was imported")
-        receipt["status"] = "complete"
-        _json_dump(receipt_path, receipt)
-    except BaseException as exc:
-        receipt["status"] = "incomplete"
-        _json_dump(receipt_path, receipt)
-        detail = str(exc) if isinstance(exc, PipelineError) else type(exc).__name__
-        raise PipelineError(f"{detail}; dataset import incomplete; inspect {receipt_path} before retrying") from exc
-    return {"dataset_id": dataset_id, "example_count": sum(receipt[key] for key in ("created", "updated", "skipped")),
-            **{key: receipt[key] for key in ("created", "updated", "skipped", "rejected")}, "receipt": str(receipt_path), "run_dir": str(run_dir)}
+            source = list(key)
+            existing = index.get(key)
+            example_id = existing["id"] if existing else str(uuid5(NAMESPACE_URL, str(dataset_id) + ":" + json_sha256(key)))
+            digest = json_sha256(incoming)
+            if confirm and action != "skipped":
+                pending = {"kind": "example", "id": example_id, "source": source, "payload_sha256": digest, "action": action}
+                checkpoint["pending_write"] = pending
+                save(directory, checkpoint)
+                try:
+                    if action == "created":
+                        response = _api(workspace, "POST", "/api/v1/examples", {**body, "id": example_id, "dataset_id": dataset_id}, runner=runner)
+                        if not isinstance(response, dict) or response.get("id") != example_id:
+                            raise PipelineError("example creation did not confirm its ID")
+                    else:
+                        response = _api(workspace, "PATCH", f"/api/v1/examples/{example_id}", body, runner=runner)
+                        if response != {"message": "Example updated"}:
+                            raise PipelineError("example update was not confirmed")
+                except Exception:
+                    # Reconcile timeout/409/invalid confirmation. Never assume
+                    # success and never retry a write within this attempt.
+                    remote = _api(workspace, "GET", f"/api/v1/examples/{example_id}", runner=runner)
+                    if remote.get("dataset_id") != dataset_id or _source_key(remote, workspace, None) != key:
+                        raise PipelineError("ambiguous write returned a different source or destination") from None
+                    reconciled, _ = _action(incoming, remote, triaged="triage" in checkpoint["stages"])
+                    if reconciled != "skipped":
+                        raise PipelineError("remote write remains unconfirmed; resume to reconcile") from None
+            result[action] += 1
+            if confirm:
+                selected_by_key[key[2:]]["upload"] = {"example_id": example_id, "outcome": action, "payload_sha256": digest}
+                checkpoint["pending_write"] = None
+                save(directory, checkpoint)
+        result["final_size"] = count + result["created"]
+        if result["final_size"] > checkpoint["source"]["limit"]:
+            result["warning"] = "final dataset size exceeds this checkpoint's selection limit"
+    except Exception as exc:
+        if not confirm:
+            raise
+        result.update(status="incomplete", source=source,
+                      error=str(exc) if isinstance(exc, PipelineError) else type(exc).__name__,
+                      next_command=f"smithtune dataset resume {directory} --confirm")
+    return result
+
+
+def push_complete(directory, checkpoint):
+    if checkpoint.get("pending_write"):
+        return False
+    try:
+        examples = selected_examples(directory, checkpoint)
+    except PipelineError:
+        return False
+    outcomes = {(s["scope"], s["scope_id"]): s.get("upload", {}) for s in checkpoint["selection"]}
+    return all(outcomes[(e["metadata"]["source_scope"], e["metadata"]["source_scope_id"])].get("payload_sha256") == json_sha256(e) for e in examples)

@@ -13,7 +13,8 @@ same full trajectory once. Do not split it into turns or replay cases.
 
 Dispatch every pending trajectory/judge pair. The CLI supplies the source,
 models, and [judge rubric](judge.md). It filters media before dispatch. Each
-judge subagent makes one model request with the full messages and returns a
+judge subagent receives full unchanged messages and per-assistant tool bindings
+as untrusted evidence, not executable tools. It makes a model request and returns a
 score and reason. The CLI saves the result and computes the majority label.
 Do not judge or rewrite the trajectory yourself.
 
@@ -46,28 +47,35 @@ should explain the saved counts and remaining failures to the user.
 
 ## Agent helping a user
 
-Run `smithtune doctor` and `smithtune dataset triage --help` for setup and source
-options. The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks,
-plus GPT-5.6 Terra on OpenAI. Use one `--judges` list to choose models; other
-models use `provider:model`. Use `--rule` for project selection rules.
+Run `smithtune doctor` and the relevant command's `--help`. The default council
+is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks, plus GPT-5.6 Terra on OpenAI.
+Use `--judges` aliases or `provider:model`, and `--rule` for project rules.
 
-1. Download and preview: `smithtune dataset triage <directory>` with source IDs,
-   time window, and optional `--limit` / `--filter`. Roots from the same thread
-   form one full trajectory. Review the conversation and vote counts.
-2. When paid judging is authorized: `smithtune dataset triage <directory> --confirm`.
-   Repeat this command to resume. Completed votes are retained.
-3. Read `labels.jsonl` and `report.md`. Each row has `trajectory_id`, `keep`
-   (1 or 0), and `reason`. Explain the counts and main reasons to the user.
-   Request errors have a clear incomplete reason and do not count as votes.
-4. When upload is authorized: `smithtune dataset create --triage-dir <directory>
-   --name <name> --confirm`. This imports kept conversations with the exact saved
-   messages and tool schemas. Inspect `dataset-import.json` after a partial write.
-5. Pass the dataset ID to the existing `prepare -> plan -> train` flow.
+1. Download: `smithtune dataset pull DIR --workspace-id WORKSPACE --project-id
+   PROJECT` with optional time bounds, `--limit`, and `--filter`. Selection samples
+   distinct threads/traces. Each saved conversation includes all messages and
+   verified producing-run tool bindings. Missing provenance excludes it.
+2. Preview local candidates and votes: `smithtune dataset triage DIR`.
+   When paid judging is authorized, add `--confirm`. Successful votes are durable
+   in `triage.jsonl`; repeat to retry incomplete pairs with saved settings.
+3. Explain counts and keep/drop reasons from the JSON command result. Request
+   errors are incomplete work, not quality votes. No separate labels/report file
+   is needed.
+4. Preview uploads: `smithtune dataset push DIR --name NAME` (or `--dataset-id ID`).
+   When writes are authorized, add `--confirm`. The CLI reconciles uncertain
+   writes and preserves prior successes. Resume with `dataset resume DIR --confirm`.
+5. Pass the dataset ID to `prepare -> plan -> train`.
 
-Do not refetch or edit messages after judging. Changed source, rubric, or models
-need a new run. Labels remain local; this command does not write trace feedback.
-Fireworks calls always use its official API. Replay evaluation is a separate
-flow under `evaluate`.
+`dataset create DIR` with source/destination flags composes all three stages.
+Without confirmation it downloads and previews. `--confirm` authorizes judging
+and uploads; `--no-triage` chooses pull and push only when that is the user's intent.
+
+Keep `checkpoint.json`, `triage.jsonl`, and `conversations/` together. Never refetch
+or edit judged messages or bindings. Frozen source selections and post-vote
+rubric/model changes require a fresh checkpoint. Coordinator or skill software
+changes do not invalidate durable votes. A response lost before saving may need
+another paid request. Labels remain local; no trace feedback is written.
+Replay is a separate flow under `evaluate`.
 
 Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses
 `LANGSMITH_GATEWAY_API_KEY`.

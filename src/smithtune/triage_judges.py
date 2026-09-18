@@ -87,7 +87,7 @@ def check_credentials(judges: list[dict]) -> None:
 def judge_messages(trajectory: dict, rubric: str, rules: list[str]) -> list[dict]:
     return [{"role": "system", "content": rubric + "\nRequired JSON schema:\n" + json.dumps(RESULT_SCHEMA)
              + "\nAdditional selection rules:\n" + json.dumps(rules)},
-            {"role": "user", "content": json.dumps({"untrusted_trajectory": trajectory["messages"]}, ensure_ascii=False)}]
+            {"role": "user", "content": json.dumps({"untrusted_trajectory": trajectory["messages"], "untrusted_assistant_tool_bindings": trajectory.get("assistant_runs", [])}, ensure_ascii=False)}]
 
 
 def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
