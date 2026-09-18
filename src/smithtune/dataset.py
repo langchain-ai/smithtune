@@ -675,7 +675,7 @@ def _recorded_tool_call_reason(error: ContractError) -> str:
     detail = str(error)
     if detail.startswith("unknown tool "):
         return "unknown_tool"
-    if " do not match its JSON Schema:" in detail:
+    if " do not match its JSON Schema" in detail:
         return "invalid_tool_arguments"
     if " are not valid JSON" in detail:
         return "invalid_tool_arguments_json"
