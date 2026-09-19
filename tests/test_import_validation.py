@@ -11,6 +11,8 @@ from smithtune.providers.base import PipelineError
 from test_curation import API as CurationAPI, COMMON_METADATA, create, root, uid
 from test_dataset_import import API as DestinationAPI, example, update
 from test_tool_capture import tool
+from binding_fixtures import bound_example
+from trajectory_fixtures import items
 
 
 def tool_turn(name="search", args=None):
@@ -34,46 +36,47 @@ def incoming_examples():
         {"type": "text", "text": "Recorded answer."},
         {"type": "reasoning", "reasoning": "Recorded late reasoning.", "signature": "opaque-state"},
     ]
+    return bind(incoming)
+
+
+def bind(incoming):
+    for i, value in enumerate(incoming):
+        bound_example(value, tools=[tool("search"), tool("weather")] if i == 2 else [tool("search")])
+        for binding in value["metadata"]["smithtune_source"]["assistant_runs"]:
+            binding["trace_id"] = value["id"]
     return incoming
 
 
 class SourceAPI(CurationAPI):
-    def __init__(self, incoming, *, tool_pages=None, failure=None):
+    def __init__(self, incoming, *, failure=None):
         super().__init__([[root(n, item["metadata"]["source_scope_id"]
                                if item["metadata"]["source_scope"] == "thread" else None)
                           for n, item in enumerate(incoming, 1)]])
-        self.trajectories = {item["metadata"]["source_scope_id"]: item["inputs"]["messages"]
-                             for item in incoming}
-        self.tool_pages = tool_pages or {}
+        self.trajectories = {item["metadata"]["source_scope_id"]: item for item in incoming}
         self.tool_queries = []
         self.tool_failure = failure
 
     def __call__(self, command, *, capture=False, input=None):
         assert command[command.index("--method") + 1] != "DELETE"
-        body = json.loads(input) if input is not None else (
-            json.loads(command[command.index("--body") + 1]) if "--body" in command else None
-        )
         path = command[2]
-        if path == "/v1/trajectory":
-            self.messages = copy.deepcopy(self.trajectories[body.get("thread_id") or body["trace_id"]])
-        response = super().__call__(command, capture=capture, input=input)
-        if path != "/api/v2/runs/query" or body.get("run_type") != "LLM":
-            return response
+        if path != "/v1/trajectory":
+            return super().__call__(command, capture=capture, input=input)
+        body = json.loads(input)
         self.tool_queries.append(copy.deepcopy(body))
         if self.tool_failure == "403":
             raise subprocess.CalledProcessError(1, "langsmith", stderr="HTTP 403 Forbidden")
         if self.tool_failure == "pagination":
             return SimpleNamespace(stdout=json.dumps({"items": None, "next_cursor": "more"}))
-        pages = self.tool_pages.get(body.get("trace_id"))
-        if pages is None:
-            return response
-        position = int(body.get("cursor", 0))
-        run = {"id": uid(500 + position), "trace_id": body["trace_id"], "project_id": uid(101),
-               "run_type": "LLM", "start_time": "2026-09-02T12:00:00Z",
-               "extra": {"invocation_params": {"tools": pages[position]}}}
-        return SimpleNamespace(stdout=json.dumps({
-            "items": [run], "next_cursor": str(position + 1) if position + 1 < len(pages) else None,
-        }))
+        value = self.trajectories[body.get("thread_id") or body["trace_id"]]
+        self.messages = value["inputs"]["messages"]
+        response = super().__call__(command, capture=capture, input=input)
+        wire = items(self.messages, trace_id=value["id"])
+        for binding in value["metadata"]["smithtune_source"]["assistant_runs"]:
+            item = wire[binding["message_index"]]
+            item["message"]["available_tools"] = binding["tools"]
+            item["metadata"]["run_id"] = binding["run_id"]
+        response.stdout = json.dumps({"items": wire, "next_cursor": None})
+        return response
 
 
 def import_api(destination, incoming, **kwargs):
@@ -84,6 +87,8 @@ def import_api(destination, incoming, **kwargs):
     for item in existing:
         messages = item["inputs"]["messages"]
         item["inputs"]["messages"] = messages[:3 if messages[0]["role"] == "system" else 2]
+        item["metadata"]["smithtune_source"]["assistant_runs"] = [
+            b for b in item["metadata"]["smithtune_source"]["assistant_runs"] if b["message_index"] < len(item["inputs"]["messages"])]
     api = DestinationAPI(existing)
     api.source = source
     return api
@@ -120,16 +125,14 @@ def rejection_entries(receipt, destination):
     ("image", "unsupported_native_content"),
     ("invalid-role", "invalid_message"),
     ("misplaced-system", "misplaced_system_message"),
-    ("unknown-tool", "unknown_tool"),
-    ("invalid-schema-args", "invalid_tool_arguments"),
+    ("unknown-tool", "unknown tool unknown"),
+    ("invalid-schema-args", "do not match its JSON Schema"),
     ("string-args", "invalid_message"),
     ("text-after-tool", "invalid_message"),
-    ("uncalled-conflict", "conflicting_tool_definitions"),
 ])
 def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp_path, destination, case, reason):
     incoming = incoming_examples()
     messages = incoming[0]["inputs"]["messages"]
-    pages = {uid(1): [[tool("search")]], uid(3): [[tool("search")], [tool("weather")]]}
     if case == "missing-result":
         messages.extend(tool_turn()[:1])
     elif case == "orphan-result":
@@ -152,12 +155,9 @@ def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp
         turn = tool_turn()
         turn[0]["content"].append({"type": "text", "text": "Would require reordering."})
         messages.extend(turn)
-    else:
-        conflicting = tool("search")
-        conflicting["function"]["parameters"]["properties"]["query"]["type"] = "integer"
-        pages[uid(1)].append([conflicting])
+    bind(incoming)
     original = copy.deepcopy(incoming)
-    api = import_api(destination, incoming, tool_pages=pages)
+    api = import_api(destination, incoming)
     previous = copy.deepcopy(api.existing) if destination != "new" else None
 
     result = run_import(tmp_path, destination, api, incoming)
@@ -166,11 +166,11 @@ def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["status"] == "complete" and receipt["pending_write"] is None
     rejection, = rejection_entries(receipt, destination)
-    assert {key: rejection[key] for key in ("code", "source", "reason")} == {
+    assert {key: rejection[key] for key in ("code", "source")} == {
         "code": "invalid_import_trajectory_excluded",
         "source": {"workspace": uid(100), "project": uid(101), "scope": "trace", "scope_id": uid(1)},
-        "reason": reason,
     }
+    assert reason in rejection["reason"]
     assert (lambda v: v.get("example", v))(load_conversation(Path(rejection["conversation"])))["inputs"] == original[0]["inputs"]
     saved = [value.get("example", value) for path in (tmp_path / "conversations").glob("*.json") if (value := load_conversation(path))]
     assert {item["metadata"]["source_scope_id"]: item["inputs"] for item in saved} == {
@@ -181,9 +181,10 @@ def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp
     assert [item["metadata"]["source_scope_id"] for item in writes] == ["thread-2", uid(3)]
     assert all(item["outputs"] is None for item in writes)
     source = api if destination == "new" else api.source
-    assert [body.get("cursor") for body in source.tool_queries if body.get("trace_id") == uid(3)] == [None, "1"]
-    if case == "uncalled-conflict":
-        assert [body.get("cursor") for body in source.tool_queries if body.get("trace_id") == uid(1)] == [None, "1"]
+    if destination == "new":
+        assert len(source.tool_queries) == 3
+    else:
+        assert source.tool_queries == []  # Upload uses the saved tool evidence.
     if destination == "new":
         assert receipt["confirmed_example_ids"] == [item["id"] for item in api.examples]
     else:
@@ -202,6 +203,7 @@ def test_all_rejected_import_completes_without_example_writes(tmp_path, destinat
     incoming = incoming_examples()[:1]
     incoming[0]["metadata"].update(source_scope="thread", source_scope_id="thread-1")
     incoming[0]["inputs"]["messages"].extend(tool_turn()[:1])
+    bind(incoming)
     original = copy.deepcopy(incoming)
     api = import_api(destination, incoming)
 
@@ -221,31 +223,27 @@ def test_all_rejected_import_completes_without_example_writes(tmp_path, destinat
     assert incoming == original
 
 
-@pytest.mark.parametrize("destination", ["new", "existing-post", "existing-patch"])
-@pytest.mark.parametrize("failure,error", [("403", "HTTP 403"), ("pagination", "invalid run query page")])
-def test_tool_read_failure_stops_import_without_pruning_or_example_writes(tmp_path, destination, failure, error):
+@pytest.mark.parametrize("failure,error", [("403", "HTTP 403"), ("pagination", "invalid trajectory items")])
+def test_trajectory_read_failure_stops_import_without_pruning_or_example_writes(tmp_path, monkeypatch, failure, error):
+    from smithtune import curation
+    monkeypatch.setattr(curation, "_sleep", lambda _: None)
     incoming = incoming_examples()[:2]
-    api = import_api(destination, incoming, failure=failure)
+    api = SourceAPI(incoming, failure=failure)
+    with pytest.raises(PipelineError, match=error):
+        create(tmp_path, api)
+    receipt = json.loads((tmp_path / "selection.import.json").read_text())
+    assert receipt["status"] == "incomplete"
+    assert receipt["pending_write"] is None and receipt["rejections"] == []
+    assert api.examples == []
 
-    with pytest.raises(PipelineError, match=error) as exc:
-        run_import(tmp_path, destination, api, incoming)
 
-    assert "outcome may be unknown" not in str(exc.value)
-    path = tmp_path / ("selection.import.json" if destination == "new" else "receipt.json")
-    receipt = json.loads(path.read_text())
-    assert receipt["pending_write"] is None
-    assert uploaded(api, destination) == []
-    source = api if destination == "new" else api.source
-    assert len(source.tool_queries) == 1
-    if destination == "new":
-        assert receipt["status"] == "incomplete" and receipt["rejections"] == [] and receipt["confirmed_example_ids"] == []
-    else:
-        assert receipt["status"] == "incomplete"
-        assert (receipt["created"], receipt["updated"], receipt["skipped"], receipt["rejected"]) == (0, 0, 0, 0)
-        assert Path(receipt["actions"]).read_text() == ""
-    if destination != "new":
-        saved, = (tmp_path / "conversations").glob("*.json")
-        assert load_conversation(saved)["inputs"] == incoming[0]["inputs"]
+@pytest.mark.parametrize("destination", ["existing-post", "existing-patch"])
+def test_saved_tools_upload_without_source_access(tmp_path, destination):
+    incoming = incoming_examples()[:2]
+    api = import_api(destination, incoming, failure="403")
+    result = run_import(tmp_path, destination, api, incoming)
+    assert result["example_count"] == 2 and result["rejected"] == 0
+    assert api.source.tool_queries == []
 
 
 def test_unchanged_examples_skip_without_source_tool_reads(tmp_path):
@@ -264,11 +262,16 @@ def test_unresolvable_schema_is_not_reported_as_invalid_arguments(tmp_path):
     incoming[0]["inputs"]["messages"].extend(tool_turn())
     unresolved = tool("search")
     unresolved["function"]["parameters"] = {"$ref": "https://example.invalid/schema"}
-    api = SourceAPI(incoming, tool_pages={uid(1): [[unresolved]]})
+    bind(incoming)
+    for binding in incoming[0]["metadata"]["smithtune_source"]["assistant_runs"]:
+        binding["tools"] = [unresolved]
+    api = SourceAPI(incoming)
 
-    with pytest.raises(PipelineError, match="cannot resolve schema reference"):
-        create(tmp_path, api)
+    result = create(tmp_path, api)
+    assert result["rejected"] == 1
 
     receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "incomplete" and receipt["rejections"] == []
+    assert receipt["status"] == "complete"
+    assert "cannot resolve schema reference" in receipt["rejections"][0]["reason"]
+    assert "invalid_tool_arguments" not in receipt["rejections"][0]["reason"]
     assert api.examples == []

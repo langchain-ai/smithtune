@@ -44,16 +44,14 @@ def test_cli_bubbles_up_diagnostic_without_command(monkeypatch, capsys, tmp_path
     assert "ignored response" not in output
 
 
-def test_contract_failure_keeps_example_context(monkeypatch, retry_sleeps):
-    def fail(argv, **kwargs):
-        raise subprocess.CalledProcessError(1, argv, stderr="Error: HTTP 429")
-
-    monkeypatch.setattr(artifacts.subprocess, "run", fail)
+def test_trajectory_failure_keeps_example_context(monkeypatch):
+    def fail(*args, **kwargs):
+        raise PipelineError("Error: HTTP 429")
+    monkeypatch.setattr(curation, "_fetch_trajectory", fail)
     example = {"id": "example-123", "metadata": {"source_scope": "thread", "source_scope_id": "thread-123",
                                                  "source_project_id": "project-123"}}
-    with pytest.raises(PipelineError) as error:
-        dataset.capture_example_contracts("workspace-123", [example])
-    assert str(error.value) == "example example-123: cannot collect tools: Error: HTTP 429"
+    with pytest.raises(PipelineError, match="example example-123: cannot read trajectory tools: Error: HTTP 429"):
+        dataset.capture_example_bindings([example], "workspace-123")
 
 
 def test_curation_retains_existing_error_handling(monkeypatch):

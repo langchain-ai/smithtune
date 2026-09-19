@@ -77,9 +77,9 @@ reasons and counts only eligible judge tasks. Recorded messages are preserved. T
 rendering and context checks remain in `prepare`.
 
 Saved trajectories are read individually during judging and upload; queued judge
-work holds IDs, not message bodies. Source-run evidence is released after each
-trace, and hashing and file writes avoid whole-document copies. Each active
-trace response and full trajectory must still fit in memory. Legacy monolithic
+work holds IDs, not message bodies. Downloads retrieve messages and tool availability
+from the trajectory endpoint without fetching raw run trees. Hashing and file
+writes avoid whole-document copies. Each active full trajectory must still fit in memory. Legacy monolithic
 snapshots remain readable but must fit in memory; new downloads use individual files.
 
 ## Label full trajectories with an agent council

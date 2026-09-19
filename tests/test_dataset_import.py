@@ -11,6 +11,7 @@ import pytest
 from smithtune import cli, curation, dataset, dataset_import, dataset_workflow, triage
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
+from binding_fixtures import bound_example
 
 
 def uid(n):
@@ -18,12 +19,12 @@ def uid(n):
 
 
 def example(n, turns=1, **metadata):
-    return {"id": uid(n), "dataset_id": uid(200), "outputs": None,
+    return bound_example({"id": uid(n), "dataset_id": uid(200), "outputs": None,
             "inputs": {"messages": [{"role": role, "content": f"{i}-{role}", "id": f"{i}-{role}"}
                                      for i in range(turns) for role in ("human", "ai")]},
             "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
                           "source_workspace_id": uid(100), "source_project_id": uid(101),
-                         "source_scope": "thread", "source_scope_id": f"thread-{n}", **metadata}}
+                         "source_scope": "thread", "source_scope_id": f"thread-{n}", **metadata}})
 
 
 class API:
@@ -312,7 +313,9 @@ def test_failed_upload_retains_completed_bounded_downloads(tmp_path, monkeypatch
             assert second_started.wait(5)
         else:
             second_started.set()
-        return example(1)["inputs"]["messages"]
+        value = example(1)
+        return {"messages": value["inputs"]["messages"], "source": value["metadata"]["smithtune_source"],
+                "training_error": None, "trace_ids": [uid(1)]}
 
     monkeypatch.setattr(curation, "_fetch_trajectory", fetch)
     api = API()

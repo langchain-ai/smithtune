@@ -1,9 +1,7 @@
 """Match saved trajectories to an existing dataset and record every write."""
 
-import json
 import shlex
 import sys
-from types import SimpleNamespace
 from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -11,23 +9,21 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _utc_now
 from smithtune.curation import _api, _time, _uuid
 from smithtune.dataset import (
     _malformed_trajectory_reason,
-    _recorded_tool_call_reason,
     _source_key,
-    capture_example_contracts,
     validate_import_messages,
 )
 from smithtune.dataset_artifacts import load_conversation, save_conversation
-from smithtune.inference_contract import ContractError, json_sha256
+from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
 
 
-def import_rejection(example, workspace, *, runner, captured=None):
+def import_rejection(example, workspace):
     """Return a source-only rejection record before uploading a whole trajectory."""
     source = dict(zip(("workspace", "project", "scope", "scope_id"), _source_key(example, workspace, None), strict=True))
     example = {**example, "id": example.get("id") or json_sha256(source)}
     reason = None
     try:
-        messages = validate_import_messages(example)
+        validate_import_messages(example)
     except PipelineError as exc:
         reason = _malformed_trajectory_reason(example["id"], exc)
         if reason is None:
@@ -41,27 +37,7 @@ def import_rejection(example, workspace, *, runner, captured=None):
         else:
             return None
     if reason is None:
-        def read(command, *, capture):
-            body = json.loads(command[command.index("--body") + 1]) if "--body" in command else None
-            value = _api(command[command.index("--workspace") + 1],
-                         command[command.index("--method") + 1], command[2], body, runner=runner)
-            return SimpleNamespace(stdout=json.dumps(value))
-
-        warnings = []
-        contracts = capture_example_contracts(workspace, [example], runner=read, exclusion_warnings=warnings)
-        if warnings:
-            reason = warnings[0]["reason"]
-        else:
-            if captured is not None:
-                captured.update(contracts[example["id"]].to_dict())
-            try:
-                contracts[example["id"]].validate_messages(messages)
-            except ContractError as exc:
-                if str(exc).startswith(("cannot resolve schema reference", "cannot validate arguments")):
-                    raise PipelineError(f"cannot validate source {source['scope_id']}: {exc}") from exc
-                reason = _recorded_tool_call_reason(exc)
-    if reason is None:
-        return None
+        reason = "missing per-assistant tool availability; pull again using trajectory available_tools"
     print(f"Warning: excluding {source['scope']} {source['scope_id']} before upload: {reason}", file=sys.stderr)
     return {"code": "invalid_import_trajectory_excluded", "source": source, "reason": reason}
 
@@ -265,7 +241,7 @@ def import_dataset(workspace, examples, source_keys, run_dir, receipt_path, *, n
             action, body = _action(incoming, existing, triaged=triaged)
             rejection = None
             if action != "skipped":
-                rejection = validation(incoming) if validation is not None else import_rejection(incoming, workspace, runner=runner)
+                rejection = validation(incoming) if validation is not None else import_rejection(incoming, workspace)
             if rejection is not None:
                 action = "rejected"
             if pending is not None and action != pending["action"]:

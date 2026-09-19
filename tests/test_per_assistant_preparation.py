@@ -93,9 +93,10 @@ def test_unbound_export_reports_mapping_failures_and_preserves_other_examples():
 
 
 def test_interrupted_binding_capture_reuses_completed_examples(tmp_path, monkeypatch):
-    from smithtune import triage_source
+    from smithtune import curation
     from test_assistant_bindings import example as source_example
-    first, runs = source_example()
+    first, _ = source_example()
+    source = first['metadata']['smithtune_source']
     second = copy.deepcopy(first)
     second['id'] = 'second'
     for value in (first, second):
@@ -103,11 +104,12 @@ def test_interrupted_binding_capture_reuses_completed_examples(tmp_path, monkeyp
         value['metadata'].update(source_scope='trace', source_scope_id=value['id'])
     calls = []
     def fetch(workspace, project, query, **kwargs):
-        calls.append(query['trace'])
-        if query['trace'] == 'second' and calls.count('second') == 1:
+        calls.append(query['id'])
+        if query['id'] == 'second' and calls.count('second') == 1:
             raise PipelineError('source read interrupted')
-        return runs
-    monkeypatch.setattr(triage_source, 'query_runs', fetch)
+        return {'messages': first['inputs']['messages'], 'source': source,
+                'trace_ids': [query['id']], 'training_error': None}
+    monkeypatch.setattr(curation, '_fetch_trajectory', fetch)
     path = tmp_path / 'bindings.partial.json'
     with pytest.raises(PipelineError, match='source read interrupted'):
         dataset.capture_example_bindings([first, second], 'workspace', checkpoint_path=path)
@@ -211,7 +213,7 @@ def test_binding_capture_retries_transient_source_reads(monkeypatch):
     value['metadata'].update(source_workspace_id=SOURCE['workspace_id'], source_project_id=SOURCE['project_id'])
     failures, delays = [], []
     def transient(method, path, body):
-        if '/traces/' in path and not failures:
+        if path == '/v1/trajectory' and not failures:
             failures.append(path)
             raise subprocess.CalledProcessError(1, 'langsmith', stderr='HTTP 504')
     api.failure = transient

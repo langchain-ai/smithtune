@@ -141,7 +141,7 @@ smithtune prepare \
 ```
 
 Preparation downloads trajectories, reuses their saved per-assistant tool lists
-(or captures them from producing LLM runs), and validates the training format. It creates approximately 80% training, 10% validation, and 10%
+(or retrieves them from the source trajectory), and validates the training format. It creates approximately 80% training, 10% validation, and 10%
 held-out test data, keeping each source trajectory in one split. These splits
 are also registered on the original LangSmith dataset for evaluation. If local
 preparation succeeds but publication does not, publish and verify only the saved

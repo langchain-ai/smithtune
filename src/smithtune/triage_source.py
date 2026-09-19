@@ -1,4 +1,4 @@
-"""Freeze LangSmith conversation messages and run evidence before judging."""
+"""Freeze LangSmith trajectory messages and tool availability before judging."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import islice
 from pathlib import Path
-from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
 from smithtune import checkpoint as storage
@@ -21,7 +20,7 @@ from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc
 from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
-from smithtune.bindings import BindingCapture, validate_bound_messages
+from smithtune.bindings import validate_bound_messages
 from smithtune.dataset_artifacts import LazySequence
 from smithtune.providers.base import PipelineError
 
@@ -56,34 +55,6 @@ def _fetch(command, *, runner, cache_dir, use_cache=True, **kwargs):
         if use_cache:
             _atomic_text(path, result.stdout)
         return result
-
-
-def query_runs(workspace: str, project: str, query: dict, *, runner=_run) -> list[dict]:
-    tid = _uuid(query.get("trace"), "trace id")
-    selects = ["ID", "TRACE_ID", "PARENT_RUN_IDS", "PROJECT_ID", "IS_ROOT", "NAME", "RUN_TYPE",
-               "START_TIME", "END_TIME", "INPUTS", "OUTPUTS", "ERROR", "EXTRA", "ATTACHMENTS"]
-    path = f"/api/v2/traces/{tid}/runs?" + urlencode([("project_id", project), *[("selects", field) for field in selects]])
-    # V2's trace endpoint returns the complete tree. Omit time bounds so turns
-    # outside the root-selection window retain their full evidence too.
-    page = _api(workspace, "GET", path, runner=runner)
-    if not isinstance(page, dict) or not isinstance(page.get("items"), list) or page.get("next_cursor"):
-        raise PipelineError("invalid or incomplete V2 trace run response")
-    rows = {}
-    for row in page["items"]:
-        if not isinstance(row, dict) or row.get("project_id") != project or row.get("trace_id") != tid:
-            raise PipelineError("V2 run response returned another project or trace")
-        rid = _uuid(row.get("id"), "run id")
-        parents = row.get("parent_run_ids", [])
-        if not isinstance(parents, list) or any(not isinstance(parent, str) for parent in parents):
-            raise PipelineError("invalid V2 run ancestry")
-        if row.get("is_root") is False and not parents:
-            raise PipelineError("V2 child run has no parent")
-        normalized = {**row, "session_id": project, "parent_run_id": parents[-1] if parents else None,
-                      "run_type": str(row.get("run_type", "")).lower()}
-        if rid in rows and rows[rid] != normalized:
-            raise PipelineError("source run changed during snapshot")
-        rows[rid] = normalized
-    return sorted(rows.values(), key=lambda r: (r.get("start_time") or "", r["id"]))
 
 
 def multimodal_types(trace: dict) -> list[str]:
@@ -171,7 +142,7 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
 
 def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: str, end_time: str, runner) -> list[str]:
     # Query metadata over the full project history, not the selected time window.
-    # Messages come only from /v1/trajectory; these IDs locate tools and media.
+    # Messages and tools come from /v1/trajectory; these IDs verify thread membership.
     roots = _query_contract_runs(workspace, {
         "project_ids": [project], "is_root": True,
         "filter": f"eq(thread_id,{json.dumps(thread)})",
@@ -248,33 +219,9 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
                                        end_time=captured_at, runner=runner) if thread else [tid]
         if tid not in unit_traces:
             raise PipelineError("selected root was not found in its conversation")
-        all_messages = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
-        capture = BindingCapture(all_messages)
-        unit_records = []
-        error = None
-        for trace_id in unit_traces:
-            if len(unit_records) >= MAX_EXPANDED_TRACES:
-                raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
-            runs = query_runs(workspace, project, {"trace": trace_id}, runner=runner)
-            if not runs or any(run.get("trace_id") != trace_id for run in runs):
-                raise PipelineError("trace run evidence is missing or belongs to another trace")
-            roots_for_trace = [run for run in runs if not run.get("parent_run_id")]
-            if len(roots_for_trace) > 1:
-                raise PipelineError("trace has multiple root runs")
-            if error is None:
-                try:
-                    capture.add(runs)
-                except PipelineError as exc:
-                    error = str(exc)
-            record = {"trace_id": trace_id, "root_run_id": roots_for_trace[0]["id"] if roots_for_trace else None, "thread_id": thread,
-                      "project_id": project, "runs": runs}
-            if not roots_for_trace:
-                record["source_warnings"] = ["Root run missing from the saved source; assess only the available evidence."]
-            record["multimodal_types"] = multimodal_types(record)
-            record["source_sha256"] = json_sha256(record)
-            record.pop("runs")
-            unit_records.append(record)
-            del runs, roots_for_trace
+        trajectory = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
+        all_messages = trajectory["messages"]
+        unit_records = [{"trace_id": trace_id, "thread_id": thread, "project_id": project} for trace_id in unit_traces]
         if thread:
             # The trajectory is live; verify membership again without cached reads.
             current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
@@ -282,23 +229,19 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
             if set(current_traces) != set(unit_traces):
                 raise PipelineError(f"conversation {thread} changed during download; start a new triage run in a new output directory")
         example_id = str(uuid5(NAMESPACE_URL, json_sha256({"workspace": workspace, "project": project, "key": key, "messages": all_messages})))
+        if not set(trajectory["trace_ids"]) <= set(unit_traces):
+            raise PipelineError("trajectory evidence belongs to another trace")
         example = {"id": example_id, "inputs": {"messages": all_messages}, "outputs": None,
                    "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
                                 "source_project_id": project, "source_thread_id": thread,
                                 "source_workspace_id": workspace, "source_scope": "thread" if thread else "trace",
                                 "source_scope_id": thread or unit_traces[0],
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
-        contract = None
-        if error is None:
-            try:
-                example["metadata"]["smithtune_source"] = capture.finish()
-            except PipelineError as exc:
-                error = str(exc)
-        if any(trace["root_run_id"] is None for trace in unit_records):
-            error = "conversation source has a missing root run"
-        unit = {"example": example, "trace_ids": unit_traces, "contract": contract, "training_error": error,
-                "traces": unit_records, "multimodal_types": sorted(set(multimodal_types({"messages": all_messages})).union(
-                    *(record["multimodal_types"] for record in unit_records)))}
+        if trajectory["source"] is not None:
+            example["metadata"]["smithtune_source"] = trajectory["source"]
+        unit = {"example": example, "trace_ids": unit_traces, "contract": None,
+                "training_error": trajectory["training_error"], "traces": unit_records,
+                "multimodal_types": multimodal_types({"messages": all_messages})}
         unit["training_error"] = training_error(unit)
         return key, unit
 

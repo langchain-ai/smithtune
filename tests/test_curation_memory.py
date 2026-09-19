@@ -1,16 +1,13 @@
 """Bound allocations by active evidence, not the number of saved trajectories."""
 
-import copy
 import gc
 import hashlib
 import json
 import tracemalloc
-import weakref
 
 import pytest
 
 from smithtune import artifacts, checkpoint, dataset_workflow, triage, triage_source
-from smithtune.bindings import BindingCapture
 from smithtune.dataset_artifacts import LazySequence, save_conversation
 from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
@@ -103,38 +100,6 @@ def test_snapshot_load_verifies_files_without_retaining_bodies(tmp_path, count):
         frozen["units"][-1]
 
 
-def test_download_releases_raw_runs_before_fetching_next_trace(tmp_path, monkeypatch):
-    class Run(dict):
-        pass
-    refs = []
-    original = triage_source.query_runs
-    def query(*args, **kwargs):
-        assert all(ref() is None for ref in refs), "previous trace's run evidence is retained"
-        runs = [Run(value) for value in original(*args, **kwargs)]
-        for run in runs:
-            run["inputs"]["unused_large_context"] = "x" * MIB
-            refs.append(weakref.ref(run))
-        return runs
-    monkeypatch.setattr(triage_source, "query_runs", query)
-    frozen = triage_source.snapshot(source(), tmp_path, runner=API())
-    assert len(frozen["traces"]) == 2 and len(refs) == 4
-    assert all(ref() is None for ref in refs)
-    bindings = frozen["units"][0]["example"]["metadata"]["smithtune_source"]["assistant_runs"]
-    assert [b["run_id"] for b in bindings] == [uid(1001), uid(1002)]
-
-
-def test_compact_capture_still_detects_changed_duplicate_run_inputs():
-    message = {"role": "ai", "id": "output", "content": "answer"}
-    run = {"id": "run", "trace_id": "trace", "run_type": "llm", "inputs": {"content": "first"},
-           "outputs": {"messages": [message]}, "extra": {"invocation_params": {"tools": []}}}
-    capture = BindingCapture([message])
-    capture.add([run, copy.deepcopy(run)])
-    assert capture.finish()["assistant_runs"][0]["tools"] == []
-    run["inputs"]["content"] = "changed"
-    with pytest.raises(PipelineError, match="run run changed"):
-        capture.add([run])
-
-
 @pytest.mark.parametrize("runner_mode", ["api", "deepagent"])
 def test_queued_council_tasks_hold_only_summaries(tmp_path, monkeypatch, runner_mode):
     api = API()
@@ -185,10 +150,10 @@ def test_upload_selection_stays_lazy_and_tamper_checks_precede_writes(tmp_path, 
                                runner=lambda *_a, **_kw: pytest.fail("tampered input reached a remote write"))
 
 
-def test_empty_output_id_cannot_supply_provenance():
-    message = {"role": "ai", "id": "", "content": "answer"}
-    capture = BindingCapture([message])
-    capture.add([{"id": "run", "trace_id": "trace", "run_type": "llm", "outputs": {"messages": [message]},
-                  "extra": {"invocation_params": {"tools": []}}}])
-    with pytest.raises(PipelineError, match="missing or ambiguous producing-run provenance"):
-        capture.finish()
+def test_download_does_not_fetch_raw_run_trees(tmp_path):
+    api = API()  # Rejects any raw trace-run request.
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    assert len(frozen["traces"]) == 2
+    assert all(not command[2].startswith("/api/v2/traces/") for command, _ in api.calls)
+    bindings = frozen["units"][0]["example"]["metadata"]["smithtune_source"]["assistant_runs"]
+    assert [b["run_id"] for b in bindings] == [uid(1001), uid(1002)]
