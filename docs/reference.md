@@ -139,8 +139,7 @@ action. Finished children and their feedback upload incrementally. The parent,
 its complete outputs, and its aggregate score publish only after all selected
 actions in that trajectory finish. Until then its experiment row is not shown;
 the comparison link is available and local receipts track publication progress.
-Run outputs are immutable: publication never uses PATCH to grow a parent or
-leaves an open parent dependent on the server's staging retention window.
+This publisher posts completed run outputs rather than updating them.
 Experiment metadata identifies the provider and whether
 predictions came from a sampler or deployed endpoint. When a saved training run
 is available, `parent_training_run_id` records the smithtune run ID and
