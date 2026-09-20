@@ -1,0 +1,58 @@
+tests/test_baseten_deploy_cli.py
+  s_564db78674c117::t_06be84c8f70fec 147-148,239,241
+src/smithtune/evaluation/langsmith.py
+  s_564db78674c117::t_73700776a4eb8b 26,173,237,247-250,252-260,345,350-353,357-358,531-532,534-535,541-542,637-638
+  s_564db78674c117::t_be7ec4b5fa29e5 251,268,281,292-293
+  s_564db78674c117::t_f5b2dc551467fa 270,313-314,403-411,503-514,518
+  s_564db78674c117::t_f9c2315bad2047 478
+  s_564db78674c117::t_e7ba8fbe2fce18 307,451-452,460-471,473-474,533,536-540,543
+src/smithtune/evaluation/replay.py
+  s_564db78674c117::t_4479b6b515ab93 35,357-368,372-373,759-766,774-775,783-786,796,801-802,805,808-810,812-817,826,836-837,840,844,849-851,856-857,864-870,967-968
+CONTRIBUTING.md
+  s_564db78674c117::t_f9c2315bad2047 15-21
+tests/test_langsmith_publishing_transport.py
+  s_564db78674c117::t_183deeff269cd9 142-156
+AGENTS.md
+  s_564db78674c117::t_f9c2315bad2047 43
+src/smithtune/cli.py
+  s_564db78674c117::t_62b1f835ec3fc4 40,549,552,728-730,732-737
+.gitignore
+  s_564db78674c117::t_80a64f37ced862 25
+tests/test_diagnostics.py
+  s_564db78674c117::t_76cd6b28a15673 1-253
+tests/test_langsmith_evaluation.py
+  s_564db78674c117::t_37d611b0093f75 785-887
+  s_564db78674c117::t_bbb2a5d84104f3 888-918
+  s_564db78674c117::t_9884f2eb5692c4 101-102,113,759-763,769,919,933,935,938,945,1104-1105,1156,1168,1171-1174,1176,1180
+  s_564db78674c117::t_85c20cbbcf3273 952,965-966,968-973,976,978,982,993-994,997-998
+  s_564db78674c117::t_af84533c7dca6d 951,953-964,967,974-975,977,979-981,983-992,995-996,999-1085
+src/smithtune/inference.py
+  s_564db78674c117::t_4e0a283aa53402 17,59-60
+src/smithtune/evaluation/langsmith_client.py
+  s_564db78674c117::t_1ac67a0a374088 11,87-88
+docs/reference.md
+  s_564db78674c117::t_f9c2315bad2047 137-143,184-190,205-206,210-216
+  s_564db78674c117::t_b374e00dd004fd 196-204,207-209,217-230
+README.md
+  s_564db78674c117::t_f9c2315bad2047 211-214
+src/smithtune/diagnostics.py
+  s_564db78674c117::t_892844e3a3dbf5 1-252
+src/smithtune/progress.py
+  s_564db78674c117::t_6c88dc389039f6 14-15,21,23-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "36b151286ce9a99d6fc41583e3193a93dae132a1",
+  "prompts": {},
+  "sessions": {
+    "s_564db78674c117": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08daa-3ed4-7110-8724-0884c8783afd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Avi Kumar <avirath.kmr@gmail.com>"
+    }
+  }
+}
