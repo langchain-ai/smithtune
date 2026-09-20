@@ -4,9 +4,21 @@ from functools import wraps
 
 import pytest
 
-from smithtune import dataset
+from smithtune import data_rights, dataset
+from smithtune.artifacts import _json_dump
 from smithtune.evaluation import replay as evaluation
 from smithtune.providers import fireworks
+
+
+@pytest.fixture(autouse=True)
+def local_data_rights_acknowledgment(monkeypatch, tmp_path_factory):
+    """Existing workflow tests act as an acknowledged user, never using real state."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config")))
+    _json_dump(data_rights._receipt_path(), {
+        "document_version": data_rights.DOCUMENT_VERSION,
+        "document_url": data_rights.DOCUMENT_URL,
+        "read_at": "2026-09-20T00:00:00+00:00",
+    })
 
 
 @pytest.fixture(autouse=True)
