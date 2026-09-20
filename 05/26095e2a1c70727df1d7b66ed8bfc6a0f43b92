@@ -1,0 +1,60 @@
+src/smithtune/diagnostics.py
+  s_564db78674c117::t_075d69691712bc 59,61,114-115
+  s_564db78674c117::t_72ed49076a10d9 232-235
+  s_564db78674c117::t_4cf34ed100d227 9,15,22,24-25,62-63,126,135-136,146-149,175,179,181-182,185-188,203-204
+  s_564db78674c117::t_c68651efdb1ae3 165-169,218-227
+  s_564db78674c117::t_d82a6e71a2ddbb 1-8,10-14,16-21,23,26-58,60,64-113,116-125,127-134,137-145,150-164,170-174,176-178,180,183-184,189-202,205-217,228-231,236-252
+src/smithtune/providers/baseten_sampling.py
+  s_564db78674c117::t_953cf0a31280b4 21,68-72,237-238,244-246,257-258,268-269,276,279-287,298-299,302-306,311-312
+  s_564db78674c117::t_c68651efdb1ae3 199-200,204-205,214-216,234-235
+docs/reference.md
+  s_564db78674c117::t_7d88027c94d608 169
+  s_564db78674c117::t_c68651efdb1ae3 158-168,170-192
+.gitignore
+  s_564db78674c117::t_19bcd2e6d3ecb1 25
+src/smithtune/evaluation/langsmith.py
+  s_564db78674c117::t_a464a38e2cca14 26,173,237,247-260,340,345-348,352-353,454-456,462-466,469,520-527,621-622
+src/smithtune/evaluation/langsmith_client.py
+  s_564db78674c117::t_92e117bf7ad58e 11,87-88
+tests/test_langsmith_publishing_transport.py
+  s_564db78674c117::t_bfce3343521d4a 142-156
+src/smithtune/cli.py
+  s_564db78674c117::t_92e117bf7ad58e 42,555,558,767-769,771-776
+tests/test_baseten_deploy_cli.py
+  s_564db78674c117::t_075d69691712bc 147-148,239,241
+src/smithtune/evaluation/replay.py
+  s_564db78674c117::t_4cf34ed100d227 35,326-328,780-781
+  s_564db78674c117::t_c68651efdb1ae3 726-733,801-802
+  s_564db78674c117::t_f7a4e3939470b5 329-337,341-342,741-742,750-753,763,768-769,772,775-777,779,784-785,791,805,809,814-816,821-822,829-835,932-933
+src/smithtune/progress.py
+  s_564db78674c117::t_92e117bf7ad58e 14-15,21,23-26
+src/smithtune/inference.py
+  s_564db78674c117::t_92e117bf7ad58e 17,59-60
+tests/test_baseten_sampling.py
+  s_564db78674c117::t_4cf34ed100d227 170,172,174-177,186,188,190
+  s_564db78674c117::t_72ed49076a10d9 147-169
+tests/test_diagnostics.py
+  s_564db78674c117::t_72ed49076a10d9 115-127
+  s_564db78674c117::t_06c75d3b523dd3 238-239
+  s_564db78674c117::t_075d69691712bc 11,23,231-237,240-253
+  s_564db78674c117::t_6ed03f93ce22a2 1-10,12-22,24-114,128-230
+tests/test_langsmith_evaluation.py
+  s_564db78674c117::t_bfce3343521d4a 819-895
+  s_564db78674c117::t_075d69691712bc 896-952
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0526095e2a1c70727df1d7b66ed8bfc6a0f43b92",
+  "prompts": {},
+  "sessions": {
+    "s_564db78674c117": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08daa-3ed4-7110-8724-0884c8783afd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Avi Kumar <avirath.kmr@gmail.com>"
+    }
+  }
+}
