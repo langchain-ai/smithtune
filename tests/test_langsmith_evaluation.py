@@ -98,7 +98,8 @@ class MemoryClient(Client):
             project = self.create_project(project_name)
         value = {**kwargs, "name": name, "inputs": inputs, "run_type": run_type, "session_id": project.id}
         value.setdefault("trace_id", value["id"])
-        self.runs_store[str(value["id"])] = Run(**value)
+        # A repeated POST must not turn finished run ingestion into an upsert.
+        self.runs_store.setdefault(str(value["id"]), Run(**value))
 
     def batch_ingest_runs(self, create=None, update=None):
         assert not update
@@ -109,9 +110,7 @@ class MemoryClient(Client):
             self.create_run(project_name=project.name, **value)
 
     def update_run(self, run_id, **kwargs):
-        value = self.runs_store[str(run_id)].model_dump()
-        value.update(kwargs)
-        self.runs_store[str(run_id)] = Run(**value)
+        raise AssertionError("Replay must publish complete runs, not PATCH run outputs")
 
     def read_run(self, run_id, **kwargs):
         if str(run_id) not in self.runs_store:
@@ -757,14 +756,17 @@ def test_comparison_and_paired_results_are_visible_before_next_action_finishes(p
             # One complete pair must publish while this next model call is waiting.
             assert paired_feedback.wait(5), "publication blocked behind generation"
             roots = [run for run in client.runs_store.values() if not run.parent_run_id]
-            assert len(roots) == 2
-            assert all(run.outputs["completed_actions"] == 1 and run.outputs["status"] == "partial" for run in roots)
+            assert roots == []  # The conversation is still incomplete.
+            children = list(client.runs_store.values())
+            assert len(children) == 2
+            assert all(run.parent_run_id is not None and run.end_time is not None for run in children)
+            assert {score.key for score in client.feedback_store} == {"teacher_agreement"}
         return generate(*args)
 
     def upload(*args, **kwargs):
         result = feedback(*args, **kwargs)
         project = client.read_project(project_id=kwargs["session_id"])
-        if kwargs["key"] == "trajectory_teacher_agreement" and project.metadata["model_role"] == "tuned":
+        if kwargs["key"] == "teacher_agreement" and project.metadata["model_role"] == "tuned":
             paired_feedback.set()
         return result
 
@@ -780,7 +782,138 @@ def test_comparison_and_paired_results_are_visible_before_next_action_finishes(p
     assert receipt["completed"] == receipt["total"]
 
 
-def test_incremental_conversation_average_updates_without_duplicate_children_or_scores(prepared, tmp_path):
+@pytest.fixture
+def saved_publication(prepared, tmp_path):
+    data, _, client = prepared
+    source = tmp_path / "source"
+    evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
+    rows = _load_jsonl(source / "results.jsonl")[:2]
+    config = _load_json(source / "evaluation-config.json")
+    cases = _load_jsonl(source / "cases.jsonl")
+    context = evaluation.preflight_langsmith(data)
+    output = tmp_path / "publication"
+    publisher = reporting.EvaluationPublisher(output, config, cases, context, rows)
+    publisher.start()
+    return SimpleNamespace(client=client, publisher=publisher, rows=rows, config=config,
+                           cases=cases, context=context, output=output)
+
+
+@pytest.mark.parametrize("open_parent", [False, True])
+def test_legacy_partial_parent_fails_before_resume_readiness_without_overwrite(saved_publication, open_parent):
+    p = saved_publication
+    root, _, _ = p.publisher._runs("tuned", p.publisher.examples[0], p.rows[:1])
+    if open_parent:
+        root["end_time"] = None
+    p.client.create_run(**root)  # Simulate a receipt produced by the old writer.
+    before = p.client.read_run(root["id"])
+    batches = len(p.client.run_batches)
+    projects = set(p.client.projects)
+    with pytest.raises(PipelineError, match="legacy partial/open parent") as error:
+        reporting.BackgroundPublisher(p.output, p.config, p.cases, p.context, p.rows)
+    assert root["id"] in str(error.value)
+    assert "do not delete artifacts or rerun paid evaluation" in str(error.value)
+    assert _load_json(p.output / "langsmith-experiments.json")["failure_phase"] == "tuned:parent_preflight"
+    assert p.client.read_run(root["id"]) == before
+    assert len(p.client.run_batches) == batches and set(p.client.projects) == projects
+
+
+def test_completed_legacy_parent_is_verified_without_update(saved_publication):
+    p = saved_publication
+    root, _, _ = p.publisher._runs("tuned", p.publisher.examples[0], p.rows)
+    p.client.create_run(**root)
+    before = p.client.read_run(root["id"])
+    reporting.publish_evaluation(p.output, p.config, p.rows, p.cases, p.context)
+    assert p.client.read_run(root["id"]) == before
+    assert not any(root["id"] in batch for batch in p.client.run_batches)
+    scores = list(p.client.list_feedback(run_ids=[root["id"]]))
+    assert len(scores) == 1 and scores[0].score == 1
+
+
+def test_lost_parent_post_response_resumes_without_duplicate_run_or_model_calls(saved_publication, monkeypatch):
+    p = saved_publication
+    p.publisher.publish(p.rows[:1])
+    upload = p.client.batch_ingest_runs
+
+    def lose_parent_response(create=None, update=None):
+        upload(create=create, update=update)
+        if any(run.get("parent_run_id") is None for run in create):
+            raise ConnectionError("parent POST was accepted but its response was lost")
+
+    monkeypatch.setattr(p.client, "batch_ingest_runs", lose_parent_response)
+    with pytest.raises(PipelineError, match="run_upload"):
+        p.publisher.publish(p.rows)
+    root, _, _ = p.publisher._runs("tuned", p.publisher.examples[0], p.rows)
+    assert p.client.read_run(root["id"]).outputs["status"] == "complete"
+    before = len(p.client.run_batches)
+    # Keeping the fault active ensures resume does not POST the parent again.
+    reporting.publish_evaluation(p.output, p.config, p.rows, p.cases, p.context)
+    assert len(p.client.run_batches) == before
+    assert sum(root["id"] in batch for batch in p.client.run_batches) == 1
+
+
+def test_multiday_resume_does_not_depend_on_open_parent_staging(saved_publication):
+    p = saved_publication
+    p.publisher.receipt["created_at"] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    p.publisher.publish(p.rows[:1])
+    root, _, _ = p.publisher._runs("tuned", p.publisher.examples[0], p.rows)
+    assert root["id"] not in p.client.runs_store
+    assert all(run.end_time is not None for run in p.client.runs_store.values())
+    uploaded = {run_id for batch in p.client.run_batches for run_id in batch}
+    before = len(p.client.run_batches)
+    reporting.publish_evaluation(p.output, p.config, p.rows, p.cases, p.context)
+    assert p.client.read_run(root["id"]).outputs["status"] == "complete"
+    newly_uploaded = {run_id for batch in p.client.run_batches[before:] for run_id in batch}
+    assert not uploaded.intersection(newly_uploaded)
+
+
+@pytest.mark.parametrize("invalid", ["duplicate", "foreign", "changed"])
+def test_invalid_cases_cannot_finalize_a_conversation(saved_publication, invalid):
+    p = saved_publication
+    rows = copy.deepcopy(p.rows)
+    if invalid == "duplicate":
+        rows[1] = rows[0]
+    elif invalid == "foreign":
+        rows[1]["case"]["id"] = "not-a-selected-case"
+    else:
+        rows[1]["case"]["tools"] = [{"not": "the recorded tools"}]
+    before = len(p.client.run_batches)
+    with pytest.raises(PipelineError, match="results differ from saved replay cases"):
+        p.publisher.publish(rows)
+    assert len(p.client.run_batches) == before
+
+
+def test_parent_is_posted_once_only_after_all_actions_complete(prepared, tmp_path):
+    data, _, client = prepared
+    source = tmp_path / "source"
+    evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
+    rows = _load_jsonl(source / "results.jsonl")[:2]
+    assert rows[0]["case"]["example_id"] == rows[1]["case"]["example_id"]
+    config = _load_json(source / "evaluation-config.json")
+    cases = _load_jsonl(source / "cases.jsonl")
+    output = tmp_path / "immutable-parent"
+    context = evaluation.preflight_langsmith(data)
+    publisher = reporting.EvaluationPublisher(output, config, cases, context, rows)
+    publisher.start()
+    project_id = publisher.receipt["experiments"]["tuned"]["id"]
+
+    publisher.publish(rows[:1])
+    assert list(client.list_runs(project_id=project_id, is_root=True)) == []
+    children = list(client.list_runs(project_id=project_id, is_root=False))
+    assert len(children) == 1
+    assert len(list(client.list_feedback(run_ids=[children[0].id]))) == 1
+
+    publisher.publish(rows)
+    root = next(client.list_runs(project_id=project_id, is_root=True))
+    assert root.outputs["status"] == "complete"
+    assert root.outputs["completed_actions"] == root.outputs["total_actions"] == 2
+    assert root.end_time is not None
+    before = (len(client.run_batches), len(client.feedback_store))
+    reporting.publish_evaluation(output, config, rows, cases, context)
+    assert before == (len(client.run_batches), len(client.feedback_store))
+    assert sum(str(root.id) in batch for batch in client.run_batches) == 1
+
+
+def test_conversation_average_is_published_at_completion_without_duplicate_children_or_scores(prepared, tmp_path):
     data, _, client = prepared
     source = tmp_path / "source"
     evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
@@ -794,26 +927,66 @@ def test_incremental_conversation_average_updates_without_duplicate_children_or_
     publisher.start()
     publisher.publish(rows[:1])
     project_id = publisher.receipt["experiments"]["tuned"]["id"]
-    root = next(client.list_runs(project_id=project_id, is_root=True))
-    score = next(client.list_feedback(run_ids=[root.id]))
-    first_score_id = score.id
-    assert root.outputs["status"] == "partial"
-    assert score.score == 1
+    assert list(client.list_runs(project_id=project_id, is_root=True)) == []
     initial_child = next(run for run in client.list_runs(project_id=project_id) if run.parent_run_id)
+    assert next(client.list_feedback(run_ids=[initial_child.id])).score == 1
     batches_before = len(client.run_batches)
     publisher.publish(rows)
-    root = client.read_run(root.id)
+    root = next(client.list_runs(project_id=project_id, is_root=True))
     assert root.outputs["status"] == "complete"
     assert root.outputs["completed_actions"] == root.outputs["total_actions"] == 2
     score = next(client.list_feedback(run_ids=[root.id]))
-    assert score.id == first_score_id
     assert score.score == .5
     assert str(initial_child.id) not in {item for batch in client.run_batches[batches_before:] for item in batch}
     before = (len(client.runs_store), len(client.feedback_store), len(client.run_batches))
-    # A fresh writer reconciles partial remote results without regressing the root.
+    # This conversation is final even while other conversations are incomplete.
     reporting.publish_evaluation(output, config, rows, cases, context)
     assert before == (len(client.runs_store), len(client.feedback_store), len(client.run_batches))
     assert _load_json(output / "langsmith-experiments.json")["status"] == "partial"
+
+
+@pytest.mark.parametrize("applied", [False, True])
+def test_parent_create_verification_distinguishes_missing_from_delayed_visibility(prepared, tmp_path, monkeypatch, applied):
+    data, _, client = prepared
+    source = tmp_path / "source"
+    evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
+    rows = _load_jsonl(source / "results.jsonl")[:2]
+    output = tmp_path / "publication"
+    config, cases = _load_json(source / "evaluation-config.json"), _load_jsonl(source / "cases.jsonl")
+    publisher = reporting.EvaluationPublisher(output, config, cases, evaluation.preflight_langsmith(data), rows)
+    publisher.start()
+    publisher.publish(rows[:1])
+    root, _, _ = publisher._runs("tuned", publisher.examples[0], rows)
+    reads, sleeps, posts = [], [], []
+    upload, list_runs = client.batch_ingest_runs, client.list_runs
+
+    def accept(create=None, update=None):
+        if any(run["id"] == root["id"] for run in create):
+            posts.append(root["id"])
+            if not applied:
+                return
+        upload(create=create, update=update)
+
+    def list_with_delay(**kwargs):
+        if kwargs.get("run_ids") == [root["id"]] and root["id"] in client.runs_store:
+            reads.append(1)
+            if len(reads) == 1:
+                return
+        yield from list_runs(**kwargs)
+
+    monkeypatch.setattr(client, "batch_ingest_runs", accept)
+    monkeypatch.setattr(client, "list_runs", list_with_delay)
+    monkeypatch.setattr(reporting.time, "sleep", sleeps.append)
+    if applied:
+        publisher.publish(rows)
+        assert sleeps == [1]
+        assert client.read_run(root["id"]).outputs["status"] == "complete"
+    else:
+        with pytest.raises(PipelineError, match="runs are not fully indexed"):
+            publisher.publish(rows)
+        assert sleeps == [1, 2, 4, 8, 15, 30]
+        assert root["id"] not in client.runs_store
+    assert posts == [root["id"]]  # Poll accepted writes; never blindly resubmit.
 
 
 def test_interrupt_flushes_saved_pairs_and_resumes_the_same_experiments(prepared, tmp_path, monkeypatch):
@@ -834,7 +1007,8 @@ def test_interrupt_flushes_saved_pairs_and_resumes_the_same_experiments(prepared
     assert len(saved) == receipt["completed"] == 1
     assert receipt["status"] == "partial"
     assert len(client.projects) == 2
-    assert len(client.feedback_store) == 4  # action + conversation for each model
+    assert len(client.feedback_store) == 2  # Child feedback for each model; no partial parent.
+    assert all(run.parent_run_id is not None for run in client.runs_store.values())
     ids = set(client.runs_store)
     monkeypatch.setattr(evaluation, "as_completed", original)
     summary = evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
@@ -885,7 +1059,7 @@ def test_slow_publication_does_not_block_generation_and_close_is_bounded(prepare
     assert client.runs_store == {}
 
 
-def test_lost_running_average_update_resumes_without_duplicate_feedback(prepared, tmp_path, monkeypatch):
+def test_lost_final_average_response_resumes_without_duplicate_feedback(prepared, tmp_path, monkeypatch):
     data, _, client = prepared
     source = tmp_path / "source"
     evaluation.run_replay_evaluation(data, source, "tuned", "judge", chat=toy_chat([]), confirm=True)
@@ -897,17 +1071,19 @@ def test_lost_running_average_update_resumes_without_duplicate_feedback(prepared
     publisher = reporting.EvaluationPublisher(output, config, cases, context, rows)
     publisher.start()
     publisher.publish(rows[:1])
-    update = client.update_feedback
+    create = client.create_feedback
 
     def lost_response(*args, **kwargs):
-        update(*args, **kwargs)
-        raise ConnectionError("accepted update but lost response")
+        result = create(*args, **kwargs)
+        if kwargs["key"] == "trajectory_teacher_agreement":
+            raise ConnectionError("accepted feedback but lost response")
+        return result
 
-    monkeypatch.setattr(client, "update_feedback", lost_response)
+    monkeypatch.setattr(client, "create_feedback", lost_response)
     with pytest.raises(PipelineError, match="feedback_upload"):
         publisher.publish(rows)
     count = len(client.feedback_store)
-    monkeypatch.setattr(client, "update_feedback", update)
+    monkeypatch.setattr(client, "create_feedback", create)
     reporting.publish_evaluation(output, config, rows, cases, context)
     project_id = publisher.receipt["experiments"]["tuned"]["id"]
     root = next(client.list_runs(project_id=project_id, is_root=True))

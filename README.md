@@ -208,7 +208,10 @@ Replay scores do not affect checkpoint selection.
 
 When replay begins, the CLI prints **one comparison link** for the base and tuned
 experiments. Open it to view results on the original LangSmith dataset. Completed
-comparisons publish in the background; refresh the view as evaluation progresses.
+action results publish in the background. Each conversation's experiment row and
+aggregate score appear once all its selected actions finish; refresh the view as
+evaluation progresses. Interrupted conversations retain their saved results and
+uploaded children for resume, without publishing a finished partial parent.
 
 Each trajectory groups its independent next-action predictions:
 
