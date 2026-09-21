@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from smithtune import checkpoint as storage
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
-from smithtune.curation import _api, _fetch_trajectory, _matches, _uuid, resolve_time_window
+from smithtune.curation import _api, _fetch_trajectory, _matches, _trajectory_page_too_large, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
 from smithtune.bindings import validate_bound_messages
@@ -38,6 +38,9 @@ def _fetch(command, *, runner, cache_dir, use_cache=True, **kwargs):
         try:
             result = runner(command, **kwargs)
         except subprocess.CalledProcessError as exc:
+            if command[:3] == ["langsmith", "api", "/v1/trajectory"] and _trajectory_page_too_large(exc):
+                # Let the trajectory paginator narrow this deterministic failure.
+                raise
             if attempt == 2:
                 raise
             # The LangSmith CLI can write request errors to stdout.

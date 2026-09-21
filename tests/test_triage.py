@@ -152,6 +152,36 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     assert triage_source.snapshot(source(), tmp_path, runner=only_membership) == frozen
 
 
+def test_oversized_trajectory_pages_bypass_read_retries_and_cache_smaller_pages(tmp_path, monkeypatch):
+    from functools import partial
+
+    api = API()
+    attempts, delays = [], []
+    monkeypatch.setattr(triage_source.time, "sleep", delays.append)
+    monkeypatch.setattr(curation, "_sleep", delays.append)
+
+    def runner(command, **kwargs):
+        body = json.loads(kwargs["input"])
+        attempts.append(body)
+        if body.get("cursor") == "next" and body.get("page_size") != 1:
+            raise subprocess.CalledProcessError(1, command, output=json.dumps({
+                "status": 400, "detail": "Narrow the requested trajectory page and retry: "
+                "trajectory view exceeded response data size limit"}) + "\nHTTP 400")
+        return api(command, **kwargs)
+
+    cached = partial(triage_source._fetch, runner=runner, cache_dir=tmp_path)
+    for _ in range(2):
+        result = curation._fetch_trajectory(uid(100), uid(101), {
+            "key": "thread_id", "id": "conversation-a"}, runner=cached)
+        assert result["messages"] == SYSTEM + messages(1) + messages(2)
+        assert result["training_error"] is None
+        assert len(result["source"]["assistant_runs"]) == 2
+    assert [(body.get("cursor"), body.get("page_size")) for body in attempts] == [
+        (None, None), ("next", None), ("next", 1), ("next", None)]
+    assert len(list(tmp_path.glob("*.json"))) == 2  # Only successful responses are cached.
+    assert delays == []
+
+
 def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
     api = API()
     image = {"type": "image", "url": "https://example.invalid/image.png"}

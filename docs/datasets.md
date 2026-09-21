@@ -67,6 +67,9 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
   Rejections are not replaced, and the limit is not a target dataset size.
 - `--concurrency` defaults to 4; downloads cap at 4 workers and uploads are sequential.
   Use `--concurrency 1` to reduce memory peaks for very large trajectories.
+- Oversized trajectory response pages are retried at the same cursor with `page_size=1`.
+  All messages and per-assistant tool metadata are preserved. If the smallest page
+  still exceeds the server limit, the download stops without saving a partial trajectory.
 - Source settings are frozen in the directory. Use a new directory to select a
   different project, time window, filter, or limit.
 
