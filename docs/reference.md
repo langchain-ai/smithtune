@@ -35,8 +35,14 @@ Keep the assignments file, including entries for removed trajectories.
 
 Preparation also publishes these splits onto the original LangSmith dataset and
 records its version for evaluation. Existing conflicting assignments stop
-preparation. If split publication fails, rerun `prepare --no-fetch` with the same
-settings to finish. `--no-fetch` still contacts LangSmith for this step; use
+preparation. If local preparation succeeds but split publication fails, publish
+only the saved memberships without fetching or rendering again:
+
+```bash
+smithtune dataset publish-splits --data-dir "$data_dir"
+```
+
+`prepare --no-fetch` still contacts LangSmith to synchronize splits; use
 `--no-sync-splits` for local-only preparation.
 
 ## Reuse downloaded data

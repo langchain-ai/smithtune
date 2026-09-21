@@ -20,6 +20,7 @@ Install the optional deployment tools:
 
 ```bash
 uv tool install --upgrade --python 3.12 \
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
   'smithtune[baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
