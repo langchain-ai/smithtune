@@ -265,12 +265,12 @@ def _parser() -> argparse.ArgumentParser:
             help=f"maximum training rows excluded above the trainer context limit (default: {baseten_defaults.max_dropped_training_rows})",
         )
 
-    promotion = sub.add_parser("promote", help="promote the final checkpoint after separate approval")
+    promotion = sub.add_parser("promote", help="register the selected Fireworks checkpoint without deploying it (deploy does this automatically)")
     promotion.add_argument("--run-dir", type=Path, required=True)
     promotion.add_argument("--output-model-id", required=True)
     promotion.add_argument("--confirm", action="store_true")
 
-    deployment = sub.add_parser("deploy", help="create an on-demand endpoint and test it")
+    deployment = sub.add_parser("deploy", help="deploy the selected checkpoint and test it; automatically promotes on Fireworks")
     deployment.add_argument("--run-dir", type=Path, required=True)
     deployment.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
     deployment.add_argument("--account-id", help="Fireworks account ID")

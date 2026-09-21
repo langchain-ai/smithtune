@@ -67,6 +67,8 @@ Start a new shell or refresh your PATH, then follow the LangSmith CLI's
 installation and authentication instructions. Training and sampler evaluation
 use the provider APIs directly. `firectl` is only needed for
 [Fireworks deployment and undeployment](docs/deployment.md#deploy-a-fireworks-checkpoint).
+`deploy` handles checkpoint promotion automatically on Fireworks; neither provider
+requires a separate promotion step.
 
 ### Credentials
 

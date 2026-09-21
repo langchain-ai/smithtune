@@ -1976,6 +1976,7 @@ def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkey
 
 def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     commands = []
+    monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
     monkeypatch.setattr(fireworks, "_run", lambda command, **kwargs: commands.append(command))
     def smoke_test(route):
         saved = json.loads((tmp_path / "endpoint.json").read_text())
@@ -2008,6 +2009,7 @@ def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch
 
 @pytest.mark.parametrize("error", [PipelineError("inference smoke test failed with HTTP 503"), TimeoutError("timed out")])
 def test_failed_deployment_smoke_test_retains_receipt(tmp_path, monkeypatch, error):
+    monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setattr(fireworks, "_run", lambda *args, **kwargs: None)
 
