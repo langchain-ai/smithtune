@@ -94,8 +94,8 @@ and receipt persistence. No model/GPU serving profile has been validated by
 these offline tests; deployment runs text and tool-call smoke tests before
 marking an endpoint ready.
 
-`bindings.py` separates producing-run capture from the saved per-assistant tool
-representation. Keep capture replaceable by trajectory endpoint evidence. Training,
+`bindings.py` normalizes each trajectory UI item's `available_tools` and run/trace
+metadata into the saved per-assistant tool representation. Training,
 validation, and replay must consume the same tool list for each assistant target.
 The Fireworks loader uses smithtune's target renderer with the official cookbook's
 JSONL dataset and batching; changing only preparation masks is insufficient.

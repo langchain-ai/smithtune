@@ -4,13 +4,14 @@ import json
 
 import pytest
 
-from smithtune.bindings import capture_bindings, read_bindings, tool_contract, training_targets
+from smithtune.bindings import trajectory_bindings, read_bindings, tool_contract, training_targets
 from smithtune.dataset import prepare_sft_rows
 from smithtune.evaluation.replay import build_replay_cases, score_replay_candidate, _judge_input
 from smithtune.providers.base import PipelineError
 from smithtune import rendering
 from test_hf_rendering import _tokenizer, _loss_spans
 from test_training_dependency import CharacterTokenizer
+from trajectory_fixtures import run_items, items
 
 
 def tool(kind='string', name='search'):
@@ -32,44 +33,7 @@ def example():
     return {'id': 'example', 'inputs': {'messages': messages}, 'outputs': None,
             'metadata': {'trajectory_format': 'messages', 'conversation_scope': 'root',
                          'source_scope': 'thread', 'source_scope_id': 'thread', 'source_project_id': 'project',
-                         'source_workspace_id': 'workspace', 'smithtune_source': capture_bindings(messages, runs)}}, runs
-
-
-def test_capture_outputs_not_input_history_or_run_ids():
-    value, runs = example()
-    captured = capture_bindings(value['inputs']['messages'], list(reversed(runs)))
-    assert captured == value['metadata']['smithtune_source']
-    assert [b['run_id'] for b in captured['assistant_runs']] == ['run-0', 'run-1', 'run-2']
-    assert [len(b['tools']) for b in captured['assistant_runs']] == [1, 2, 0]
-    # StandardMessage IDs and nested LangChain ChatGeneration IDs are the
-    # documented output identities; neither is interpreted as a run ID.
-    for run in runs:
-        m = run['outputs']['messages'][0]
-        run['outputs'] = {'generations': [[{'message': {'lc': 1, 'type': 'constructor',
-                             'id': ['langchain', 'schema', 'messages', 'AIMessage'], 'kwargs': m}}]]}
-    assert capture_bindings(value['inputs']['messages'], runs) == captured
-    for run in runs:
-        m = run['outputs']['generations'][0][0]['message']['kwargs']
-        run['outputs'] = {'generations': [{'message': {'type': 'ai', 'data': {k: v for k, v in m.items() if k != 'role'}}}]}
-    assert capture_bindings(value['inputs']['messages'], runs) == captured
-
-
-@pytest.mark.parametrize('problem', ['missing', 'ambiguous', 'repeated', 'changed', 'unknown_tools'])
-def test_mapping_failures_exclude_whole_conversation(problem):
-    value, runs = example()
-    messages = copy.deepcopy(value['inputs']['messages'])
-    if problem == 'missing':
-        runs.pop(0)
-    elif problem == 'ambiguous':
-        runs.append({**copy.deepcopy(runs[0]), 'id': 'retry'})
-    elif problem == 'repeated':
-        messages.append(copy.deepcopy(messages[1]))
-    elif problem == 'changed':
-        messages[1]['content'] = 'changed'
-    else:
-        runs[0]['extra'] = {}
-    with pytest.raises(PipelineError, match='provenance|differs|availability'):
-        capture_bindings(messages, runs)
+                         'source_workspace_id': 'workspace', 'smithtune_source': trajectory_bindings(run_items(messages, runs))}}, runs
 
 
 def test_roundtrip_bindings_and_replay_original_positions():
@@ -132,12 +96,7 @@ def test_historical_calls_use_their_own_schemas_in_http_replay(provider, monkeyp
         index = i * 2 + 1
         messages[index]['content'] = [{'type': 'tool_call', 'name': 'search', 'id': f'call-{i}', 'args': {'query': argument}}]
         messages.insert(index + 1, {'role': 'tool', 'content': 'found', 'tool_call_id': f'call-{i}'})
-    # Output envelopes are separate run evidence; calls are normalized when
-    # comparing StandardMessage and LangChain/OpenAI tool-call shapes.
-    first = runs[0]['outputs']['messages'][0]
-    runs[0]['outputs'] = {'choices': [{'message': {'role': 'assistant', 'id': first['id'], 'content': '',
-        'tool_calls': [{'id': 'call-0', 'function': {'name': 'search', 'arguments': '{"query":"old-schema"}'}}]}}]}
-    value['metadata']['smithtune_source'] = capture_bindings(messages, runs)
+    value['metadata']['smithtune_source'] = trajectory_bindings(run_items(messages, runs))
     row, = prepare_sft_rows([value])
     cases = build_replay_cases([row])
     assert [case['message_index'] for case in cases] == [1, 4, 7]
@@ -206,61 +165,46 @@ def test_fireworks_real_loader_and_eager_validation_share_target_masks(tmp_path,
             assert ('unused' in tokenizer.decode(datum.model_input.to_ints())) == (i == 1)
 
 
-@pytest.mark.parametrize('wire_format', ['openai', 'anthropic', 'langchain_anthropic'])
-def test_capture_native_tool_outputs_and_empty_text(wire_format):
-    offered = [tool()]
-    call = {'type': 'tool_call', 'id': 'call-1', 'name': 'search', 'args': {'query': 'hello'}}
-    recorded = {'role': 'ai', 'id': 'output-1', 'content': [call]}
-    if wire_format == 'openai':
-        output = {'role': 'assistant', 'id': 'output-1', 'content': None,
-                  'tool_calls': [{'id': 'call-1', 'type': 'function', 'function': {'name': 'search', 'arguments': '{"query":"hello"}'}}]}
-    else:
-        output = {'role': 'assistant', 'id': 'output-1', 'content': [
-            {'type': 'tool_use', 'id': 'call-1', 'name': 'search', 'input': {'query': 'hello'}}]}
-        if wire_format == 'langchain_anthropic':
-            output['tool_calls'] = [call]
-    runs = [{'id': 'run-1', 'trace_id': 'trace-1', 'run_type': 'llm', 'outputs': output,
-             'extra': {'invocation_params': {'tools': offered}}}]
-    assert capture_bindings([recorded], runs)['assistant_runs'][0]['tools'] == offered
-    output['id'] = 'different-output'
-    with pytest.raises(PipelineError, match='provenance'):
-        capture_bindings([recorded], runs)
-
-
 def test_unused_builtin_is_not_silently_dropped_from_available_tools():
     value, runs = example()
     runs[0]['extra']['invocation_params']['tools'].append({'type': 'web_search_20250305', 'name': 'web_search'})
     with pytest.raises(PipelineError, match='provider-native|built-in|unsupported'):
-        capture_bindings(value['inputs']['messages'], runs)
+        trajectory_bindings(run_items(value['inputs']['messages'], runs))
 
 
-@pytest.mark.parametrize('streaming', [False, True])
-def test_capture_matches_trajectory_normalization_for_langchain_tool_only_outputs(streaming):
-    call = {'type': 'tool_call', 'id': 'call', 'name': 'search', 'args': {'query': 'hello'}}
-    recorded = {'role': 'ai', 'id': 'output', 'content': [{'type': 'text', 'text': ''}, call]}
-    content = [{'type': 'tool_use', 'id': 'call', 'name': 'search', 'input': {}, 'partial_json': ''}] if streaming else ''
-    output = {'role': 'assistant', 'id': 'output', 'content': content, 'tool_calls': [call]}
-    runs = [{'id': 'run', 'trace_id': 'trace', 'run_type': 'llm', 'outputs': {'messages': [output]},
-             'extra': {'invocation_params': {'tools': [tool()]}}}]
-    assert capture_bindings([recorded], runs)['assistant_runs'][0]['run_id'] == 'run'
+def test_native_availability_keeps_changing_schemas_and_final_text_tools():
+    value, runs = example()
+    wire = run_items(value["inputs"]["messages"], runs)
+    for item in wire:
+        item["message"].pop("id", None)  # Output IDs are no longer needed.
+    original = copy.deepcopy(wire)
+    bindings = trajectory_bindings(wire)["assistant_runs"]
+    assert [b["message_index"] for b in bindings] == [1, 3, 5]
+    assert [len(b["tools"]) for b in bindings] == [1, 2, 0]
+    assert bindings[0]["tools"][0] != bindings[1]["tools"][0]
+    assert wire == original
 
 
-def test_capture_langchain_responses_reasoning_and_function_calls():
-    recorded = {'role': 'ai', 'id': 'output', 'content': [
-        {'type': 'reasoning', 'reasoning': 'First step\nSecond step'},
-        {'type': 'tool_call', 'id': 'call', 'name': 'search', 'args': {'query': 'hello'}}]}
-    output = {'role': 'assistant', 'id': 'output', 'content': [
-        {'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': text} for text in ['First step', '', 'Second step']]},
-        {'type': 'function_call', 'call_id': 'call', 'name': 'search', 'arguments': '{"query":"hello"}'}]}
-    runs = [{'id': 'run', 'trace_id': 'trace', 'run_type': 'llm', 'outputs': output,
-             'extra': {'invocation_params': {'tools': [tool()]}}}]
-    assert capture_bindings([recorded], runs)['assistant_runs'][0]['run_id'] == 'run'
+@pytest.mark.parametrize("missing", ["absent", None, {}, ""])
+def test_unknown_availability_is_not_an_empty_tool_list(missing):
+    wire = items([{"role": "ai", "content": "answer"}])
+    if missing == "absent":
+        del wire[0]["message"]["available_tools"]
+    else:
+        wire[0]["message"]["available_tools"] = missing
+    with pytest.raises(PipelineError, match="unknown tool availability"):
+        trajectory_bindings(wire)
 
 
-def test_direct_openai_without_output_message_id_cannot_be_attributed():
-    recorded = {'role': 'ai', 'id': 'response-id', 'content': 'answer'}
-    runs = [{'id': 'run', 'trace_id': 'trace', 'run_type': 'llm', 'outputs': {
-        'id': 'response-id', 'choices': [{'message': {'role': 'assistant', 'content': 'answer'}}]},
-        'extra': {'invocation_params': {'tools': []}}}]
-    with pytest.raises(PipelineError, match='producing-run provenance'):
-        capture_bindings([recorded], runs)
+@pytest.mark.parametrize("missing", ["run_id", "trace_id"])
+def test_native_assistant_requires_provenance(missing):
+    wire = items([{"role": "ai", "content": "answer"}])
+    del wire[0]["metadata"][missing]
+    with pytest.raises(PipelineError, match="run/trace provenance"):
+        trajectory_bindings(wire)
+
+
+def test_flat_function_definitions_from_trajectory_are_normalized():
+    nested = tool()
+    wire = items([{"role": "ai", "content": "answer"}], tools=[{"type": "function", **nested["function"]}])
+    assert trajectory_bindings(wire)["assistant_runs"][0]["tools"] == [nested]

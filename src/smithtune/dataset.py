@@ -22,7 +22,6 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
-    TOOL_MERGE_POLICY,
     contract_from_runs,
     load_inference_contract,
     parse_inference_contract,
@@ -748,120 +747,6 @@ def _validate_unique_sources(
         seen[key] = example["id"]
 
 
-def capture_example_contracts(
-    workspace_id: str, examples: list[dict[str, Any]], *,
-    source_workspace_id: str | None = None, runner: Callable[..., Any] = _run_langsmith,
-    checkpoint_path: Path | None = None,
-    exclusion_warnings: list[dict[str, Any]] | None = None,
-) -> dict[str, InferenceContract]:
-    """Collect a separate union of function tools for each source trajectory."""
-    contracts: dict[str, InferenceContract] = {}
-    checkpoint_identity = json_sha256({
-        "schema_version": 1, "workspace_id": workspace_id,
-        "source_workspace_id": source_workspace_id, "examples": examples,
-        "tool_merge_policy": TOOL_MERGE_POLICY,
-    })
-    excluded_ids: set[str] = set()
-
-    def save_checkpoint() -> None:
-        if checkpoint_path is None:
-            return
-        saved = {key: contract.to_dict() for key, contract in contracts.items()}
-        _json_dump(checkpoint_path, {
-            "identity": checkpoint_identity,
-            "contracts": saved,
-            "contracts_sha256": json_sha256(saved),
-            "exclusions": exclusion_warnings or [],
-        })
-
-    if checkpoint_path is not None and checkpoint_path.exists():
-        checkpoint = _load_json(checkpoint_path)
-        if isinstance(checkpoint, dict) and checkpoint.get("identity") == checkpoint_identity:
-            payload = checkpoint.get("contracts")
-            if checkpoint.get("contracts_sha256") != json_sha256(payload):
-                raise PipelineError(f"capture checkpoint hash mismatch; remove {checkpoint_path} and retry")
-            contracts = {} if payload == {} else _parse_example_contracts(payload)
-            saved_exclusions = checkpoint.get("exclusions", [])
-            if not isinstance(saved_exclusions, list) or any(
-                not isinstance(warning, dict)
-                or warning.get("code") != "incompatible_inference_contract_excluded"
-                or not isinstance(warning.get("example_id"), str)
-                for warning in saved_exclusions
-            ):
-                raise PipelineError(f"capture checkpoint exclusions are invalid; remove {checkpoint_path} and retry")
-            if saved_exclusions and exclusion_warnings is None:
-                raise PipelineError(f"capture checkpoint excludes examples; remove {checkpoint_path} and retry")
-            if exclusion_warnings is not None:
-                exclusion_warnings.extend(copy.deepcopy(saved_exclusions))
-            excluded_ids = {warning["example_id"] for warning in saved_exclusions}
-            known_ids = {example["id"] for example in examples}
-            if not set(contracts).isdisjoint(excluded_ids) or not (set(contracts) | excluded_ids) <= known_ids:
-                raise PipelineError(f"capture checkpoint contains unknown examples; remove {checkpoint_path} and retry")
-            complete = len(contracts) + len(excluded_ids)
-            print(f"Resuming tool capture: {complete}/{len(examples)} examples already saved", file=sys.stderr)
-    sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    project_starts: dict[tuple[str, str], str] = {}
-    for example in examples:
-        example_id = example["id"]
-        if example_id in contracts or example_id in excluded_ids:
-            continue
-        try:
-            saved_triage = (example.get("metadata") or {}).get("smithtune_triage")
-            if saved_triage is not None:
-                if not isinstance(saved_triage, dict) or saved_triage.get("messages_sha256") != json_sha256(example["inputs"]["messages"]):
-                    raise PipelineError("triaged example messages changed after judging")
-                payload = parse_inference_contract(saved_triage.get("contract")).to_dict()
-                payload["provenance"].update(source_example_id=example_id,
-                                             source_project_id=example["metadata"].get("source_project_id"))
-                contracts[example_id] = parse_inference_contract(payload)
-                continue
-            key = _source_key(example, workspace_id, source_workspace_id)
-            source_workspace, project_id, scope, scope_id = key
-            project_key = (source_workspace, project_id)
-            if project_key not in project_starts:
-                project_starts[project_key] = _project_start_time(source_workspace, project_id, runner=runner)
-            start_time = project_starts[project_key]
-            if key not in sources:
-                if scope == "thread":
-                    runs = _query_thread_llm_runs(source_workspace, project_id, scope_id, start_time=start_time, runner=runner)
-                else:
-                    runs = _query_contract_runs(source_workspace, {
-                        "project_ids": [project_id], "run_type": "LLM",
-                        "trace_id": scope_id, "min_start_time": start_time,
-                    }, runner=runner)
-                    if any(run.get("trace_id") != scope_id for run in runs):
-                        raise PipelineError("LangSmith returned a run from a different trace")
-                sources[key] = contract_from_runs(
-                    runs, workspace_id=source_workspace, thread_id=scope_id if scope == "thread" else None,
-                )
-            payload = copy.deepcopy(sources[key])
-            payload["provenance"].update(source_example_id=example_id, source_project_id=project_id)
-            contracts[example_id] = parse_inference_contract(payload)
-            save_checkpoint()
-        except ContractError as exc:
-            if exclusion_warnings is not None and "conflicting definitions" in str(exc):
-                identity = _source_identity(example)
-                warning = {
-                    "code": "incompatible_inference_contract_excluded",
-                    "example_id": example_id,
-                    **identity,
-                    "reason": "conflicting_tool_definitions",
-                }
-                exclusion_warnings.append(warning)
-                excluded_ids.add(example_id)
-                print(
-                    f"Warning: excluding trajectory {example_id} "
-                    f"({identity['source_scope']} {identity['source_scope_id']}): conflicting_tool_definitions",
-                    file=sys.stderr,
-                )
-                save_checkpoint()
-                continue
-            raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
-        except PipelineError as exc:
-            raise PipelineError(f"example {example_id}: cannot collect tools: {exc}") from exc
-    return contracts
-
-
 def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
     if not isinstance(payload, dict) or not payload:
         raise PipelineError("example inference contracts must be a non-empty object")
@@ -872,61 +757,6 @@ def _parse_example_contracts(payload: Any) -> dict[str, InferenceContract]:
     for key, contract in contracts.items():
         if contract.provenance.get("source_example_id") != key:
             raise PipelineError(f"example inference contract {key} has different source provenance")
-    return contracts
-
-
-def _example_contract_snapshot(
-    workspace_id: str, dataset_id: str, examples: list[dict[str, Any]],
-    source_sha: str, raw_dir: Path, *, fetch: bool, source_workspace_id: str | None = None,
-    exclusion_warnings: list[dict[str, Any]] | None = None,
-) -> dict[str, InferenceContract]:
-    path = raw_dir / "example_contracts.json"
-    identity = {"schema_version": 1, "workspace_id": workspace_id,
-                "dataset_id": dataset_id, "source_examples_sha256": source_sha,
-                "tool_merge_policy": TOOL_MERGE_POLICY}
-    if fetch:
-        checkpoint_path = raw_dir / "example_contracts.partial.json"
-        captured_exclusions: list[dict[str, Any]] = []
-        contracts = capture_example_contracts(workspace_id, examples, source_workspace_id=source_workspace_id,
-                                             checkpoint_path=checkpoint_path,
-                                             exclusion_warnings=captured_exclusions if exclusion_warnings is not None else None)
-        payload = {key: contract.to_dict() for key, contract in contracts.items()}
-        _json_dump(path, {**identity, "contracts": payload, "contracts_sha256": json_sha256(payload),
-                          "exclusions": captured_exclusions})
-        checkpoint_path.unlink(missing_ok=True)
-    if not path.exists():
-        raise PipelineError("no cached example inference contracts; run prepare without --no-fetch or supply --inference-contract")
-    snapshot = _load_json(path)
-    if not isinstance(snapshot, dict) or any(snapshot.get(key) != value for key, value in identity.items()):
-        raise PipelineError("cached example inference contracts do not match this dataset export; prepare again without --no-fetch")
-    payload = snapshot.get("contracts")
-    if snapshot.get("contracts_sha256") != json_sha256(payload):
-        raise PipelineError("cached example inference contracts hash mismatch; prepare again without --no-fetch")
-    contracts = {} if payload == {} else _parse_example_contracts(payload)
-    exclusions = snapshot.get("exclusions", [])
-    if not isinstance(exclusions, list) or any(
-        not isinstance(warning, dict)
-        or warning.get("code") != "incompatible_inference_contract_excluded"
-        or not isinstance(warning.get("example_id"), str)
-        for warning in exclusions
-    ):
-        raise PipelineError("cached inference contract exclusions are invalid; prepare again without --no-fetch")
-    if exclusions and exclusion_warnings is None:
-        raise PipelineError("cached inference contracts exclude examples; prepare again without --no-fetch")
-    if exclusion_warnings is not None:
-        exclusion_warnings.extend(copy.deepcopy(exclusions))
-    excluded_ids = {warning["example_id"] for warning in exclusions}
-    if set(contracts) != {example["id"] for example in examples} - excluded_ids:
-        raise PipelineError("cached inference contracts do not cover every example")
-    for example in examples:
-        if example["id"] in excluded_ids:
-            continue
-        expected_workspace = _source_workspace(example, workspace_id, source_workspace_id)
-        if contracts[example["id"]].provenance.get("source_workspace_id") != expected_workspace:
-            raise PipelineError(
-                f"cached inference contract for example {example['id']} has a different source workspace; "
-                "prepare again without --no-fetch"
-            )
     return contracts
 
 
@@ -982,9 +812,9 @@ def prepare_sft_rows(
 
 
 def capture_example_bindings(examples, workspace_id, *, runner=_run, source_workspace_id=None, checkpoint_path=None):
-    """Enrich unbound exports in memory using verified output identities only."""
-    from smithtune.bindings import capture_bindings
-    from smithtune.triage_source import query_runs, thread_trace_ids, _fetch
+    """Attach trajectory-native tools only when recorded messages match exactly."""
+    from smithtune.curation import _fetch_trajectory
+    from smithtune.triage_source import _fetch
 
     def read(command, **kwargs):
         try:
@@ -993,7 +823,7 @@ def capture_example_bindings(examples, workspace_id, *, runner=_run, source_work
             detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
             raise PipelineError(detail) from None
 
-    identity = json_sha256({"schema_version": 1, "workspace_id": workspace_id,
+    identity = json_sha256({"schema_version": 2, "workspace_id": workspace_id,
                            "source_workspace_id": source_workspace_id, "examples": examples})
     captured = {}
     if checkpoint_path is not None and checkpoint_path.exists():
@@ -1005,7 +835,6 @@ def capture_example_bindings(examples, workspace_id, *, runner=_run, source_work
             if not set(captured) <= {example["id"] for example in examples}:
                 raise PipelineError("saved assistant bindings contain unknown examples")
     enriched, failures = [], []
-    project_starts = {}
     for original in examples:
         example = copy.deepcopy(original)
         metadata = example["metadata"]
@@ -1017,15 +846,18 @@ def capture_example_bindings(examples, workspace_id, *, runner=_run, source_work
                                  **_source_identity(example), "reason": "legacy triage evidence requires fresh pull and judging"})
                 continue
             workspace, project, scope, scope_id = _source_key(example, workspace_id, source_workspace_id)
-            project_key = (workspace, project)
-            if scope == "thread" and project_key not in project_starts:
-                project_starts[project_key] = _project_start_time(workspace, project, runner=read, read_attempts=1)
-            traces = [scope_id] if scope == "trace" else thread_trace_ids(
-                workspace, project, scope_id, start_time=project_starts[project_key],
-                end_time=_utc_now(), runner=read)
-            runs = [run for tid in traces for run in query_runs(workspace, project, {"trace": tid}, runner=read)]
             try:
-                metadata["smithtune_source"] = capture_bindings(example["inputs"]["messages"], runs)
+                trajectory = _fetch_trajectory(workspace, project, {"key": scope + "_id", "id": scope_id}, runner=read)
+            except PipelineError as exc:
+                raise PipelineError(f"example {example['id']}: cannot read trajectory tools: {exc}") from exc
+            try:
+                if json_sha256(trajectory["messages"]) != json_sha256(example["inputs"]["messages"]):
+                    raise PipelineError("source trajectory messages differ from the saved dataset example; pull a fresh dataset or supply --inference-contract")
+                if scope == "trace" and set(trajectory["trace_ids"]) != {scope_id}:
+                    raise PipelineError("trajectory evidence belongs to another trace")
+                if trajectory["training_error"]:
+                    raise PipelineError(trajectory["training_error"])
+                metadata["smithtune_source"] = trajectory["source"]
                 captured[example["id"]] = metadata["smithtune_source"]
                 if checkpoint_path is not None:
                     _json_dump(checkpoint_path, {"identity": identity, "bindings": captured, "sha256": json_sha256(captured)})

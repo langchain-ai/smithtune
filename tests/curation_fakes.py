@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 from test_assistant_bindings import example
+from trajectory_fixtures import run_items
 
 
 def uid(n):
@@ -53,14 +54,15 @@ class API:
             offset = int(body.get('cursor', '0'))
             value = {'items': roots[offset:offset + 1], 'next_cursor': str(offset + 1) if offset + 1 < len(roots) else None}
         elif route.startswith('/api/v2/traces/'):
-            value = {'items': self.runs, 'next_cursor': None}
+            raise AssertionError('raw trace trees must not be fetched')
         elif route.startswith('/api/v1/sessions/'):
             value = {'id': PROJECT, 'start_time': '2026-08-01T00:00:00+00:00'}
         elif route == '/v1/trajectory':
             assert body['include'] == {'system_messages': True}
             self.trajectory_requests += 1
             offset = int(body.get('cursor', '0'))
-            value = {'messages': self.messages[offset:offset + 2], 'next_cursor': str(offset + 2) if offset + 2 < len(self.messages) else None}
+            assert body['format'] == 'ui'
+            value = {'items': run_items(self.messages[offset:offset + 2], self.runs[1:]), 'next_cursor': str(offset + 2) if offset + 2 < len(self.messages) else None}
         elif route == '/api/v1/datasets' and method == 'GET':
             value = [d for d in self.datasets.values() if not query.get('name') or d['name'] == query['name'][0]]
         elif route == '/api/v1/datasets' and method == 'POST':

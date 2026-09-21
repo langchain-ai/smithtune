@@ -279,10 +279,12 @@ def _selected(value: Any, matches: dict[str, dict]) -> list[dict[str, str]]:
 def _fetch_trajectory(
     workspace_id: str, project_id: str, item: dict[str, str], *,
     runner: Callable[..., Any],
-) -> list:
+) -> dict:
+    from smithtune.bindings import trajectory_bindings
+
     body = {"project_id": project_id, item["key"]: item["id"],
-            "format": "messages", "include": {"system_messages": True}}
-    messages, cursors = [], set()
+            "format": "ui", "include": {"system_messages": True}}
+    items, cursors = [], set()
     while True:
         for attempt in range(1, FETCH_ATTEMPTS + 1):
             try:
@@ -292,18 +294,35 @@ def _fetch_trajectory(
                 if attempt == FETCH_ATTEMPTS or "returned invalid JSON" in str(exc):
                     raise PipelineError(f"{exc} after {attempt} attempt(s)") from exc
                 _sleep(FETCH_BACKOFF_SECONDS * attempt)
-        if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list):
-            raise PipelineError(f"{item['key']} {item['id']} returned invalid messages")
-        messages.extend(trajectory["messages"])
+        if not isinstance(trajectory, dict) or not isinstance(trajectory.get("items"), list):
+            raise PipelineError(f"{item['key']} {item['id']} returned invalid trajectory items; expected format=ui")
+        for entry in trajectory["items"]:
+            if not isinstance(entry, dict) or entry.get("type", "message") != "message" or not isinstance(entry.get("message"), dict):
+                raise PipelineError(f"{item['key']} {item['id']} returned an unsupported trajectory item")
+            items.append(entry)
         cursor = trajectory.get("next_cursor")
         if cursor is None:
-            if not messages:
-                raise PipelineError(f"{item['key']} {item['id']} returned no messages")
-            return messages
+            break
         if not isinstance(cursor, str) or not cursor or cursor in cursors:
             raise PipelineError(f"{item['key']} {item['id']} returned an invalid or repeated continuation cursor")
         cursors.add(cursor)
         body["cursor"] = cursor
+    if not items:
+        raise PipelineError(f"{item['key']} {item['id']} returned no messages")
+    # Tool configuration is evidence, not conversation content. Keep the native
+    # message list and the existing per-assistant metadata representation.
+    messages = [{key: value for key, value in entry["message"].items() if key != "available_tools"} for entry in items]
+    trace_ids = sorted({metadata["trace_id"] for entry in items
+                        if isinstance(metadata := entry.get("metadata"), dict)
+                        and isinstance(metadata.get("trace_id"), str) and metadata["trace_id"]})
+    if item["key"] == "trace_id" and any(tid != item["id"] for tid in trace_ids):
+        raise PipelineError("trajectory evidence belongs to another trace")
+    source, error = None, None
+    try:
+        source = trajectory_bindings(items)
+    except PipelineError as exc:
+        error = str(exc)
+    return {"messages": messages, "source": source, "trace_ids": trace_ids, "training_error": error}
 
 
 def _check_concurrency(concurrency: Any) -> None:
@@ -333,7 +352,13 @@ def _download_examples(workspace, project, selected, run_dir, concurrency, *, ru
             return item, saved
         example = saved["example"] if saved is not None else _source_example(workspace, project, item)
         if saved is None:
-            example["inputs"]["messages"] = _fetch_trajectory(workspace, project, item, runner=runner)
+            trajectory = _fetch_trajectory(workspace, project, item, runner=runner)
+            example["inputs"]["messages"] = trajectory["messages"]
+            if trajectory["source"] is not None:
+                example["metadata"]["smithtune_source"] = trajectory["source"]
+            if trajectory["training_error"]:
+                return item, {"example": example, "contract": None,
+                              "rejection": {"code": "invalid_import_trajectory_excluded", "reason": trajectory["training_error"]}}
         if destination is not None:
             index = destination["index"]
             if index is None:  # Completed import: verify files without refreshing tools.
@@ -344,7 +369,7 @@ def _download_examples(workspace, project, selected, run_dir, concurrency, *, ru
             if existing_path is not None and _action(example, load_conversation(existing_path), triaged=False)[0] == "skipped":
                 return item, {"example": example, "contract": None, "rejection": None}
         contract = {}
-        rejection = import_rejection(example, workspace, runner=runner, captured=contract)
+        rejection = import_rejection(example, workspace)
         return item, {"example": example, "contract": contract, "rejection": rejection}
 
     remaining = iter(selected)

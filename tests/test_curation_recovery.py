@@ -21,7 +21,7 @@ def test_completed_create_resumes_without_any_source_or_destination_calls(tmp_pa
     assert create(tmp_path, api) == first
     assert api.calls == api.contract_calls == []
     units = [load_conversation(path) for path in (tmp_path / "conversations").glob("*.json")]
-    assert len(units) == 2 and all(unit["contract"]["tools"] == [] for unit in units)
+    assert len(units) == 2 and all(b["tools"] == [] for unit in units for b in unit["example"]["metadata"]["smithtune_source"]["assistant_runs"])
 
 
 def test_failed_download_resumes_frozen_selection_and_completed_tools(tmp_path, monkeypatch):
@@ -43,8 +43,7 @@ def test_failed_download_resumes_frozen_selection_and_completed_tools(tmp_path, 
     assert result["created"] == 2 and len(api.datasets) == 1
     assert api.trajectory_calls() == [{"thread_id": "b"}]
     assert all(path != "/api/v2/runs/query" for path, _ in api.calls)
-    membership = [body["filter"] for path, body in api.contract_calls if body and body.get("is_root")]
-    assert membership and all('"b"' in expression for expression in membership)
+    assert api.contract_calls == []
 
 
 @pytest.mark.parametrize("operation", ["dataset", "example"])
@@ -159,13 +158,15 @@ def test_triage_checkpoint_reuses_complete_units_and_votes(tmp_path):
     api = TriageAPI()
     api.root_pages[0].append({"trace_id": uid(3), "thread_id": None, "start_time": "2026-09-02T00:00:00Z"})
 
-    def fail(command):
-        if "/traces/" + uid(3) in command[2]:
+    def fail(command, **kwargs):
+        if command[2] == "/v1/trajectory" and json.loads(kwargs["input"]).get("trace_id") == uid(3):
             raise KeyboardInterrupt()
 
-    api.failure = fail
+    def interrupted(command, **kwargs):
+        fail(command, **kwargs)
+        return api(command, **kwargs)
     with pytest.raises(KeyboardInterrupt):
-        triage_source.snapshot(source(), tmp_path, runner=api)
+        triage_source.snapshot(source(), tmp_path, runner=interrupted)
     assert len(checkpoint.load(tmp_path)["downloads"]) == 1
     api.failure = None
     api.calls.clear()
@@ -222,7 +223,8 @@ def test_direct_existing_import_skips_unchanged_without_tool_reads(tmp_path, mon
     old = example(1)
     old["metadata"]["source_scope_id"] = "thread-1"
     api = API([old])
-    monkeypatch.setattr(curation, "_fetch_trajectory", lambda *_a, **_kw: old["inputs"]["messages"])
+    monkeypatch.setattr(curation, "_fetch_trajectory", lambda *_a, **_kw: {"messages": old["inputs"]["messages"],
+        "source": old["metadata"]["smithtune_source"], "trace_ids": [uid(1)], "training_error": None})
     api.source = lambda *_a, **_kw: pytest.fail("unchanged destination refetched tools")
     result = curation._import_selection(selection=tmp_path / "selection.json", dataset_id=uid(200), runner=api)
     assert result["skipped"] == 1 and not api.writes

@@ -17,6 +17,8 @@ from smithtune.dataset_artifacts import load_conversation
 from smithtune import cli as pipeline
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
+from trajectory_fixtures import items
+from smithtune.bindings import trajectory_bindings
 
 
 def uid(number):
@@ -84,9 +86,9 @@ class API:
             result = copy.deepcopy(body)
             self.datasets[body["id"]] = result
         elif path == "/v1/trajectory":
-            assert body["format"] == "messages" and body["include"] == {"system_messages": True}
+            assert body["format"] == "ui" and body["include"] == {"system_messages": True}
             assert sum(key in body for key in curation.TRAJECTORY_KEYS) == 1
-            result = {"messages": copy.deepcopy(self.messages), "next_cursor": None, "prev_cursor": None}
+            result = {"items": items(self.messages, trace_id=body.get("trace_id", uid(1))), "next_cursor": None, "prev_cursor": None}
         elif path == "/api/v1/examples":
             result = {"id": body["id"], "dataset_id": body["dataset_id"], "inputs": body["inputs"],
                       "outputs": body["outputs"], "metadata": body["metadata"]}
@@ -241,13 +243,15 @@ def test_import_fetches_each_trajectory_and_creates_one_example(tmp_path):
     assert api.calls == [
         ("/api/v1/datasets", {"id": result["dataset_id"], "name": "new", "data_type": "kv"}),
         ("/v1/trajectory", {"project_id": uid(101), "thread_id": "a",
-                            "format": "messages", "include": {"system_messages": True}}),
+                            "format": "ui", "include": {"system_messages": True}}),
         ("/api/v1/examples", {"id": api.examples[0]["id"], "dataset_id": result["dataset_id"], "inputs": {"messages": api.messages}, "outputs": None,
-                              "metadata": {**COMMON_METADATA, "source_scope": "thread", "source_scope_id": "a"}}),
+                              "metadata": {**COMMON_METADATA, "source_scope": "thread", "source_scope_id": "a",
+                                           "smithtune_source": trajectory_bindings(items(api.messages, trace_id=uid(1)))}}),
         ("/v1/trajectory", {"project_id": uid(101), "trace_id": uid(3),
-                            "format": "messages", "include": {"system_messages": True}}),
+                            "format": "ui", "include": {"system_messages": True}}),
         ("/api/v1/examples", {"id": api.examples[1]["id"], "dataset_id": result["dataset_id"], "inputs": {"messages": api.messages}, "outputs": None,
-                              "metadata": {**COMMON_METADATA, "source_scope": "trace", "source_scope_id": uid(3)}}),
+                              "metadata": {**COMMON_METADATA, "source_scope": "trace", "source_scope_id": uid(3),
+                                           "smithtune_source": trajectory_bindings(items(api.messages, trace_id=uid(3)))}}),
     ]
     receipt = json.loads(Path(result["receipt"]).read_text())
     assert receipt["status"] == "complete"
@@ -284,7 +288,7 @@ def test_partial_failure_records_saved_input_and_pending_write(tmp_path):
 
 
 @pytest.mark.parametrize("response", [
-    {"messages": [], "next_cursor": None}, {"messages": None}, [],
+    {"items": [], "next_cursor": None}, {"messages": None}, [],
     {"messages": [{"role": "human", "content": "hi"}], "next_cursor": "more"},
 ])
 def test_incomplete_trajectory_fails_before_the_example_write(tmp_path, response):
@@ -626,9 +630,9 @@ def test_import_collects_all_pages_before_writing_one_example(tmp_path):
     api = API([[root(1, "a")]])
     select(tmp_path, api)
     pages = {
-        None: {"messages": api.messages[:2], "next_cursor": "second", "prev_cursor": None},
-        "second": {"messages": [], "next_cursor": "third", "prev_cursor": "first"},
-        "third": {"messages": api.messages[2:], "next_cursor": None, "prev_cursor": "second"},
+        None: {"items": items(api.messages[:2]), "next_cursor": "second", "prev_cursor": None},
+        "second": {"items": [], "next_cursor": "third", "prev_cursor": "first"},
+        "third": {"items": items(api.messages[2:]), "next_cursor": None, "prev_cursor": "second"},
     }
     cursors = []
 
@@ -662,10 +666,10 @@ def test_later_page_retries_only_that_page_and_never_writes_partial_example(tmp_
         cursor = body.get("cursor")
         cursors.append(cursor)
         if cursor is None:
-            return SimpleNamespace(stdout=json.dumps({"messages": api.messages[:2], "next_cursor": "second"}))
+            return SimpleNamespace(stdout=json.dumps({"items": items(api.messages[:2]), "next_cursor": "second"}))
         if not recover or cursors.count("second") < 3:
             raise subprocess.CalledProcessError(1, "langsmith", stderr="HTTP 503")
-        return SimpleNamespace(stdout=json.dumps({"messages": api.messages[2:], "next_cursor": None, "prev_cursor": "first"}))
+        return SimpleNamespace(stdout=json.dumps({"items": items(api.messages[2:]), "next_cursor": None, "prev_cursor": "first"}))
 
     if recover:
         curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
@@ -688,7 +692,7 @@ def test_invalid_or_repeated_later_cursor_never_writes_partial_example(tmp_path,
         if command[2] != "/v1/trajectory":
             return api(command, **kwargs)
         calls.append(json.loads(kwargs["input"]).get("cursor"))
-        return SimpleNamespace(stdout=json.dumps({"messages": api.messages, "next_cursor": "second" if len(calls) == 1 else cursor}))
+        return SimpleNamespace(stdout=json.dumps({"items": items(api.messages), "next_cursor": "second" if len(calls) == 1 else cursor}))
 
     with pytest.raises(PipelineError, match="invalid or repeated continuation cursor"):
         curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)

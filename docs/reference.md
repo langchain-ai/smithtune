@@ -53,12 +53,17 @@ trace IDs, and complete tools recorded for each assistant call. Tools can be
 added, removed, or change descriptions and schemas between calls. An empty list
 means no tools were offered; missing availability is not treated as an empty list.
 
-Pull currently matches assistant message IDs and normalized content against LLM
-outputs, then reads `extra.invocation_params.tools`. Input history is not evidence
-that a run produced a message. Missing or ambiguous output identities and
-unsupported provider built-ins exclude the trajectory with a recorded reason.
-Preparation reuses saved bindings; unbound, unjudged dataset exports can capture
-them from source runs. Interrupted preparation retains completed captures.
+Pull requests `/v1/trajectory` in `ui` format with system messages enabled. Each
+assistant item's `message.available_tools` supplies its complete tool list, and
+`metadata.run_id` / `metadata.trace_id` identify the producing call. No additional
+LLM-run lookups are needed. Missing availability or provenance and unsupported
+provider built-ins exclude the trajectory with a recorded reason.
+
+Preparation reuses saved bindings. For unbound, unjudged exports, it can retrieve
+them from the source trajectory only when its messages match the saved example
+exactly. Interrupted preparation retains completed captures. New source downloads
+require a LangSmith instance that supplies `available_tools`; existing bound
+datasets and explicit contract overrides remain usable.
 
 Fireworks and Baseten render each supported assistant answer with its preceding
 messages and its tool list. Only that answer receives training loss; earlier

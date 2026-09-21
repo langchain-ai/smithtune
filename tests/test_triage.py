@@ -16,6 +16,7 @@ from smithtune.dataset_artifacts import load_conversation
 from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
+from trajectory_fixtures import items
 
 
 def uid(n):
@@ -61,22 +62,20 @@ class API:
                 return SimpleNamespace(stdout=json.dumps({"items": self.thread_roots, "next_cursor": None}))
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
-        elif path.startswith("/api/v2/traces/") and "/runs?" in path:
-            tid = path.split("/")[4]
-            n = UUID(tid).int
-            value = {"items": [{"id": tid, "trace_id": tid, "parent_run_ids": [], "is_root": True,
-                               "project_id": uid(101), "run_type": "chain", "end_time": "2026-09-02T00:01:00Z",
-                               "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)}, "extra": {}},
-                              {"id": uid(n + 1000), "trace_id": tid, "parent_run_ids": [tid], "is_root": False, "project_id": uid(101),
-                               "run_type": "llm", "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)[1:]},
-                               "extra": {"invocation_params": {"tools": []}}}], "cursors": {}}
         elif path == "/v1/trajectory":
             assert body["include"] == {"system_messages": True}
-            assert body["format"] == "messages"
+            assert body["format"] == "ui"
             if "thread_id" in body:
                 value = self.trajectory_pages[body.get("cursor")]
             else:
                 value = {"messages": SYSTEM + messages(UUID(body["trace_id"]).int), "next_cursor": None}
+            page = value
+            wire = []
+            for message in page["messages"]:
+                mid = message.get("id", "")
+                n = int(mid.split("-")[-1]) if mid.startswith(("ai-", "user-")) else UUID(body.get("trace_id", uid(1))).int
+                wire.extend(items([message], trace_id=uid(n), run_id=uid(n + 1000)))
+            value = {"items": wire, "next_cursor": page.get("next_cursor")}
         elif path.startswith("/api/v1/sessions/"):
             value = {"id": uid(101), "start_time": "2026-08-01T00:00:00+00:00"}
         elif path == "/api/v1/datasets":
@@ -135,7 +134,7 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     monkeypatch.setattr(triage_source.time, "sleep", delays.append)
 
     def flaky(command, **kwargs):
-        if "/runs?" in command[2] and not failures:
+        if command[2] == "/v1/trajectory" and not failures:
             failures.append(command)
             raise subprocess.CalledProcessError(1, command, output="429: rate limit exceeded")
         return api(command, **kwargs)
@@ -151,27 +150,6 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
         return api(command, **kwargs)
 
     assert triage_source.snapshot(source(), tmp_path, runner=only_membership) == frozen
-
-
-def test_snapshot_retains_missing_root_but_filters_before_judging(tmp_path):
-    api = API()
-
-    def missing_root(command, **kwargs):
-        response = api(command, **kwargs)
-        if "/runs?" in command[2]:
-            page = json.loads(response.stdout)
-            page["items"] = page["items"][1:]
-            response.stdout = json.dumps(page)
-        return response
-
-    result = run(tmp_path, missing_root)
-    frozen = triage_source.load_snapshot(tmp_path)
-    assert all(trace["root_run_id"] is None and trace["source_warnings"] for trace in frozen["traces"])
-    assert result["kept"] == 0 and result["eligible_conversations"] == 0
-    assert result["filtered_training"] == 1
-    assert frozen["units"][0]["training_error"] == "conversation source has a missing root run"
-    with pytest.raises(PipelineError, match="no complete, kept"):
-        triage.selected_examples(tmp_path)
 
 
 def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
@@ -205,12 +183,13 @@ def tool_conversation(name="lookup", args=None, result=True, repeat=False):
 
     def runner(command, **kwargs):
         response = api(command, **kwargs)
-        if "/runs?" in command[2]:
+        if command[2] == "/v1/trajectory":
             page = json.loads(response.stdout)
-            page["items"][1]["extra"]["invocation_params"]["tools"] = [tool]
-            if command[2].split("/")[4] == uid(1):
-                page["items"].append({**copy.deepcopy(page["items"][1]), "id": uid(9999),
-                                      "outputs": {"messages": [conversation[0]]}})
+            for item in page["items"]:
+                if item["message"].get("role") == "ai":
+                    item["message"]["available_tools"] = [tool]
+                if item["message"].get("id") == "tool-output":
+                    item["metadata"]["run_id"] = uid(9999)
             response.stdout = json.dumps(page)
         return response
 
@@ -274,7 +253,6 @@ def test_cached_triage_prunes_misplaced_system_messages_before_upload(tmp_path, 
     assert (tmp_path / "snapshot.json").read_bytes() == original
 
 
-
 @pytest.mark.parametrize("runner_mode", ["api", "deepagent"])
 @pytest.mark.parametrize("issue,reason", [
     ("system", "misplaced system message"),
@@ -288,13 +266,16 @@ def test_invalid_trajectories_skip_all_paid_work(tmp_path, monkeypatch, runner_m
 
     def runner(command, **kwargs):
         response = api(command, **kwargs)
-        if "/runs?" in command[2] and issue != "system":
+        if command[2] == "/v1/trajectory" and issue != "system":
             page = json.loads(response.stdout)
-            params = page["items"][1]["extra"]["invocation_params"]
-            if issue == "builtin":
-                params["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
-            else:
-                params.pop("tools")
+            for item in page["items"]:
+                message = item["message"]
+                if message.get("role") != "ai":
+                    continue
+                if issue == "builtin":
+                    message["available_tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+                else:
+                    message.pop("available_tools")
             response.stdout = json.dumps(page)
         return response
 
@@ -510,7 +491,7 @@ def test_changed_triaged_messages_are_rejected(tmp_path):
     examples = list(triage.selected_examples(tmp_path))
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     with pytest.raises(PipelineError, match="changed after judging"):
-        dataset.capture_example_contracts(uid(100), examples)
+        dataset.validate_trajectories(examples, len(examples))
 
 
 def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
@@ -896,9 +877,11 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
 
     def source_api(command, **kwargs):
         response = api(command, **kwargs)
-        if media_turn and f"/traces/{uid(media_turn)}/runs?" in command[2]:
+        if media_turn and command[2] == "/v1/trajectory":
             page = json.loads(response.stdout)
-            page["items"][-1]["attachments"] = {"image.png": "recorded"}
+            for item in page["items"]:
+                if item["message"].get("id") == f"user-{media_turn}":
+                    item["message"]["content"] = [{"type": "image", "url": "https://example.invalid/image.png"}]
             response.stdout = json.dumps(page)
         return response
 
