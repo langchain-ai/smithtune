@@ -288,12 +288,14 @@ def _comparison_url(experiments: dict) -> str:
 
 
 class EvaluationPublisher:
-    """One serialized writer for evolving conversation runs and immutable actions."""
+    """Publish immutable actions incrementally and complete conversation runs once."""
 
     def __init__(self, output_dir: Path, config: dict, cases: list[dict], context, results=()):
         self.output_dir, self.config, self.cases = output_dir, config, cases
         self.client, self.examples, self.splits = context
         self.path = output_dir / "langsmith-experiments.json"
+        self.resuming = self.path.exists()
+        self.initial_results = results
         identity = bind_evaluation_snapshot(output_dir, config, cases, context)
         self.receipt = _load_json(self.path) if self.path.exists() else {
             "schema_version": 1, "evaluation_id": str(uuid4()), "created_at": min((row[label].get("started_at", _utc_now())
@@ -378,6 +380,15 @@ class EvaluationPublisher:
                 self.receipt["experiments"][label] = {"id": str(project.id), "name": name, "url": url}
                 self._save()
             self.receipt["comparison_url"] = _comparison_url(self.receipt["experiments"])
+            if self.resuming:
+                # Detect incompatible legacy parents before readiness allows paid
+                # inference. Bulk uploads and indexing waits remain asynchronous.
+                by_example = self._group_results(self.initial_results)
+                for label, project in self.projects.items():
+                    self.phase = f"{label}:parent_preflight"
+                    for example in self.examples:
+                        root, _, _ = self._runs(label, example, by_example[str(example.id)])
+                        self._check_existing_root(root, project.id)
             self._save()
             self.report = {"dataset_id": self.splits["dataset_id"], "dataset_version": self.splits["dataset_version"],
                            "split": "test", "comparison_url": self.receipt["comparison_url"]}
@@ -417,40 +428,31 @@ class EvaluationPublisher:
                 "extra": {"metadata": metadata}}
         return root, children, steps
 
-    def _ensure_root(self, root, project_id):
+    def _check_existing_root(self, root, project_id):
+        """Never patch an old partial parent or overwrite conflicting remote data."""
         self._check_cancelled()
         found = list(self.client.list_runs(project_id=project_id, run_ids=[root["id"]],
                                           start_time=root["start_time"], limit=1))
         if not found:
-            _ensure_runs(self.client, [root], project_id, self._check_cancelled)
             return
         run = found[0]
         _check_run(run, {**root, "outputs": run.outputs}, project_id)
-        wanted = {step["case_id"]: step for step in root["outputs"]["steps"]}
-        previous = (run.outputs or {}).get("steps")
-        if (not isinstance(previous, list) or any(wanted.get(step.get("case_id")) != step for step in previous)
-                or len({step["case_id"] for step in previous}) != len(previous)):
-            raise PipelineError(f"LangSmith run differs from saved replay: {root['id']}")
-        if run.outputs != root["outputs"]:
-            self._check_cancelled()
-            self.client.update_run(root["id"], outputs=root["outputs"], end_time=root["end_time"],
-                                   trace_id=root["trace_id"], dotted_order=root["dotted_order"])
+        if run.end_time is None or (isinstance(run.outputs, dict) and run.outputs.get("status") == "partial"):
+            raise PipelineError(
+                f"LangSmith conversation run {root['id']} in experiment {project_id} is a legacy partial/open parent; "
+                "it cannot be safely updated. Saved results are preserved. Publication recovery requires explicit "
+                "reconciliation of the existing experiment; do not delete artifacts or rerun paid evaluation to repair it."
+            )
+        _check_run(run, root, project_id)
 
-            def visible():
-                self._check_cancelled()
-                runs = list(self.client.list_runs(project_id=project_id, run_ids=[root["id"]],
-                                                   start_time=root["start_time"], limit=1))
-                return bool(runs and runs[0].outputs == root["outputs"])
-
-            _wait_for_indexing(visible, "conversation results")
-
-    def _publish_feedback(self, root, children, steps, project_id):
+    def _publish_feedback(self, root, children, steps, project_id, *, complete):
         expected = [item for item in _expected_feedback(root["id"], steps)
-                    if item["target_run_id"] not in self.verified_children]
+                    if item["target_run_id"] not in self.verified_children
+                    and (complete or item["target_run_id"] != root["id"])]
         times = {value["id"]: value["start_time"] for value in [root, *children]}
         mutable = {root["id"]}
         found = _saved_feedback(self.client, expected, mutable)
-        root_scores = list(self.client.list_feedback(run_ids=[root["id"]]))
+        root_scores = list(self.client.list_feedback(run_ids=[root["id"]])) if complete else []
         for item in expected:
             self._check_cancelled()
             target, key = item["target_run_id"], item["key"]
@@ -475,12 +477,22 @@ class EvaluationPublisher:
 
         _wait_for_indexing(visible, "feedback scores")
 
+    def _group_results(self, results):
+        by_example = {str(example.id): [] for example in self.examples}
+        expected = {case["id"]: case for case in self.cases}
+        seen = set()
+        for result in sorted(results, key=lambda item: item["case"]["id"]):
+            case = result["case"]
+            if case["id"] in seen or expected.get(case["id"]) != case:
+                raise PipelineError(f"publication results differ from saved replay cases: {case['id']}")
+            seen.add(case["id"])
+            by_example[case["example_id"]].append(result)
+        return by_example
+
     def publish(self, results):
         """Publish a cumulative snapshot; skip unchanged conversations in this session."""
         with self._operation():
-            by_example = {str(example.id): [] for example in self.examples}
-            for result in sorted(results, key=lambda item: item["case"]["id"]):
-                by_example[result["case"]["example_id"]].append(result)
+            by_example = self._group_results(results)
             for label, project in self.projects.items():
                 for example in self.examples:
                     self._check_cancelled()
@@ -493,12 +505,17 @@ class EvaluationPublisher:
                         continue
                     root, children, steps = self._runs(label, example, rows)
                     self.phase = f"{label}:run_upload"
-                    self._ensure_root(root, project.id)
+                    self._check_existing_root(root, project.id)
                     missing = [child for child in children if child["id"] not in self.verified_children]
                     _ensure_runs(self.client, missing, project.id, self._check_cancelled)
+                    complete = root["outputs"]["status"] == "complete"
+                    if complete:
+                        # Children may arrive before their parent. Posting a finished
+                        # parent once avoids both repeated PATCHes and staging expiry.
+                        _ensure_runs(self.client, [root], project.id, self._check_cancelled)
                     self.phase = f"{label}:feedback_upload"
                     # Child predictions and feedback are immutable once verified.
-                    self._publish_feedback(root, children, steps, project.id)
+                    self._publish_feedback(root, children, steps, project.id, complete=complete)
                     self.verified_children.update(child["id"] for child in missing)
                     self.published[key] = fingerprint
             self.receipt.update(status="complete" if len(results) == len(self.cases) else "partial",
