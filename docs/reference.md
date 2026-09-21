@@ -139,7 +139,12 @@ when comparing both models, or one experiment when evaluating only a tuned endpo
 Names follow `smithtune-base-<short-model-name>-<evaluation-id>` and
 `smithtune-tuned-<short-model-name>-<same-evaluation-id>`. Both use the base-model
 name; exact model and checkpoint identifiers remain in metadata.
-Each trajectory has a root run, with a child LLM run for each generated action.
+Each completed trajectory has a root run, with a child LLM run for each generated
+action. Finished children and their feedback upload incrementally. The parent,
+its complete outputs, and its aggregate score publish only after all selected
+actions in that trajectory finish. Until then its experiment row is not shown;
+the comparison link is available and local receipts track publication progress.
+This publisher posts completed run outputs rather than updating them.
 Experiment metadata identifies the provider and whether
 predictions came from a sampler or deployed endpoint. When a saved training run
 is available, `parent_training_run_id` records the smithtune run ID and
@@ -179,6 +184,13 @@ cleanup instructions in `sampler.json` to stop paid capacity before resuming.
 Results publish incrementally. If publication fails, rerun `evaluate` with the
 same settings to resume from saved results. The publication receipt records
 progress and any upload error.
+
+An older CLI may have already published a finished parent containing only some
+actions. The new publisher detects these legacy partial/open parents on resume
+and stops before paid work, with the run and experiment IDs. It does not patch,
+delete, or silently replace them. Preserve the original artifacts and resolve
+that existing experiment explicitly; ordinary resume cannot repair this legacy
+state. Fully completed, matching parents remain reusable without another upload.
 
 Evaluation always publishes to LangSmith. Local files are recovery artifacts;
 an upload failure leaves evaluation incomplete until publication succeeds.

@@ -12,8 +12,9 @@ Provider-specific training, sampling, and deployment modules live under
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable
 across upload retries. Verify snapshots and create the experiments before paid
 replay work. Publish saved action pairs in a separate worker; indexing and retries
-must not block inference. Keep conversation outputs and aggregate scores current
-as actions finish, and leave immutable children unchanged. Release owned serving
+must not block inference. Upload finished children and their feedback as actions
+finish. Publish each conversation parent and its aggregate score only once all
+selected actions are complete, rather than updating a partial parent. Release owned serving
 resources before the final publication wait. Bounded publisher shutdown must
 retain its output lock until any in-flight request returns. Tests marked
 `sdk_integration` use an in-memory service boundary; other unit tests mock LangSmith I/O. Production
