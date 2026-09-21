@@ -47,12 +47,30 @@ def test_ui_pages_preserve_messages_and_global_assistant_positions():
     assert wire == original
 
 
-@pytest.mark.parametrize("entry", [None, {}, {"type": "event", "message": {}}, {"message": []}])
-def test_invalid_ui_items_are_not_silently_dropped(entry):
+@pytest.mark.parametrize("retain_empty", [False, True])
+@pytest.mark.parametrize("response, error", [
+    *[({"items": [entry], "next_cursor": None}, "unsupported trajectory item")
+      for entry in [None, {}, {"type": "event", "message": {}}, {"message": []}]],
+    ({}, "invalid trajectory items"),
+    ({"items": None}, "invalid trajectory items"),
+    ({"items": [], "next_cursor": ""}, "invalid or repeated continuation cursor"),
+])
+def test_invalid_ui_items_are_not_silently_dropped(response, error, retain_empty):
     def api(*args, **kwargs):
-        return SimpleNamespace(stdout=json.dumps({"items": [entry], "next_cursor": None}))
-    with pytest.raises(PipelineError, match="unsupported trajectory item"):
-        curation._fetch_trajectory("workspace", "project", {"key": "thread_id", "id": "thread"}, runner=api)
+        return SimpleNamespace(stdout=json.dumps(response))
+    with pytest.raises(PipelineError, match=error):
+        curation._fetch_trajectory("workspace", "project", {"key": "thread_id", "id": "thread"},
+                                   runner=api, retain_empty=retain_empty)
+
+
+def test_empty_page_with_continuation_is_not_an_empty_trajectory(tmp_path):
+    api = API()
+    api.trajectory_pages[None]["messages"] = []
+    expected = api.trajectory_pages["next"]["messages"]
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    unit, = frozen["units"]
+    assert unit["training_error"] is None
+    assert unit["example"]["inputs"]["messages"] == expected
 
 
 @pytest.mark.parametrize("scope", ["trace", "thread"])

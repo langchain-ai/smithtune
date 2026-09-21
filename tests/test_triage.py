@@ -127,6 +127,43 @@ def test_snapshot_expands_to_earlier_turns_without_persisting_raw_trees(tmp_path
     assert api.calls == []
 
 
+def test_empty_trajectory_is_rejected_without_stopping_pull_or_resume(tmp_path):
+    api = API()
+    api.trajectory_pages = {None: {"messages": [], "next_cursor": None}}
+    api.root_pages[0].append({"trace_id": uid(3), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    empty, valid = frozen["units"]
+    assert empty["example"]["inputs"]["messages"] == []
+    assert empty["example"]["metadata"]["source_scope_id"] == "conversation-a"
+    assert empty["training_error"] == "thread_id conversation-a returned no messages"
+    assert valid["training_error"] is None
+
+    # Completed empty and valid units both survive an interrupted pull.
+    (tmp_path / "snapshot.json").unlink()
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("completed trajectory was fetched again")
+
+    resumed = triage_source.snapshot(source(), tmp_path, runner=unexpected_read)
+    assert list(resumed["units"]) == [empty, valid]
+
+    def judge_nonempty(judge, messages_, max_tokens):
+        evidence = json.loads(messages_[1]["content"])
+        assert evidence["untrusted_trajectory"] == valid["example"]["inputs"]["messages"]
+        return judge_call(judge, messages_, max_tokens)
+
+    result = triage.run_triage(source(), tmp_path, runner=unexpected_read, confirm=True,
+                              judge_call=judge_nonempty)
+    assert result["filtered_training"] == 1
+    assert result["kept"] == 1 and result["incomplete"] == 0
+    labels = {row["trajectory_id"]: row for row in map(json.loads, (tmp_path / "labels.jsonl").read_text().splitlines())}
+    assert labels[empty["example"]["id"]]["keep"] == 0
+    assert "returned no messages" in labels[empty["example"]["id"]]["reason"]
+    selected, = triage.selected_examples(tmp_path)
+    assert selected["id"] == valid["example"]["id"]
+    assert selected["inputs"] == valid["example"]["inputs"]
+
+
 def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     api = API()
     failures = []

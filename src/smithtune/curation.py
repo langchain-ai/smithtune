@@ -278,7 +278,7 @@ def _selected(value: Any, matches: dict[str, dict]) -> list[dict[str, str]]:
 
 def _fetch_trajectory(
     workspace_id: str, project_id: str, item: dict[str, str], *,
-    runner: Callable[..., Any],
+    runner: Callable[..., Any], retain_empty: bool = False,
 ) -> dict:
     from smithtune.bindings import trajectory_bindings
 
@@ -308,7 +308,10 @@ def _fetch_trajectory(
         cursors.add(cursor)
         body["cursor"] = cursor
     if not items:
-        raise PipelineError(f"{item['key']} {item['id']} returned no messages")
+        if not retain_empty:
+            raise PipelineError(f"{item['key']} {item['id']} returned no messages")
+        return {"messages": [], "source": None, "trace_ids": [],
+                "training_error": f"{item['key']} {item['id']} returned no messages"}
     # Tool configuration is evidence, not conversation content. Keep the native
     # message list and the existing per-assistant metadata representation.
     messages = [{key: value for key, value in entry["message"].items() if key != "available_tools"} for entry in items]
