@@ -124,12 +124,22 @@ def test_wrong_account_stops_before_promotion(deployment):
     assert events == []
 
 
-def test_standalone_promotion_is_reusable_and_can_register_another_name(deployment):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_standalone_promotion_is_reusable_and_can_register_another_name(deployment, legacy):
     directory, events = deployment
     provider = fireworks.FireworksProvider()
     provider.promote(directory, "model-id", confirm=True)
     provider.promote(directory, "model-id", confirm=True)
     assert [event[0] for event in events] == ["promote", "close"]
+    if legacy:
+        receipt = json.loads((directory / "promotion.json").read_text())
+        receipt.pop("base_model")
+        (directory / "promotion.json").write_text(json.dumps(receipt))
     provider.promote(directory, "another-model", confirm=True)
     assert [event[0] for event in events] == ["promote", "close", "promote", "close"]
-    assert json.loads((directory / "promotion.json").read_text())["output_model_id"] == "another-model"
+    receipt = json.loads((directory / "promotion.json").read_text())
+    assert receipt["output_model_id"] == "another-model"
+    assert receipt["previous_promotions"][0]["output_model_id"] == "model-id"
+    events.clear()
+    deploy(directory)
+    assert [event[0] for event in events] == ["deploy"]

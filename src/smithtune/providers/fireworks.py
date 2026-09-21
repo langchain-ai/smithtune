@@ -526,10 +526,16 @@ class FireworksProvider:
             raise PipelineError("--account-id must match the account owning the selected training checkpoint")
         receipt = run_dir / "promotion.json"
         identity = {"job_id": job_id, "checkpoint": checkpoint, "output_model_id": output_model_id}
+        previous = []
         if receipt.exists():
             saved = _load_json(receipt)
-            if saved.get("output_model_id") == output_model_id:
-                if any(saved.get(key) != value for key, value in identity.items()) or saved.get("base_model", base_model) != base_model:
+            # Keep earlier names when registering another model from this run.
+            previous = [{key: value for key, value in saved.items() if key != "previous_promotions"},
+                        *saved.get("previous_promotions", [])]
+            for promoted in previous:
+                if promoted.get("output_model_id") != output_model_id:
+                    continue
+                if any(promoted.get(key) != value for key, value in identity.items()) or promoted.get("base_model", base_model) != base_model:
                     raise PipelineError("saved promotion does not match the selected checkpoint or base model; choose a new --output-model-id")
                 return
         _set_skill_session(run_dir)
@@ -550,7 +556,8 @@ class FireworksProvider:
             client.close()
         _json_dump(
             receipt,
-            {"promoted_at_utc": _utc_now(), **identity, "base_model": base_model},
+            {"promoted_at_utc": _utc_now(), **identity, "base_model": base_model,
+             **({"previous_promotions": previous} if previous else {})},
         )
 
     def deploy(
