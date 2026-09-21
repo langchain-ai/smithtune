@@ -15,7 +15,7 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smithtune import dataset, dataset_workflow, triage
+from smithtune import data_rights, dataset, dataset_workflow, triage
 from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
@@ -62,10 +62,17 @@ def _training_replay(args):
 
 def _parser() -> argparse.ArgumentParser:
     project = Path.cwd()
-    parser = argparse.ArgumentParser(prog="smithtune", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="smithtune", description=__doc__,
+        epilog=f"Data Rights and Permitted Use: {data_rights.DOCUMENT_URL}",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {get_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="report installed dependencies and configuration without network calls")
+    sub.add_parser(
+        "acknowledge-data-rights", help="acknowledge reading Data Rights and Permitted Use",
+        description=f"Read {data_rights.DOCUMENT_URL}, then acknowledge in an interactive terminal. No network calls are made.",
+    )
 
     models = sub.add_parser("models", help="show supported training models")
     models_sub = models.add_subparsers(dest="models_command", required=True)
@@ -546,6 +553,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(arguments)
     activity = ExitStack()
     try:
+        if args.command not in {"doctor", "models", "skill"}:
+            receipt = data_rights.require_acknowledgment()
+            if args.command == "acknowledge-data-rights":
+                print(json.dumps(receipt, indent=2, sort_keys=True))
+                return
         command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
         activity.enter_context(command_status(f"Running {command}"))
         if args.command == "doctor":

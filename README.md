@@ -13,6 +13,32 @@ Tracing project → dataset → prepare → plan → train + evaluate → LangSm
 | Prepared smithtune data | [Plan and train](#plan-and-train) |
 | A completed smithtune training run | [Evaluate a trained model](#evaluate-a-trained-model) |
 
+## Data rights and permitted use
+
+Read [Data Rights and Permitted Use](docs/data-rights-and-permitted-use.md) before
+using your data with smithtune. On your first workflow command, the CLI asks you
+to acknowledge that you have read this document before processing data or making
+provider requests. Only an explicit `y` or `yes` proceeds; `--confirm` does not
+acknowledge the document.
+
+To complete this step before running scripts, use an interactive terminal:
+
+```bash
+smithtune acknowledge-data-rights
+```
+
+The acknowledgment is stored locally with the document version and UTC timestamp
+at `${XDG_CONFIG_HOME:-~/.config}/smithtune/data-rights.json` (relative
+`XDG_CONFIG_HOME` values are ignored). Subsequent commands under the same user
+and configuration directory reuse it; a new document version requires a new
+acknowledgment. Non-interactive commands without a current acknowledgment stop
+without starting the workflow. Help, version, doctor, model listing, and skill
+export remain available without acknowledgment. The document link is also in
+`smithtune --help`.
+
+This records that you have read the document, not that your workflow has been
+legally approved or that you have accepted a separate EULA.
+
 ## Setup
 
 Install with [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git.
