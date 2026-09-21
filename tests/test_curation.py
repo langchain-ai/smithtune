@@ -727,7 +727,7 @@ def test_oversized_page_narrows_same_cursor_without_partial_import(
                 {"message_index": 4, "run_id": uid(1002), "trace_id": uid(2), "tools": [tool]},
             ]}
         saved, = (tmp_path / "conversations").glob("*.json")
-        assert load_conversation(saved)["metadata"]["smithtune_source"] == api.examples[0]["metadata"]["smithtune_source"]
+        assert load_conversation(saved)["example"]["metadata"]["smithtune_source"] == api.examples[0]["metadata"]["smithtune_source"]
         assert calls[-1]["page_size"] == 1
     else:
         with pytest.raises(PipelineError, match="HTTP 400.*page_size=1.*full conversation") as caught:
