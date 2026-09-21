@@ -222,7 +222,8 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
                                        end_time=captured_at, runner=runner) if thread else [tid]
         if tid not in unit_traces:
             raise PipelineError("selected root was not found in its conversation")
-        trajectory = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid}, runner=runner)
+        trajectory = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid},
+                                       runner=runner, retain_empty=True)
         all_messages = trajectory["messages"]
         unit_records = [{"trace_id": trace_id, "thread_id": thread, "project_id": project} for trace_id in unit_traces]
         if thread:

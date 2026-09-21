@@ -95,6 +95,31 @@ def test_no_triage_is_explicit_and_saved(tmp_path):
     assert run(tmp_path, api, confirm=True, judge=no_judge)["created"] == 1
 
 
+@pytest.mark.parametrize("no_triage", [False, True])
+@pytest.mark.parametrize("include_valid", [False, True])
+def test_empty_trajectories_never_reach_judging_or_upload(tmp_path, no_triage, include_valid):
+    api = API()
+    api.trajectory_pages = {None: {"messages": [], "next_cursor": None}}
+    if include_valid:
+        api.root_pages[0].append({"trace_id": uid(3), "thread_id": None,
+                                 "start_time": "2026-09-02T01:00:00Z"})
+
+    def judge(slot, prompt, tokens):
+        assert not no_triage and include_valid
+        assert json.loads(prompt[1]["content"])["untrusted_trajectory"]
+        return judge_call(slot, prompt, tokens)
+
+    result = run(tmp_path, api, name="nonempty", no_triage=no_triage, confirm=True, judge=judge)
+    assert result["status"] == "complete"
+    assert result["rejected"] == 1
+    assert result["eligible"] == len(api.imported) == len(api.datasets) == int(include_valid)
+    if include_valid:
+        assert result["created"] == 1
+        valid = triage_source.load_snapshot(tmp_path)["units"][1]["example"]
+        assert api.imported[0]["inputs"] == valid["inputs"]
+        assert api.imported[0]["metadata"]["source_scope_id"] == uid(3)
+
+
 @pytest.mark.parametrize("option", [{"rules": ["good"]}, {"judges": ["gpt-5.6-terra"]}, {"rubric_path": "unused.md"}])
 def test_no_triage_cannot_discard_judging_criteria(tmp_path, option):
     api = API()
