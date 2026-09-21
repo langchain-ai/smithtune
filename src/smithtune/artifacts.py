@@ -54,21 +54,34 @@ def exclusive_output(argument: str):
 
 
 def _json_dump(path: Path, value: Any) -> None:
-    _atomic_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+    def chunks():
+        yield from json.JSONEncoder(indent=2, sort_keys=True).iterencode(value)
+        yield "\n"
+    _atomic_chunks(path, chunks())
 
 
 def _jsonl_dump(path: Path, rows: Iterable[dict[str, Any]]) -> None:
-    _atomic_text(path, "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows))
+    def chunks():
+        encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+        for row in rows:
+            yield from encoder.iterencode(row)
+            yield "\n"
+    _atomic_chunks(path, chunks())
 
 
 def _atomic_text(path: Path, text: str) -> None:
+    _atomic_chunks(path, (text,))
+
+
+def _atomic_chunks(path: Path, chunks: Iterable[str]) -> None:
     """An interrupted write must leave the previous complete artifact readable."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
             temporary = Path(handle.name)
-            handle.write(text)
+            for chunk in chunks:
+                handle.write(chunk)
         temporary.replace(path)
     finally:
         if temporary is not None:

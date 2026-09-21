@@ -12,8 +12,9 @@ Provider-specific training, sampling, and deployment modules live under
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable
 across upload retries. Verify snapshots and create the experiments before paid
 replay work. Publish saved action pairs in a separate worker; indexing and retries
-must not block inference. Keep conversation outputs and aggregate scores current
-as actions finish, and leave immutable children unchanged. Release owned serving
+must not block inference. Upload finished children and their feedback as actions
+finish. Publish each conversation parent and its aggregate score only once all
+selected actions are complete, rather than updating a partial parent. Release owned serving
 resources before the final publication wait. Bounded publisher shutdown must
 retain its output lock until any in-flight request returns. Tests marked
 `sdk_integration` use an in-memory service boundary; other unit tests mock LangSmith I/O. Production
@@ -93,6 +94,14 @@ and receipt persistence. No model/GPU serving profile has been validated by
 these offline tests; deployment runs text and tool-call smoke tests before
 marking an endpoint ready.
 
+`bindings.py` normalizes each trajectory UI item's `available_tools` and run/trace
+metadata into the saved per-assistant tool representation. Training,
+validation, and replay must consume the same tool list for each assistant target.
+The Fireworks loader uses smithtune's target renderer with the official cookbook's
+JSONL dataset and batching; changing only preparation masks is insufficient.
+Regression coverage includes actual loader masks, tool additions/removals/schema
+changes, local upload/prepare roundtrips, and capture checkpoint recovery.
+
 ## Dependency compatibility
 
 Transformers is pinned to the patched `5.10.4`. The upstream Fireworks cookbook
@@ -114,7 +123,8 @@ remains separate from upstream template coverage.
 
 The additional Baseten models use `native_rendering.py`: it calls the official
 formatter, verifies each response against its inference prompt, and coalesces
-only identical token prefixes. Keep its implementation version in the prepared
+only identical token prefixes. The training boundary requests each final assistant
+target separately, with history loss masked out. Keep its implementation version in the prepared
 identity when changing formatting or masks. Test model-specific stop tokens,
 empty reasoning, history changes, and Unicode against the pinned real tokenizers.
 

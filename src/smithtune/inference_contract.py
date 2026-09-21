@@ -41,7 +41,12 @@ def canonical_json(value: Any) -> str:
 
 
 def json_sha256(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode()).hexdigest()
+    # Preserve canonical fingerprints without whole-document string/byte copies.
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    for chunk in encoder.iterencode(value):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def content_sha256(content: Any) -> str:
@@ -214,7 +219,10 @@ class InferenceContract:
         max_tokens: int,
         json_mode: bool = False,
     ) -> dict[str, Any]:
-        self.validate_messages(messages)
+        # Per-target replay has already validated each historical action with
+        # its own binding. Removed or changed tools must remain valid history.
+        if "message_index" not in self.provenance:
+            self.validate_messages(messages)
         if not isinstance(model, str) or not model:
             raise ContractError("model must be a non-empty string")
         if max_tokens < 1:

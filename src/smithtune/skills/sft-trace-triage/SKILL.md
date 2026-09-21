@@ -46,28 +46,53 @@ should explain the saved counts and remaining failures to the user.
 
 ## Agent helping a user
 
-Run `smithtune doctor` and `smithtune dataset triage --help` for setup and source
-options. The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks,
-plus GPT-5.6 Terra on OpenAI. Use one `--judges` list to choose models; other
-models use `provider:model`. Use `--rule` for project selection rules.
+Use [discovery.md](discovery.md) to inspect varied full trajectories with the
+user, agree on useful training examples, and write a selection rubric. Learn
+the application's task and tools from its traces; keep domain-specific rules
+and evidence in local run files. The coordinator above only dispatches saved
+tasks; it must not start an interview or change the rubric.
 
-1. Download and preview: `smithtune dataset triage <directory>` with source IDs,
-   time window, and optional `--limit` / `--filter`. Roots from the same thread
-   form one full trajectory. Review the conversation and vote counts.
-2. When paid judging is authorized: `smithtune dataset triage <directory> --confirm`.
-   Repeat this command to resume. Completed votes are retained.
-3. Read `labels.jsonl` and `report.md`. Each row has `trajectory_id`, `keep`
-   (1 or 0), and `reason`. Explain the counts and main reasons to the user.
-   Request errors have a clear incomplete reason and do not count as votes.
-4. When upload is authorized: `smithtune dataset create --triage-dir <directory>
-   --name <name> --confirm`. This imports kept conversations with the exact saved
-   messages and tool schemas. Inspect `dataset-import.json` after a partial write.
-5. Pass the dataset ID to the existing `prepare -> plan -> train` flow.
+Run `smithtune doctor` and `smithtune dataset create --help` for setup. Use one
+saved directory across `pull`, `triage`, `push`, `create`, and `resume`.
 
-Do not refetch or edit messages after judging. Changed source, rubric, or models
-need a new run. Labels remain local; this command does not write trace feedback.
-Fireworks calls always use its official API. Replay evaluation is a separate
-flow under `evaluate`.
+First map the user's selection criteria to the project's actual feedback,
+metadata, tags, and error fields. Use `--filter` for criteria those fields express.
+Do not invent feedback keys, thresholds, or the meaning of missing values.
+Write `rubric.md` with the task, keep/drop criteria, and concrete examples.
+Review it with the user, then pass `--rubric ./rubric.md` for council judging.
+Use `--rule` as a shortcut for short additional criteria.
 
-Direct Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway` uses
-`LANGSMITH_GATEWAY_API_KEY`.
+- `dataset create DIR` composes downloading, optional judging, and uploading.
+  A filter with no council criteria skips inference. Without a filter, create
+  defaults to council judging. `--rubric`, `--rule`, or `--judges` requests judging even with
+  a filter; filtering always happens before trajectory downloads and judging.
+  `--no-triage` explicitly skips council and cannot discard judging criteria.
+- Preview without `--confirm`: review the selected path and pending work. When
+  the planned judging and uploads are authorized, repeat with `--confirm`.
+- For staged work, use `dataset pull DIR` with source IDs, time window, and
+  optional `--filter` / `--limit`. Read examples and agree on the rubric before
+  running `dataset triage DIR --rubric ./rubric.md` to preview. Check the saved
+  text in `plan.json`, then use `dataset triage DIR --confirm` to judge.
+  Inspect a small batch's decisions before scoring the larger pool.
+  Read `labels.jsonl`, individual votes in `judgments.jsonl`, and `report.md`
+  and explain the counts and reasons. Failed judge requests remain incomplete.
+- Preview upload with `dataset push DIR --name NAME` (or `--dataset-id ID`).
+  Add `--confirm` when upload is authorized. Push respects any council plan
+  already attached to the directory. Pull followed directly by push uses the
+  source filters and structural checks without model calls.
+- `dataset resume DIR` shows pending stages without network calls. With
+  `--confirm`, it continues the saved workflow and reuses completed work.
+- Pass the resulting dataset ID to `prepare -> plan -> train`.
+
+The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks plus
+GPT-5.6 Terra on OpenAI. Choose models with `--judges`; other models use
+`provider:model`. The rubric and rules apply to whole trajectories. Confirm and
+resume use the saved rubric text even if its original file changes or is deleted.
+Source and destination
+are frozen; council rules can change before judging starts. Use a new directory
+to change rules after votes or to review a different source selection.
+
+Preserve recorded messages and saved per-assistant tool availability. Labels remain local; these
+commands do not write trace feedback. Replay evaluation is separate under
+`evaluate`. Fireworks judging uses its official API. Direct Anthropic uses
+`ANTHROPIC_API_KEY`; `anthropic-gateway` uses `LANGSMITH_GATEWAY_API_KEY`.

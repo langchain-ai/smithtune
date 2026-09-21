@@ -1558,6 +1558,8 @@ def _load_prepared_data(data_dir: Path) -> tuple[dict[str, Any], list[dict[str, 
         raise PipelineError(f"cannot read prepared Baseten data: {exc}") from exc
     if not isinstance(manifest, dict):
         raise PipelineError("prepared Baseten manifest is not an object")
+    from smithtune.dataset import require_current_preparation
+    require_current_preparation(manifest)
     split = manifest.get("split")
     if not isinstance(split, dict):
         raise PipelineError("prepared Baseten manifest has no valid split counts")

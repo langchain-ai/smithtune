@@ -1,176 +1,168 @@
 # Dataset curation
 
-[Back to the workflow](../README.md)
+Use one directory throughout curation. Each trajectory becomes one LangSmith
+dataset example. `create` combines the stages; use them separately when you want
+to inspect or change the plan before continuing.
 
-## Create a dataset from trajectories
+| Command | Behavior |
+| --- | --- |
+| `dataset pull DIR` | Download trajectories and per-assistant tool lists |
+| `dataset triage DIR` | Preview council judging; `--confirm` runs it |
+| `dataset push DIR` | Preview upload; `--confirm` uploads |
+| `dataset create DIR` | Download, optionally judge, and upload |
+| `dataset resume DIR` | Show pending work; `--confirm` continues it |
 
-Create a dataset directly from a tracing project and filters:
+Without `--confirm`, `create` may download but never judges or uploads. `resume`
+without `--confirm` reads only local state. A directory is generated if omitted
+from a new `pull` or `create`; keep the returned `run_dir` for subsequent commands.
+`dataset publish-splits` remains a separate operation on prepared data.
+
+## Choose filters or council judging
+
+Use existing feedback, metadata, tags, and errors when they express your criteria:
 
 ```bash
-smithtune dataset create \
+smithtune dataset create data/datasets/my-sft \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --name my-sft-dataset \
-  --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
+
+smithtune dataset create data/datasets/my-sft --confirm
 ```
 
-Each matching root selects its whole thread when it has a thread ID, otherwise
-its single trace. Thread examples include turns outside the filter window. Use
-the returned dataset ID in `prepare`.
+An explicit `--filter` with no council criteria takes the path with **no model
+calls**. The CLI uses the expression you or your coding agent supply; it does not
+translate natural language or guess whether a score means success. Use your
+project's actual fields and [LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
 
-`--end-time` defaults to now, and `--start-time` defaults to 24 hours before the
-resolved end. Omit both for the last 24 hours, or pass either or both as ISO 8601
-timestamps with timezones. These defaults also apply to a new `dataset triage` run.
-
-- Filters apply to trace root runs. The example selects correctness feedback of at least 0.9; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
-- `--limit` is required, at most 2000. Querying stops once that many distinct trajectories are found, in the order LangSmith returns roots; no sampling is applied
-- Each trajectory is fetched with the trajectory API and stored as one example; `--concurrency` imports up to 4 at once (the default). Transient fetch failures are retried up to three times; example writes are never retried
-- If LangSmith rejects an oversized trajectory response page, creation and triage retry the same cursor with `page_size=1` and follow every remaining page. Messages are preserved in full; a size rejection at the smallest page stops the download without importing a partial conversation
-- Use `--name` for a new dataset or `--dataset-id` for an existing dataset in the same workspace. If an import fails, inspect the returned receipt before retrying; uploads do not resume automatically
-
-Direct creation and triage both save complete examples under `conversations/` in a local run
-directory, defaulting to `data/datasets/<generated-id>/`. Creation saves each
-trajectory before uploading it, alongside the selection and import receipt.
-Use `dataset create --run-dir <directory>` to choose a location. The returned
-`run_dir` identifies the saved files; they remain on disk after upload or failure.
-
-Before each example upload, creation validates the saved messages and captures
-the tool union from all source LLM runs, including tools that were not called.
-It excludes whole trajectories with malformed tool pairs, repeated tool-call IDs,
-unsupported content such as images, conflicting tool schemas, unknown tools,
-invalid arguments, or system messages after the first position. A leading system
-message is allowed and preserved; messages are never repaired or truncated.
-Compatible optional tool arguments and description changes use the same merge
-rules as `prepare`.
-
-The JSON result includes `rejected`; new-dataset receipts include `rejections`
-with reason codes, source identities, and saved conversation paths. Rejected
-trajectories are not replaced with additional selections, so the uploaded count
-can be less than `--limit`. If all selected trajectories are rejected, the new
-dataset is empty and the receipt still records every rejection. Source-read or
-schema-resolution failures stop the import rather than counting as rejections.
-These checks need LangSmith access, but no training provider or tokenizer;
-reasoning policy, rendering compatibility, and context limits remain in `prepare`.
-
-To add trajectories to an existing dataset, use the same source flags with
-`--dataset-id` instead of `--name`:
+For criteria requiring trajectory content, add `--rule`:
 
 ```bash
-smithtune dataset create \
+smithtune dataset create data/datasets/grounded \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --dataset-id '<dataset-id>' \
-  --start-time 2026-09-08T00:00:00Z --end-time 2026-09-15T00:00:00Z \
-  --limit 100
+  --name grounded-trajectories \
+  --filter 'eq(error, false)' \
+  --rule 'Keep answers supported by the retrieved documentation.'
 ```
 
-Sources match by workspace, project, scope and scope ID. New trajectories are
-added; unchanged ones are skipped. Longer snapshots update the existing example
-only when its saved messages are an exact prefix, preserving its ID and unrelated
-metadata. Shorter or conflicting snapshots, or duplicate sources already in the
-destination, stop the import. Extending a triaged example requires fresh passing
-triage. Run only one import into a dataset at a time.
+The filter narrows the source query first; the council then judges those
+trajectories against the rule. Repeat `--rule` for multiple criteria, or pass a
+file with `--rubric` as described below. `--rubric` and `--judges`
+also requests council judging. Without a filter, `create` defaults to council
+review. Use `--no-triage` to explicitly download and upload without review;
+it cannot discard council rules or bypass an existing council plan.
 
-Existing-dataset imports download with bounded concurrency and write sequentially.
-The receipt records created, updated, skipped and rejected counts, an action log,
-and any pending write whose outcome needs checking. Rejected actions record their
-reason and saved conversation path without creating or updating an example.
-Existing remote examples are never deleted. Earlier successful writes remain if a
-later trajectory fails.
+The preview reports the selected path, pending stages, and the next command.
+Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
+
+## Source selection
+
+- Filters apply to **root runs**. A matching root selects its whole thread when
+  it has one, otherwise its trace. Earlier turns outside the filter window remain
+  part of the trajectory.
+- `--end-time` defaults to now; `--start-time` defaults to 24 hours before it.
+  Explicit times must use ISO 8601 with a timezone. Resume reuses the original bounds.
+- `--limit` defaults to 100, up to 2000 distinct trajectories. Selection follows
+  the order LangSmith returns roots and stops paging once the limit is reached.
+  Rejections are not replaced, and the limit is not a target dataset size.
+- `--concurrency` defaults to 4; downloads cap at 4 workers and uploads are sequential.
+  Use `--concurrency 1` to reduce memory peaks for very large trajectories.
+- Oversized trajectory response pages are retried at the same cursor with `page_size=1`.
+  All messages and per-assistant tool metadata are preserved. If the smallest page
+  still exceeds the server limit, the download stops without saving a partial trajectory.
+- Source settings are frozen in the directory. Use a new directory to select a
+  different project, time window, filter, or limit.
+
+Whole trajectories with invalid messages or unsupported tool evidence are
+excluded before council calls and upload. The triage preview lists rejection
+reasons and counts only eligible judge tasks. Recorded messages are preserved. The result includes
+`eligible` and `rejected` counts; saved units retain validation errors. Model-specific
+rendering and context checks remain in `prepare`.
+
+Saved trajectories are read individually during judging and upload; queued judge
+work holds IDs, not message bodies. Downloads retrieve messages and tool availability
+from the trajectory endpoint without fetching raw run trees. Hashing and file
+writes avoid whole-document copies. Each active full trajectory must still fit in memory. Legacy monolithic
+snapshots remain readable but must fit in memory; new downloads use individual files.
 
 ## Label full trajectories with an agent council
 
-Optionally use `dataset triage` to select training trajectories with model judges before
-creating a dataset. Each judge sees the full trajectory; a majority keep vote
-selects it for import once all judges finish. Ties are dropped.
-
-The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks, plus
-GPT-5.6 Terra on OpenAI. Set `LANGSMITH_API_KEY`, `FIREWORKS_API_KEY`, and
-`OPENAI_API_KEY`, then install the optional agent support:
-
 ```bash
-uv tool install --upgrade --python 3.12 \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
-```
-
-**1. Download and preview:**
-
-```bash
-smithtune dataset triage data/datasets/my-sft \
+smithtune dataset pull data/datasets/reviewed \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
   --limit 100
+
+smithtune dataset triage data/datasets/reviewed \
+  --rubric ./rubric.md
+smithtune dataset triage data/datasets/reviewed --confirm
+
+smithtune dataset push data/datasets/reviewed --name reviewed-sft
+smithtune dataset push data/datasets/reviewed --confirm
 ```
 
-This saves trajectories and a judging plan locally, without calling judges.
-Each judge receives the full saved message list, including system messages.
-`--limit` samples root traces; roots in the same thread become one trajectory,
-including history outside the time window. Repeat an interrupted download to
-reuse saved progress. Omit the directory to generate one under `data/datasets/`.
-Select runs that contain trajectories. For example, use
-`--filter 'eq(run_type,"chain")'` for agent runs in a project that also records
-standalone prompt-rendering runs. A source with no messages stops the download
-and reports its ID.
+Write the task description, keep/drop criteria, and concrete examples in a
+UTF-8 `rubric.md` file. `--rubric` works with both `triage` and `create`; it
+requests council judging even when a source filter is set. It can accompany
+short additional `--rule` criteria and cannot be combined with `--no-triage`.
 
-**2. Run the judges:**
+The preview saves the exact text as `selection_rubric` in `plan.json` and the
+workflow checkpoint. Each judge receives it alongside the standard quality
+checks and JSON output format. Confirm and resume use the saved text even if
+the original file changes or is deleted. Before scoring, preview again with
+`--rubric` to replace it. After votes start, changed criteria need a new directory.
+
+For help choosing criteria, `smithtune skill export --output ./skills` exports
+the general-purpose triage skill and discovery guide. The agent reads varied
+traces, discusses concrete examples with the user, writes an agreed rubric,
+and passes the file to the CLI. Inspect a small council batch before scoring
+the larger pool. Domain-specific rules and private examples stay in local run
+files; the CLI saves the rubric but does not verify human agreement.
+
+`triage` reads only downloaded trajectories. Its default council is DeepSeek
+V4.1 Flash and GLM-5.3-Flash on Fireworks plus GPT-5.6 Terra on OpenAI, managed by a
+Deep Agent. Install the optional `deepagents` extra from the README and configure
+credentials for the selected providers. Use `--judges` to choose aliases or
+`provider:model`, and `--concurrency` to set concurrent judge tasks (default 4,
+maximum 16). Direct Anthropic uses `ANTHROPIC_API_KEY`; the Anthropic gateway uses
+`LANGSMITH_GATEWAY_API_KEY`.
+
+Every council member judges the full trajectory. All votes must finish; a strict
+majority keeps it, and ties drop it. Multimodal and provider context-window
+rejections are excluded without truncation. Request failures remain incomplete.
+`labels.jsonl` contains `trajectory_id`, `keep`, and `reason`; `report.md` summarizes
+them. Rules and models can change during preview, but changing them after votes
+requires a new directory.
+
+Push respects any council plan attached to the directory and waits for judging
+to finish. Pull followed directly by push uses structural validation without a
+council. No eligible examples means no empty remote dataset is created.
+
+## Upload and recover
+
+Use `--name` for a new dataset, or `--dataset-id` for an existing dataset in the
+source workspace. The destination is saved for subsequent commands.
+
+Sources match by workspace, project, scope, and scope ID. Unchanged examples are
+skipped. Longer trajectories extend the existing example only when its messages
+are an exact prefix, retaining its ID and unrelated metadata. Conflicting or
+shorter histories stop the import. Existing tool lists and producing-run identities must also match the message
+prefix. Use a new dataset when the destination lacks this per-assistant evidence.
+Run one import per destination at a time.
 
 ```bash
-smithtune dataset triage data/datasets/my-sft --confirm
+smithtune dataset resume data/datasets/my-sft
+smithtune dataset resume data/datasets/my-sft --confirm
 ```
 
-Judging uses paid inference. The CLI saves each vote; repeat this command to
-retry incomplete work with the saved settings. Completed runs make no new model
-calls. Read `report.md` for results, `labels.jsonl` for keep/drop labels, and
-`judgments.jsonl` for individual votes.
+Resume uses the original selection, completed downloads, votes, and upload
+receipts. Unfinished trajectory downloads restart from their beginning. Uncertain
+writes are checked by saved IDs before retrying; changed remote content stops
+recovery for inspection. Preserve the directory and its content-verified files.
 
-- Multimodal trajectories are excluded before judging.
-- If any judge rejects a trajectory as too long, the whole trajectory is
-  excluded without truncation.
-- Other request failures remain incomplete and can be retried.
+The positional directory replaces `--run-dir`, `--output`, and `--triage-dir`.
+For older checkpoints, `resume DIR --confirm` can finish direct imports; saved
+triage snapshots can use `triage`, `push`, and `resume`. Receipts predating the
+recovery format still require inspection and a new directory with `--dataset-id`.
 
-**3. Import accepted trajectories:**
-
-```bash
-smithtune dataset create --triage-dir data/datasets/my-sft --name selected-sft --confirm
-```
-
-Import uses the saved messages and tool schemas; unsupported training content
-is excluded. Pass the returned dataset ID to `prepare`. To add to an existing
-dataset, replace `--name` with `--dataset-id '<dataset-id>'`.
-
-Use a new triage directory when trajectories or judging settings change.
-Extended trajectories need fresh passing triage. After a partial import,
-inspect `dataset-import.json` before retrying; uploads do not resume automatically.
-
-### Change the council or selection rules
-
-Add `--judges` and `--rule` to the preview command:
-
-```bash
-smithtune dataset triage data/datasets/custom-council \
-  --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-08T00:00:00Z \
-  --judges deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra \
-  --rule 'Drop answers that claim an action succeeded without evidence.'
-```
-
-Use any subset of these aliases, or `provider:model` for other models, such as
-`anthropic:claude-sonnet-5`. The first model also runs the coordinator. Direct
-Anthropic uses `ANTHROPIC_API_KEY`; `anthropic-gateway:<model-id>` uses
-`LANGSMITH_GATEWAY_API_KEY`. The council and rules are saved for resume.
-
-For Baseten judges, set `BASETEN_API_KEY` and use `baseten:<model-slug>` from
-[Baseten Model APIs](https://docs.baseten.co/inference/model-apis/overview).
-For example, this council mixes Baseten, Fireworks, and OpenAI:
-
-```bash
---judges baseten:deepseek-ai/DeepSeek-V4.1-Flash,glm-5.3-flash,gpt-5.6-terra
-```
-
-Baseten uses `https://inference.baseten.co/v1`; no deployment is needed.
-The first model also runs the coordinator. Baseten calls request reasoning off,
-except GLM-5.3 variants, which require low reasoning. This supports managed
-Model APIs; custom Baseten deployment URLs are not accepted.
-
-Use `smithtune dataset triage --help` for filters, concurrency, and other options.
-For coding agents, `smithtune skill export --output ./skills` exports the triage
-skill and rubric. See the [trace-labeling audit](trace-labeling-audit.md)
-for detailed behavior and limitations.
+After upload, pass the returned dataset ID to `smithtune prepare`. Saved tool
+availability travels with the examples; see [per-assistant tools](reference.md#per-assistant-tools-and-training-targets).

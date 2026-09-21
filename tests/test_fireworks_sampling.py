@@ -1,3 +1,5 @@
+
+from binding_fixtures import bound_row
 import copy
 import json
 from types import SimpleNamespace
@@ -127,9 +129,9 @@ def test_partial_sampler_startup_closes_resources(tmp_path, monkeypatch):
 def replay_data(tmp_path, monkeypatch):
     data = tmp_path / "data"
     write_manifest(data)
-    row = {"messages": [{"role": "user", "content": "question"},
+    row = bound_row({"messages": [{"role": "user", "content": "question"},
                         {"role": "assistant", "content": "answer"}],
-           "_source": {"example_id": "one", "source_scope": "thread", "source_scope_id": "thread"}}
+           "_source": {"example_id": "one", "source_scope": "thread", "source_scope_id": "thread"}})
     (data / "prepared/test.jsonl").write_text(json.dumps(row) + "\n")
     monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *_: ([{**case, "prompt_tokens": 2} for case in cases], []))
     return data

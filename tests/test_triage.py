@@ -1,18 +1,22 @@
 import copy
 import json
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
+from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 import pytest
 
-from smithtune import cli, curation, dataset, triage, triage_judges, triage_source
+from smithtune import cli, curation, dataset, dataset_workflow, triage, triage_judges, triage_source
+from smithtune.bindings import evidence_hash, read_bindings, tool_contract
 from smithtune.dataset_artifacts import load_conversation
-from smithtune.inference_contract import json_sha256, parse_inference_contract
+from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import DEFAULT_MODEL
+from trajectory_fixtures import items
 
 
 def uid(n):
@@ -33,6 +37,7 @@ class API:
         self.calls = []
         self.imported = []
         self.failure = None
+        self.datasets = {}
         self.root_pages = [[{"trace_id": uid(2), "thread_id": "conversation-a", "start_time": "2026-09-02T00:00:00Z", "feedback_stats": None}]]
         self.trajectory_pages = {
             None: {"messages": SYSTEM + messages(1), "next_cursor": "next"},
@@ -57,29 +62,40 @@ class API:
                 return SimpleNamespace(stdout=json.dumps({"items": self.thread_roots, "next_cursor": None}))
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
-        elif path.startswith("/api/v2/traces/") and "/runs?" in path:
-            tid = path.split("/")[4]
-            n = UUID(tid).int
-            value = {"items": [{"id": tid, "trace_id": tid, "parent_run_ids": [], "is_root": True,
-                               "project_id": uid(101), "run_type": "chain", "end_time": "2026-09-02T00:01:00Z",
-                               "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)}, "extra": {}},
-                              {"id": uid(n + 1000), "trace_id": tid, "parent_run_ids": [tid], "is_root": False, "project_id": uid(101),
-                               "run_type": "llm", "inputs": {"messages": messages(n)[:1]}, "outputs": {"messages": messages(n)[1:]},
-                               "extra": {"invocation_params": {"tools": []}}}], "cursors": {}}
         elif path == "/v1/trajectory":
             assert body["include"] == {"system_messages": True}
-            assert body["format"] == "messages"
+            assert body["format"] == "ui"
             if "thread_id" in body:
                 value = self.trajectory_pages[body.get("cursor")]
             else:
                 value = {"messages": SYSTEM + messages(UUID(body["trace_id"]).int), "next_cursor": None}
+            page = value
+            wire = []
+            for message in page["messages"]:
+                mid = message.get("id", "")
+                n = int(mid.split("-")[-1]) if mid.startswith(("ai-", "user-")) else UUID(body.get("trace_id", uid(1))).int
+                wire.extend(items([message], trace_id=uid(n), run_id=uid(n + 1000)))
+            value = {"items": wire, "next_cursor": page.get("next_cursor")}
         elif path.startswith("/api/v1/sessions/"):
             value = {"id": uid(101), "start_time": "2026-08-01T00:00:00+00:00"}
         elif path == "/api/v1/datasets":
-            value = {"id": uid(200)}
+            value = copy.deepcopy(body)
+            self.datasets[body["id"]] = value
         elif path == "/api/v1/examples":
             self.imported.append(body)
             value = {"id": body["id"]}
+        elif path.endswith("/versions?limit=1"):
+            value = [{"as_of": "2026-09-15T00:00:00+00:00"}] if self.imported else []
+        elif path.startswith("/api/v1/datasets/"):
+            value = self.datasets.get(path.rsplit("/", 1)[1])
+            if value is None:
+                raise PipelineError("HTTP 404")
+        elif path.startswith("/api/v1/examples?"):
+            value = self.imported
+        elif path.startswith("/api/v1/examples/"):
+            value = next((ex for ex in self.imported if ex["id"] == path.rsplit("/", 1)[1]), None)
+            if value is None:
+                raise PipelineError("HTTP 404")
         else:
             raise AssertionError(path)
         return SimpleNamespace(stdout=json.dumps(value))
@@ -97,15 +113,15 @@ def run(tmp_path, api=None, **kwargs):
     return triage.run_triage(source(), tmp_path, runner=api or API(), judge_call=judge_call, confirm=True, sleeper=lambda _: None, **kwargs)
 
 
-def test_snapshot_expands_to_earlier_turns_and_preserves_tree(tmp_path):
+def test_snapshot_expands_to_earlier_turns_without_persisting_raw_trees(tmp_path):
     api = API()
     frozen = triage_source.snapshot(source(), tmp_path, runner=api)
     assert frozen["selected_trace_ids"] == [uid(2)]
     assert [trace["trace_id"] for trace in frozen["traces"]] == [uid(1), uid(2)]
-    assert frozen["traces"][1]["runs"][1]["parent_run_id"] == uid(2)
+    assert all("runs" not in trace for trace in frozen["traces"])
     assert frozen["units"][0]["example"]["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
     conversation, = (tmp_path / "conversations").glob("*.json")
-    assert load_conversation(conversation) == frozen["units"][0]["example"]
+    assert load_conversation(conversation) == frozen["units"][0]
     api.calls.clear()
     assert triage_source.snapshot(source(), tmp_path, runner=api) == frozen
     assert api.calls == []
@@ -118,7 +134,7 @@ def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
     monkeypatch.setattr(triage_source.time, "sleep", delays.append)
 
     def flaky(command, **kwargs):
-        if "/runs?" in command[2] and not failures:
+        if command[2] == "/v1/trajectory" and not failures:
             failures.append(command)
             raise subprocess.CalledProcessError(1, command, output="429: rate limit exceeded")
         return api(command, **kwargs)
@@ -155,32 +171,15 @@ def test_oversized_trajectory_pages_bypass_read_retries_and_cache_smaller_pages(
 
     cached = partial(triage_source._fetch, runner=runner, cache_dir=tmp_path)
     for _ in range(2):
-        assert curation._fetch_trajectory(uid(100), uid(101), {
-            "key": "thread_id", "id": "conversation-a"}, runner=cached) == SYSTEM + messages(1) + messages(2)
+        result = curation._fetch_trajectory(uid(100), uid(101), {
+            "key": "thread_id", "id": "conversation-a"}, runner=cached)
+        assert result["messages"] == SYSTEM + messages(1) + messages(2)
+        assert result["training_error"] is None
+        assert len(result["source"]["assistant_runs"]) == 2
     assert [(body.get("cursor"), body.get("page_size")) for body in attempts] == [
         (None, None), ("next", None), ("next", 1), ("next", None)]
     assert len(list(tmp_path.glob("*.json"))) == 2  # Only successful responses are cached.
     assert delays == []
-
-
-def test_snapshot_retains_missing_root_for_judging_but_blocks_import(tmp_path):
-    api = API()
-
-    def missing_root(command, **kwargs):
-        response = api(command, **kwargs)
-        if "/runs?" in command[2]:
-            page = json.loads(response.stdout)
-            page["items"] = page["items"][1:]
-            response.stdout = json.dumps(page)
-        return response
-
-    result = run(tmp_path, missing_root)
-    frozen = triage_source.load_snapshot(tmp_path)
-    assert all(trace["root_run_id"] is None and trace["source_warnings"] for trace in frozen["traces"])
-    assert result["kept"] == 1 and result["eligible_conversations"] == 0
-    assert frozen["units"][0]["training_error"] == "conversation source has a missing root run"
-    with pytest.raises(PipelineError, match="no complete, kept"):
-        triage.selected_examples(tmp_path)
 
 
 def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
@@ -198,12 +197,14 @@ def test_snapshot_preserves_content_unsupported_for_training(tmp_path):
                for line in (tmp_path / "labels.jsonl").read_text().splitlines())
 
 
-def tool_conversation(name="lookup", args=None, result=True):
+def tool_conversation(name="lookup", args=None, result=True, repeat=False):
     api = API()
     conversation = [
-        {"role": "ai", "content": [{"type": "text", "text": "Looking it up."},
+        {"role": "ai", "id": "tool-output", "content": [{"type": "text", "text": "Looking it up."},
             {"type": "tool_call", "name": name, "args": args or {}, "id": "call-1"}]},
     ]
+    if repeat:
+        conversation[0]["content"].append(copy.deepcopy(conversation[0]["content"][-1]))
     if result:
         conversation.append({"role": "tool", "content": "done", "tool_call_id": "call-1"})
     api.trajectory_pages[None]["messages"][2:2] = conversation
@@ -212,9 +213,13 @@ def tool_conversation(name="lookup", args=None, result=True):
 
     def runner(command, **kwargs):
         response = api(command, **kwargs)
-        if "/runs?" in command[2]:
+        if command[2] == "/v1/trajectory":
             page = json.loads(response.stdout)
-            page["items"][1]["extra"]["invocation_params"]["tools"] = [tool]
+            for item in page["items"]:
+                if item["message"].get("role") == "ai":
+                    item["message"]["available_tools"] = [tool]
+                if item["message"].get("id") == "tool-output":
+                    item["metadata"]["run_id"] = uid(9999)
             response.stdout = json.dumps(page)
         return response
 
@@ -225,6 +230,7 @@ def tool_conversation(name="lookup", args=None, result=True):
     ({"name": "missing_tool"}, "unknown tool missing_tool"),
     ({"args": {"limit": "many"}}, "do not match its JSON Schema"),
     ({"result": False}, "unmatched tool calls or results"),
+    ({"repeat": True}, "repeats tool call id"),
 ])
 @pytest.mark.parametrize("cached", [False, True])
 def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, error, cached):
@@ -241,10 +247,17 @@ def test_triage_checks_preparation_compatibility(tmp_path, monkeypatch, kwargs, 
 
         def api(*_a, **_kw):
             pytest.fail("cached source was fetched again")
-    summary = run(tmp_path, api)
+    def unexpected_judge(*args):
+        pytest.fail("invalid trajectory reached the council")
+
+    monkeypatch.setattr(triage, "check_credentials", unexpected_judge)
+    summary = triage.run_triage(source(), tmp_path, runner=api, judge_call=unexpected_judge, confirm=True)
     frozen = triage_source.load_snapshot(tmp_path)
     assert error in triage_source.training_error(frozen["units"][0])
-    assert summary["kept"] == 1  # Compatibility does not change the quality votes.
+    assert summary["kept"] == 0
+    assert summary["filtered_training"] == 1
+    assert summary["incomplete"] == 0
+    assert error in json.loads((tmp_path / "labels.jsonl").read_text())["reason"]
     assert summary["eligible_conversations"] == 0
     assert summary["unsupported_training_conversations"] == 1
     with pytest.raises(PipelineError, match="no complete, kept"):
@@ -270,14 +283,102 @@ def test_cached_triage_prunes_misplaced_system_messages_before_upload(tmp_path, 
     assert (tmp_path / "snapshot.json").read_bytes() == original
 
 
-def test_triage_accepts_valid_tool_calls_and_keeps_saved_contract(tmp_path):
+@pytest.mark.parametrize("runner_mode", ["api", "deepagent"])
+@pytest.mark.parametrize("issue,reason", [
+    ("system", "misplaced system message"),
+    ("builtin", "provider built-in tool"),
+    ("missing_tools", "unknown tool availability"),
+])
+def test_invalid_trajectories_skip_all_paid_work(tmp_path, monkeypatch, runner_mode, issue, reason):
+    api = API()
+    if issue == "system":
+        api.trajectory_pages["next"]["messages"].insert(0, {"role": "system", "content": "New instructions."})
+
+    def runner(command, **kwargs):
+        response = api(command, **kwargs)
+        if command[2] == "/v1/trajectory" and issue != "system":
+            page = json.loads(response.stdout)
+            for item in page["items"]:
+                message = item["message"]
+                if message.get("role") != "ai":
+                    continue
+                if issue == "builtin":
+                    message["available_tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+                else:
+                    message.pop("available_tools")
+            response.stdout = json.dumps(page)
+        return response
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("ineligible trajectories must not require credentials or inference dependencies")
+
+    monkeypatch.setattr(triage, "check_credentials", unexpected)
+    monkeypatch.setattr(triage, "api_judge", unexpected)
+    monkeypatch.setattr(triage, "deepagent_judge", unexpected)
+    preview = triage.run_triage(source(), tmp_path, runner=runner, runner_mode=runner_mode, dry_run=True)
+    assert preview["filtered_training"] == 1
+    assert preview["judge_tasks"] == 0
+    assert reason in preview["rejections"][0]["reason"]
+    summary = triage.run_triage(source(), tmp_path, runner=unexpected, runner_mode=runner_mode, confirm=True)
+    assert summary["status"] == "complete" and summary["filtered_training"] == 1
+    assert (tmp_path / "judgments.jsonl").read_text() == ""
+    assert reason in json.loads((tmp_path / "labels.jsonl").read_text())["reason"]
+    assert triage.selected_examples(tmp_path, require_complete=True, allow_empty=True) == []
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_prefilter_mixed_trajectories_preserves_completed_votes(tmp_path, monkeypatch, cached):
+    api = API()
+    api.trajectory_pages["next"]["messages"].insert(0, {"role": "system", "content": "Late instructions."})
+    api.root_pages[0].append({"trace_id": uid(3), "thread_id": None, "start_time": "2026-09-02T00:00:00Z"})
+    saved_votes = []
+    if cached:
+        def old_judge(slot, prompt, tokens):
+            if len(json.loads(prompt[-1]["content"])["untrusted_trajectory"]) > 3:
+                raise PipelineError("temporary failure")
+            return judge_call(slot, prompt, tokens)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(triage_source, "training_error", lambda _: None)
+            patch.setattr(triage, "training_error", lambda _: None)
+            summary = triage.run_triage(source(), tmp_path, runner=api, judge_call=old_judge, confirm=True, attempts=1)
+            assert summary["incomplete"] == 1 and summary["kept"] == 1
+        saved_votes = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
+        # Historical incomplete labels are validated, then invalid trajectories
+        # are excluded without forcing more votes before upload.
+        assert len(triage.selected_examples(tmp_path, require_complete=True)) == 1
+        identity = (tmp_path / "triage-config.json").read_bytes()
+        snapshot = (tmp_path / "snapshot.json").read_bytes()
+        def api(*args, **kwargs):
+            pytest.fail("resume must not fetch saved trajectories")
+
+    seen = []
+    def judge(slot, prompt, tokens):
+        assert not cached, "completed valid votes must be reused"
+        assert len(json.loads(prompt[-1]["content"])["untrusted_trajectory"]) == 3
+        seen.append(slot["name"])
+        return judge_call(slot, prompt, tokens)
+
+    plan = triage.run_triage(source(), tmp_path, runner=api, dry_run=True)
+    assert plan["filtered_training"] == 1 and plan["judge_tasks"] == plan["judges"]
+    summary = triage.run_triage(source(), tmp_path, runner=api, judge_call=judge, confirm=True)
+    assert summary["status"] == "complete" and summary["kept"] == 1 and summary["filtered_training"] == 1
+    assert len(triage.selected_examples(tmp_path, require_complete=True)) == 1
+    assert len(seen) == (0 if cached else plan["judges"])
+    if cached:
+        assert [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()] == saved_votes
+        assert (tmp_path / "triage-config.json").read_bytes() == identity
+        assert (tmp_path / "snapshot.json").read_bytes() == snapshot
+
+
+def test_triage_accepts_valid_tool_calls_and_keeps_saved_bindings(tmp_path):
     assert run(tmp_path, tool_conversation())["eligible_conversations"] == 1
     frozen = triage_source.load_snapshot(tmp_path)
     example, = triage.selected_examples(tmp_path)
     assert example["inputs"] == frozen["units"][0]["example"]["inputs"]
-    assert example["metadata"]["smithtune_triage"]["contract"] == frozen["units"][0]["contract"]
-    contract = parse_inference_contract(example["metadata"]["smithtune_triage"]["contract"])
-    assert dataset.prepare_sft_rows([example], contract=contract)
+    assert example["metadata"]["smithtune_source"] == frozen["units"][0]["example"]["metadata"]["smithtune_source"]
+    assert example["metadata"]["smithtune_triage"]["evidence_sha256"] == evidence_hash(example)
+    assert dataset.prepare_sft_rows([example])
 
 
 def test_triage_defers_reasoning_policy_to_preparation(tmp_path):
@@ -395,8 +496,8 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
     assert all(command[2] in {"/api/v1/datasets", "/api/v1/examples"} for command, _ in api.calls)
     example = api.imported[0]
     assert example["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
-    contracts = dataset.capture_example_contracts(uid(100), [example], runner=lambda *_args, **_kw: pytest.fail("must not fetch changed tools"))
-    assert list(contracts[example["id"]].tools) == []
+    bindings = read_bindings(example["metadata"], example["inputs"]["messages"])
+    assert all(binding["tools"] == [] for binding in bindings.values())
     raw = tmp_path / "data/raw"
     raw.mkdir(parents=True)
     # Add independent source groups to exercise the normal 80/10/10 path.
@@ -407,6 +508,7 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
         item["metadata"]["source_scope_id"] = f"independent-{n}"
         item["inputs"]["messages"][-1]["content"] += f" variant-{n}"
         item["metadata"]["smithtune_triage"]["messages_sha256"] = json_sha256(item["inputs"]["messages"])
+        item["metadata"]["smithtune_triage"]["evidence_sha256"] = evidence_hash(item)
         examples.append(item)
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     manifest = dataset.prepare_dataset(uid(100), uid(200), DEFAULT_MODEL, tmp_path / "data", fetch=True, check_render=False)
@@ -416,17 +518,17 @@ def test_frozen_dataset_import_and_prepare_use_judged_messages_and_tools(tmp_pat
 
 def test_changed_triaged_messages_are_rejected(tmp_path):
     run(tmp_path)
-    examples = triage.selected_examples(tmp_path)
+    examples = list(triage.selected_examples(tmp_path))
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     with pytest.raises(PipelineError, match="changed after judging"):
-        dataset.capture_example_contracts(uid(100), examples)
+        dataset.validate_trajectories(examples, len(examples))
 
 
 def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
     run(tmp_path)
     path, = (tmp_path / "conversations").glob("*.json")
     example = load_conversation(path)
-    example["inputs"]["messages"][-1]["content"] = "changed since judging"
+    example["example"]["inputs"]["messages"][-1]["content"] = "changed since judging"
     path.write_text(json.dumps(example))
     with pytest.raises(PipelineError, match="saved conversation has changed"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=True,
@@ -434,7 +536,19 @@ def test_changed_conversation_file_blocks_import_before_writes(tmp_path):
 
 
 def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
-    run(tmp_path)
+    frozen = triage_source.snapshot(source(), tmp_path, runner=API())
+    frozen["units"] = list(frozen["units"])
+    frozen.pop("unit_files")
+    frozen.pop("snapshot_sha256")
+    frozen["schema_version"] = 2
+    for unit in frozen["units"]:
+        unit.pop("traces")
+        unit.pop("multimodal_types")
+    for trace in frozen["traces"]:
+        trace["runs"] = []
+    frozen["snapshot_sha256"] = json_sha256(frozen)
+    (tmp_path / "snapshot.json").write_text(json.dumps(frozen))
+    run(tmp_path, api=lambda *_a, **_kw: pytest.fail("legacy snapshot must not refetch"))
     snapshot_bytes = (tmp_path / "snapshot.json").read_bytes()
     for path in (tmp_path / "conversations").glob("*.json"):
         path.unlink()
@@ -447,10 +561,10 @@ def test_old_snapshot_materializes_conversation_without_refetching(tmp_path):
 def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(
         *args, **kwargs, runner=API(), judge_call=judge_call))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101)]
+    args = ["dataset", "pull", "--workspace-id", uid(100), "--project-id", uid(101)]
     directories = []
     for _ in range(2):
         cli.main(args)
@@ -467,7 +581,7 @@ def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeyp
     assert json.loads(capsys.readouterr().out)["run_dir"] == str(directories[0])
     with pytest.raises(SystemExit):
         cli.main(["dataset", "triage", "--confirm"])
-    assert "supply a saved run directory" in capsys.readouterr().err
+    assert "requires a saved directory" in capsys.readouterr().err
 
 
 def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
@@ -495,8 +609,8 @@ def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
 @pytest.mark.parametrize("global_contract", [False, True])
 def test_prepare_always_checks_triaged_message_integrity(tmp_path, monkeypatch, fetch, global_contract):
     run(tmp_path)
-    examples = triage.selected_examples(tmp_path)
-    contract = parse_inference_contract(examples[0]["metadata"]["smithtune_triage"]["contract"]) if global_contract else None
+    examples = list(triage.selected_examples(tmp_path))
+    contract = tool_contract([]) if global_contract else None
     examples[0]["inputs"]["messages"][-1]["content"] = "unjudged change"
     monkeypatch.setattr(dataset, "_load_dataset_source", lambda *_a, **_kw: ({"name": "selected"}, examples, "snapshot"))
     with pytest.raises(PipelineError, match="changed after judging"):
@@ -520,7 +634,7 @@ def test_resume_and_import_reject_mixed_or_tampered_artifacts(tmp_path, changed)
     elif changed == "snapshot":
         path = tmp_path / "snapshot.json"
         value = json.loads(path.read_text())
-        value["units"][0]["example"]["inputs"]["messages"][0]["content"] = "edited"
+        value["source"]["project_id"] = uid(999)
         path.write_text(json.dumps(value))
         with pytest.raises(PipelineError, match="hash mismatch"):
             run(tmp_path)
@@ -562,10 +676,28 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
         triage.selected_examples(tmp_path)
 
 
-def test_skill_export_works_outside_checkout(tmp_path):
+def test_skill_export_works_outside_checkout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     result = triage.export_skill(tmp_path)
-    assert Path(result["skill"]).read_text().startswith("---\nname: sft-trace-triage")
-    assert (tmp_path / "sft-trace-triage/judge.md").exists()
+    entry = Path(result["skill"])
+    assert entry.read_text().startswith("---\nname: sft-trace-triage")
+    skill_dir = entry.parent.resolve()
+    pending, visited = [entry], set()
+    while pending:
+        document = pending.pop()
+        if document in visited:
+            continue
+        visited.add(document)
+        for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
+            link = urlsplit(target)
+            if link.scheme or link.netloc or not link.path:
+                continue
+            referenced = (document.parent / unquote(link.path)).resolve()
+            assert referenced.is_relative_to(skill_dir), f"Skill reference leaves export: {target}"
+            assert referenced.is_file(), f"Missing exported skill reference: {target}"
+            if referenced.suffix == ".md":
+                pending.append(referenced)
+    assert {"SKILL.md", "judge.md", "discovery.md"} <= {path.name for path in visited}
     exported = json.loads((tmp_path / "sft-trace-triage/config.example.json").read_text())
     assert exported == triage.load_config(None) == triage.council_settings(tmp_path / "new")["config"]
     assert [(j["provider"], j["model"]) for j in exported["judges"]] == [
@@ -579,21 +711,22 @@ def test_skill_export_works_outside_checkout(tmp_path):
 
 def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     api = API()
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"], str(tmp_path),
-            "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra", "--rule", "Keep supported answers."]
-    cli.main(args)
-    plan = json.loads(capsys.readouterr().out)
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=api, judge_call=judge_call))
+    cli.main(["dataset", "pull", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101),
+              "--start-time", source()["start_time"], "--end-time", source()["end_time"]])
+    capsys.readouterr()
+    cli.main(["dataset", "triage", str(tmp_path), "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra",
+              "--rule", "Keep supported answers."])
+    plan = json.loads(capsys.readouterr().out)["triage"]
     assert plan["judges"] == 3 and plan["runner"] == "deepagent"
     assert plan["config"]["rules"] == ["Keep supported answers."]
     assert plan["config"]["judges"] == triage.load_config(None)["judges"]
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["kept"] == 1
     saved = (tmp_path / "judgments.jsonl").read_bytes()
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["kept"] == 1
     assert (tmp_path / "judgments.jsonl").read_bytes() == saved
     labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
     assert all(set(label) == {"trajectory_id", "keep", "reason"} for label in labels)
@@ -601,9 +734,7 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     # A changed package default must not replace a saved council.
     monkeypatch.setattr(triage, "load_config", lambda *_: pytest.fail("saved council ignored"))
     assert triage.council_settings(tmp_path)["config"] == plan["config"]
-    create = triage.create_triaged_dataset
-    monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: create(*args, **kwargs, runner=api))
-    cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--name", "selected", "--confirm"])
+    cli.main(["dataset", "push", str(tmp_path), "--name", "selected", "--confirm"])
     assert json.loads(capsys.readouterr().out)["example_count"] == 1
 
 
@@ -624,17 +755,17 @@ def test_council_model_selection(tmp_path, judges, expected):
 
 
 def test_cli_incomplete_triage_prints_summary_and_exits_nonzero(tmp_path, monkeypatch, capsys):
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(*args, **kwargs, runner=API(), judge_call=lambda *_: {}))
-    args = ["dataset", "triage", "--workspace-id", uid(100), "--project-id", uid(101),
-            "--start-time", source()["start_time"], "--end-time", source()["end_time"], "--output-dir", str(tmp_path), "--confirm", "--attempts", "1"]
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=API(), judge_call=lambda *_: {}))
+    triage_source.snapshot(source(), tmp_path, runner=API())
+    args = ["dataset", "triage", str(tmp_path), "--confirm", "--attempts", "1"]
     with pytest.raises(SystemExit) as exc:
         cli.main(args)
     assert exc.value.code == 1
-    assert json.loads(capsys.readouterr().out)["incomplete"] == 1
+    assert json.loads(capsys.readouterr().out)["triage"]["incomplete"] == 1
 
 
-def test_dataset_import_failure_has_receipt_and_cannot_repeat_writes(tmp_path):
+def test_dataset_import_failure_resumes_with_saved_destination(tmp_path):
     run(tmp_path)
     api = API()
 
@@ -646,12 +777,13 @@ def test_dataset_import_failure_has_receipt_and_cannot_repeat_writes(tmp_path):
     with pytest.raises(PipelineError, match="import incomplete"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=True, runner=api)
     receipt = json.loads((tmp_path / "dataset-import.json").read_text())
-    assert receipt["dataset_id"] == uid(200)
+    assert receipt["dataset_id"] == next(iter(api.datasets))
     assert receipt["status"] == "incomplete" and receipt["pending_write"]
-    count = len(api.calls)
-    with pytest.raises(PipelineError, match="cannot create"):
-        triage.create_triaged_dataset(tmp_path, "selected", confirm=True, runner=api)
-    assert len(api.calls) == count
+    api.failure = None
+    result = triage.create_triaged_dataset(tmp_path, "selected", confirm=True, runner=api)
+    assert result["example_count"] == 1
+    assert len(api.imported) == 1
+    assert len(api.datasets) == 1
 
 
 def test_concurrent_output_use_is_rejected_before_fetch_or_inference(tmp_path):
@@ -742,18 +874,18 @@ def test_judge_can_drop_a_trajectory_with_missing_evidence(tmp_path):
 
 def test_cli_labels_local_snapshot_without_source_query(tmp_path, monkeypatch, capsys):
     triage_source.snapshot(source(), tmp_path, runner=API())
-    original = triage.run_triage
-    monkeypatch.setattr(triage, "run_triage", lambda *args, **kwargs: original(
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(
         *args, **kwargs, judge_call=judge_call,
         runner=lambda *_a, **_kw: pytest.fail("local snapshot must not query LangSmith")))
-    cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--confirm"])
-    assert json.loads(capsys.readouterr().out)["kept"] == 1
+    cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
+    assert json.loads(capsys.readouterr().out)["triage"]["kept"] == 1
 
 
 def test_cli_requires_source_when_no_snapshot_exists(tmp_path, capsys):
     with pytest.raises(SystemExit):
-        cli.main(["dataset", "triage", "--output-dir", str(tmp_path), "--dry-run"])
-    assert "no local snapshot" in capsys.readouterr().err
+        cli.main(["dataset", "triage", str(tmp_path)])
+    assert "start with dataset pull" in capsys.readouterr().err
 
 
 def test_empty_source_does_not_create_a_misleading_completed_run(tmp_path):
@@ -775,9 +907,11 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
 
     def source_api(command, **kwargs):
         response = api(command, **kwargs)
-        if media_turn and f"/traces/{uid(media_turn)}/runs?" in command[2]:
+        if media_turn and command[2] == "/v1/trajectory":
             page = json.loads(response.stdout)
-            page["items"][-1]["attachments"] = {"image.png": "recorded"}
+            for item in page["items"]:
+                if item["message"].get("id") == f"user-{media_turn}":
+                    item["message"]["content"] = [{"type": "image", "url": "https://example.invalid/image.png"}]
             response.stdout = json.dumps(page)
         return response
 
@@ -861,9 +995,7 @@ def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume)
     if resume:
         with pytest.raises(KeyboardInterrupt):
             triage_source.snapshot(source(), tmp_path, runner=api)
-        api.failure = None
-        api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
-        api.trajectory_pages["next"]["messages"] += messages(3)
+        resume = False  # Interrupt only the first attempt; grow during the next read.
     with pytest.raises(PipelineError, match="conversation-a changed during download"):
         triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()

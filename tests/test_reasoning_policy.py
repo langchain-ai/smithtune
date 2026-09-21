@@ -248,9 +248,8 @@ class CharacterTokenizer:
 @pytest.mark.parametrize("policy", ["omit", "preserve"])
 def test_real_qwen_renderer_applies_policy_to_history_and_supervised_tokens(tmp_path, policy):
     from training.renderer import get_renderer
-    from training.utils import parse_train_on_what, render_messages_to_datums
     from training.utils.supervised import build_tool_prefixed_messages
-    from smithtune.rendering import SFT_TARGET_POLICY
+    from smithtune.rendering import render_row_tokens
 
     tokenizer = CharacterTokenizer()
     renderer = get_renderer("qwen3_8_preserved", tokenizer)
@@ -258,11 +257,8 @@ def test_real_qwen_renderer_applies_policy_to_history_and_supervised_tokens(tmp_
         [trajectory()], loaded_contract(tmp_path),
         model=fireworks.DEFAULT_MODEL, reasoning_policy=policy,
     )[0]
-    datum = render_messages_to_datums(
-        row["messages"], renderer=renderer, tools=row["tools"],
-        train_on_what=parse_train_on_what(SFT_TARGET_POLICY), reduction="mean",
-    )
-    datums = datum if isinstance(datum, list) else [datum]
+    datums = render_row_tokens(row, fireworks.DEFAULT_MODEL, renderer=renderer)
+    assert len(datums) == (3 if policy == "preserve" else 2)
     rendered_text = "".join(tokenizer.decode(item.token_ids) for item in datums)
     target_text = "".join(tokenizer.decode([
         token for token, weight in zip(item.token_ids, item.token_weights, strict=True) if weight > 0

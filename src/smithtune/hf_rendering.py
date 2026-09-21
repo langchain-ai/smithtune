@@ -12,7 +12,7 @@ from smithtune.providers.base import ModelSpec, PipelineError
 
 
 HF_RENDERER = "hf_assistant"
-HF_RENDERING_VERSION = "smithtune-hf-trl-v1"
+HF_RENDERING_VERSION = "smithtune-hf-trl-v2"
 
 
 def template_sha256(template: str) -> str:
@@ -63,7 +63,7 @@ def validate_hf_model(model: ModelSpec) -> None:
 
 
 class HFRenderer:
-    """Use the official template and expose all-assistant loss via generation spans."""
+    """Use native generation spans, optionally restricted to the final target."""
 
     def __init__(self, model: ModelSpec, tokenizer: Any) -> None:
         validate_hf_model(model)
@@ -88,7 +88,7 @@ class HFRenderer:
                 "prepare with a supported model and tokenizer revision"
             ) from exc
 
-    def render(self, messages: list[dict[str, Any]], tools: Any = None) -> list[TokenDatum]:
+    def render(self, messages: list[dict[str, Any]], tools: Any = None, *, final_target=False) -> list[TokenDatum]:
         normalized = _normalize_messages(messages)
         kwargs = {
             "tools": tools,
@@ -123,6 +123,20 @@ class HFRenderer:
             or not any(masks)
         ):
             raise PipelineError("the tokenizer returned invalid or empty assistant loss masks")
+        if final_target:
+            if normalized[-1]["role"] != "assistant":
+                raise PipelineError("final target must be an assistant")
+            # Token boundary, not a character offset. Reject templates that
+            # rewrite history when the response is appended.
+            prefix = self.tokenizer.apply_chat_template(
+                normalized[:-1], chat_template=self.template, tokenize=True,
+                return_dict=False, **kwargs,
+            )
+            if tokens[:len(prefix)] != prefix:
+                raise PipelineError("assistant target changes the native history prefix")
+            masks = [0] * len(prefix) + masks[len(prefix):]
+            if not any(masks):
+                raise PipelineError("final assistant target has no loss tokens")
         return [TokenDatum(tokens, [float(mask) for mask in masks])]
 
     def prompt_tokens(self, messages: list[dict[str, Any]], tools: Any = None) -> list[int]:

@@ -1,5 +1,6 @@
 """Local run directories and frozen conversation files shared by dataset paths."""
 
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,3 +31,28 @@ def save_conversation(run_dir: Path, example: dict) -> Path:
     except OSError as exc:
         raise PipelineError(f"cannot save conversation to {path}") from exc
     return path
+
+
+class LazySequence(Sequence):
+    """An indexed, repeatable view that never caches loaded trajectory bodies."""
+
+    def __init__(self, size, load):
+        self.size, self.load = size, load
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            indices = range(self.size)[index]
+            return LazySequence(len(indices), lambda i: self[indices[i]])
+        if index < 0:
+            index += self.size
+        if not 0 <= index < self.size:
+            raise IndexError(index)
+        return self.load(index)
+
+    def __eq__(self, other):
+        if not isinstance(other, Sequence):
+            return NotImplemented
+        return len(self) == len(other) and all(a == b for a, b in zip(self, other, strict=True))

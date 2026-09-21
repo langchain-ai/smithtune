@@ -45,6 +45,36 @@ Use `prepare --no-fetch` with the same settings and data directory to reuse the
 downloaded data. Provider checks, tokenizer loading, and split synchronization
 still run.
 
+## Per-assistant tools and training targets
+
+Whole trajectories remain the dataset examples and split rows. Their metadata
+stores `smithtune_source.assistant_runs`: the message position, producing run and
+trace IDs, and complete tools recorded for each assistant call. Tools can be
+added, removed, or change descriptions and schemas between calls. An empty list
+means no tools were offered; missing availability is not treated as an empty list.
+
+Pull requests `/v1/trajectory` in `ui` format with system messages enabled. Each
+assistant item's `message.available_tools` supplies its complete tool list, and
+`metadata.run_id` / `metadata.trace_id` identify the producing call. No additional
+LLM-run lookups are needed. Missing availability or provenance and unsupported
+provider built-ins exclude the trajectory with a recorded reason.
+
+Preparation reuses saved bindings. For unbound, unjudged exports, it can retrieve
+them from the source trajectory only when its messages match the saved example
+exactly. Interrupted preparation retains completed captures. New source downloads
+require a LangSmith instance that supplies `available_tools`; existing bound
+datasets and explicit contract overrides remain usable.
+
+Fireworks and Baseten render each supported assistant answer with its preceding
+messages and its tool list. Only that answer receives training loss; earlier
+assistant answers serve as context. Replay uses the same per-call tools. This
+preserves the recorded trajectory prefix; it does not reconstruct hidden prompt
+rewrites, context compaction, or routing between agents.
+
+`--inference-contract FILE` remains an explicit global tool-schema override.
+Run `prepare` again for older prepared artifacts. Older council datasets need a
+fresh pull and review to attach per-call evidence, or an explicit global override.
+
 ## Model-specific formatting
 
 Muse Glimmer requires an explicit system message. It rejects assistant messages
@@ -109,7 +139,12 @@ when comparing both models, or one experiment when evaluating only a tuned endpo
 Names follow `smithtune-base-<short-model-name>-<evaluation-id>` and
 `smithtune-tuned-<short-model-name>-<same-evaluation-id>`. Both use the base-model
 name; exact model and checkpoint identifiers remain in metadata.
-Each trajectory has a root run, with a child LLM run for each generated action.
+Each completed trajectory has a root run, with a child LLM run for each generated
+action. Finished children and their feedback upload incrementally. The parent,
+its complete outputs, and its aggregate score publish only after all selected
+actions in that trajectory finish. Until then its experiment row is not shown;
+the comparison link is available and local receipts track publication progress.
+This publisher posts completed run outputs rather than updating them.
 Experiment metadata identifies the provider and whether
 predictions came from a sampler or deployed endpoint. When a saved training run
 is available, `parent_training_run_id` records the smithtune run ID and
@@ -149,6 +184,13 @@ cleanup instructions in `sampler.json` to stop paid capacity before resuming.
 Results publish incrementally. If publication fails, rerun `evaluate` with the
 same settings to resume from saved results. The publication receipt records
 progress and any upload error.
+
+An older CLI may have already published a finished parent containing only some
+actions. The new publisher detects these legacy partial/open parents on resume
+and stops before paid work, with the run and experiment IDs. It does not patch,
+delete, or silently replace them. Preserve the original artifacts and resolve
+that existing experiment explicitly; ordinary resume cannot repair this legacy
+state. Fully completed, matching parents remain reusable without another upload.
 
 Evaluation always publishes to LangSmith. Local files are recovery artifacts;
 an upload failure leaves evaluation incomplete until publication succeeds.

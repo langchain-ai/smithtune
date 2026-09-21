@@ -13,6 +13,32 @@ Tracing project → dataset → prepare → plan → train + evaluate → LangSm
 | Prepared smithtune data | [Plan and train](#plan-and-train) |
 | A completed smithtune training run | [Evaluate a trained model](#evaluate-a-trained-model) |
 
+## Data rights and permitted use
+
+Read [Data Rights and Permitted Use](docs/data-rights-and-permitted-use.md) before
+using your data with smithtune. On your first workflow command, the CLI asks you
+to acknowledge that you have read this document before processing data or making
+provider requests. Only an explicit `y` or `yes` proceeds; `--confirm` does not
+acknowledge the document.
+
+To complete this step before running scripts, use an interactive terminal:
+
+```bash
+smithtune acknowledge-data-rights
+```
+
+The acknowledgment is stored locally with the document version and UTC timestamp
+at `${XDG_CONFIG_HOME:-~/.config}/smithtune/data-rights.json` (relative
+`XDG_CONFIG_HOME` values are ignored). Subsequent commands under the same user
+and configuration directory reuse it; a new document version requires a new
+acknowledgment. Non-interactive commands without a current acknowledgment stop
+without starting the workflow. Help, version, doctor, model listing, and skill
+export remain available without acknowledgment. The document link is also in
+`smithtune --help`.
+
+This records that you have read the document, not that your workflow has been
+legally approved or that you have accepted a separate EULA.
+
 ## Setup
 
 Install with [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git.
@@ -94,38 +120,38 @@ provider and existing directories instead.
 
 ## Create a dataset from trajectories
 
-Skip this step if you already have a LangSmith dataset. Otherwise, select
-trajectories from a tracing project in the workspace above. Replace the project
-ID with your source, and choose a feedback filter your project uses:
+Skip this step if you already have a LangSmith dataset. Otherwise, choose a tracing
+project and a feedback filter that represents the trajectories you want:
 
 ```bash
 project_id='<project-id>'
 
-smithtune dataset create \
+smithtune dataset create data/datasets/my-sft \
   --workspace-id "$workspace_id" --project-id "$project_id" \
   --name my-sft-dataset \
-  --limit 100 \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
+
+smithtune dataset create data/datasets/my-sft --confirm
 ```
 
-Without time flags, creation selects roots from the last 24 hours: `--end-time`
-defaults to now and `--start-time` defaults to 24 hours before the resolved end.
-Pass either or both flags to choose another ISO 8601 window.
+The first command downloads and previews; `--confirm` runs the saved workflow.
+An explicit filter with no judging criteria creates the dataset without model
+calls. Add `--rubric ./rubric.md` for an agreed selection document, or
+`--rule 'Keep answers grounded in documentation'`, to judge the filtered
+candidates. Without a filter, `create` defaults to council review; `--no-triage`
+explicitly skips it. The preview shows the selected path before paid work.
 
-The filter matches feedback on trace root runs. Each matching root selects its
-whole thread when it has one, otherwise its single trace. Each trajectory
-becomes one dataset example, including earlier turns outside the time window.
-`--limit 100` selects at most 100 distinct trajectories. Remove `--filter` to
-select without a feedback threshold; see [filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
+Filters apply to trace root runs. Each match selects its whole thread when it has
+one, otherwise its single trace, including earlier turns outside the time window.
+The default is up to 100 distinct trajectories from the last 24 hours. Set
+`--limit`, `--start-time`, and `--end-time` to change that selection.
+Invalid trajectories are excluded before upload; preparation still checks
+model-specific rendering and context limits.
 
-Invalid whole trajectories are pruned before upload using message and captured
-tool-schema checks. Saved conversations remain unchanged; the result reports a
-`rejected` count and the import receipt records reasons. Model-specific rendering
-and context limits are still checked by `prepare`.
-
-For an optional model review before import, use
-[dataset triage](docs/datasets.md#label-full-trajectories-with-an-agent-council).
-For additions to an existing dataset, see [dataset curation](docs/datasets.md).
+To recover, run `smithtune dataset resume data/datasets/my-sft --confirm`.
+Completed downloads, votes, and uploads are reused. For separate `pull`, `triage`,
+and `push` steps, existing-dataset updates, and filter syntax, see
+[dataset curation](docs/datasets.md).
 
 ## Prepare data
 
@@ -140,8 +166,8 @@ smithtune prepare \
   --data-dir "$data_dir"
 ```
 
-Preparation downloads the trajectories, captures their tools, and validates the
-training format. It creates approximately 80% training, 10% validation, and 10%
+Preparation downloads trajectories, reuses their saved per-assistant tool lists
+(or retrieves them from the source trajectory), and validates the training format. It creates approximately 80% training, 10% validation, and 10%
 held-out test data, keeping each source trajectory in one split. These splits
 are also registered on the original LangSmith dataset for evaluation. If local
 preparation succeeds but publication does not, publish and verify only the saved
@@ -155,14 +181,15 @@ The main data requirements are:
 
 - Text and tool trajectories; images are unsupported
 - Recorded system messages are preserved; Qwen requires them at the start
-- All supported assistant messages are training targets, including earlier turns
+- Each supported assistant answer is trained once, using its history and the tools available at that call
 
 Whole malformed or incompatible trajectories are excluded unchanged. `prepare`
 prints a warning and records each exclusion in `prepared/warnings.json` and
 `prepared/rejected.json`, including a stable reason code and source identity.
 
 Examples over the model's context limit are rejected without truncation.
-Reasoning is omitted by default. See the [reference](docs/reference.md) for
+Reasoning is omitted by default. Prepared files from before per-assistant tool
+support require running `prepare` again. See the [reference](docs/reference.md) for
 model selection, split settings, and reasoning options.
 
 ## Plan and train
@@ -207,7 +234,10 @@ Replay scores do not affect checkpoint selection.
 
 When replay begins, the CLI prints **one comparison link** for the base and tuned
 experiments. Open it to view results on the original LangSmith dataset. Completed
-comparisons publish in the background; refresh the view as evaluation progresses.
+action results publish in the background. Each conversation's experiment row and
+aggregate score appear once all its selected actions finish; refresh the view as
+evaluation progresses. Interrupted conversations retain their saved results and
+uploaded children for resume, without publishing a finished partial parent.
 
 Each trajectory groups its independent next-action predictions:
 

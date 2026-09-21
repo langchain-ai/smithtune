@@ -8,9 +8,10 @@ from uuid import UUID
 
 import pytest
 
-from smithtune import cli, curation, dataset, dataset_import, triage
+from smithtune import cli, curation, dataset, dataset_import, dataset_workflow, triage
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
+from binding_fixtures import bound_example
 
 
 def uid(n):
@@ -18,12 +19,12 @@ def uid(n):
 
 
 def example(n, turns=1, **metadata):
-    return {"id": uid(n), "dataset_id": uid(200), "outputs": None,
+    return bound_example({"id": uid(n), "dataset_id": uid(200), "outputs": None,
             "inputs": {"messages": [{"role": role, "content": f"{i}-{role}", "id": f"{i}-{role}"}
                                      for i in range(turns) for role in ("human", "ai")]},
             "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
                           "source_workspace_id": uid(100), "source_project_id": uid(101),
-                         "source_scope": "thread", "source_scope_id": f"thread-{n}", **metadata}}
+                         "source_scope": "thread", "source_scope_id": f"thread-{n}", **metadata}})
 
 
 class API:
@@ -50,11 +51,21 @@ class API:
             self.writes.append((method, path, body))
             if self.before_write:
                 self.before_write(method, path, body)
-            value = {"id": uid(1000 + len(self.writes))} if method == "POST" else {"message": "Example updated"}
+            if method == "POST":
+                self.existing.append(copy.deepcopy(body))
+                value = {"id": body["id"]}
+            else:
+                old = next(ex for ex in self.existing if ex["id"] == path.rsplit("/", 1)[1])
+                old.update(copy.deepcopy(body))
+                value = {"message": "Example updated"}
         elif path == f"/api/v1/datasets/{uid(200)}":
             value = {"id": uid(200), "data_type": "kv"}
         elif path.endswith("/versions?limit=1"):
             value = [{"as_of": self.version}] if self.existing else []
+        elif path.startswith("/api/v1/examples/"):
+            value = next((ex for ex in self.existing if ex["id"] == path.rsplit("/", 1)[1]), None)
+            if value is None:
+                raise PipelineError("HTTP 404")
         else:
             assert urlsplit(path).path == "/api/v1/examples"
             query = parse_qs(urlsplit(path).query)
@@ -95,7 +106,7 @@ def test_mixed_create_skip_update_preserves_ids_and_metadata(tmp_path):
     assert receipt(tmp_path)["pending_write"] is None
     actions = [json.loads(line) for line in (tmp_path / "receipt.actions.jsonl").read_text().splitlines()]
     assert [row["action"] for row in actions] == ["skipped", "updated", "created"]
-    assert [row["example_id"] for row in actions] == [uid(1), uid(2), uid(1002)]
+    assert [row["example_id"] for row in actions] == [uid(1), uid(2), post[2]["id"]]
 
 
 def test_destination_pagination_is_pinned_and_only_matches_saved(tmp_path):
@@ -149,7 +160,7 @@ def test_ordinary_import_skips_unchanged_triaged_but_cannot_extend(tmp_path):
 
 
 @pytest.mark.parametrize("method", ["POST", "PATCH"])
-def test_failed_write_keeps_pending_and_prior_success_without_retry(tmp_path, method):
+def test_failed_write_resumes_pending_and_retains_prior_success(tmp_path, method):
     api = API([example(1)] if method == "PATCH" else [])
 
     def fail_second(*args):
@@ -165,9 +176,11 @@ def test_failed_write_keeps_pending_and_prior_success_without_retry(tmp_path, me
     assert saved["pending_write"]["source"]["scope_id"] == "thread-1"
     assert load_conversation(Path(saved["pending_write"]["conversation"])) == example(1, 2)
     assert len((tmp_path / "receipt.actions.jsonl").read_text().splitlines()) == 1
-    with pytest.raises(PipelineError, match="use a new writable path"):
-        update(tmp_path, api, [example(2), example(1, 2)])
-    assert len(api.writes) == 2
+    api.before_write = None
+    result = update(tmp_path, api, [example(2), example(1, 2)])
+    assert result["example_count"] == 2
+    assert len(api.writes) == 3
+    assert api.writes[-1] == api.writes[-2]
 
 
 def test_missing_incoming_source_does_not_mark_complete(tmp_path):
@@ -178,34 +191,30 @@ def test_missing_incoming_source_does_not_mark_complete(tmp_path):
     assert receipt(tmp_path)["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("targets", [[], ["--name", "new", "--dataset-id", uid(200)]])
-def test_cli_requires_exactly_one_destination(targets):
+@pytest.mark.parametrize("targets", [["--name", "new", "--dataset-id", uid(200)]])
+def test_cli_rejects_conflicting_destinations(targets):
     with pytest.raises(SystemExit) as exc:
         cli._parser().parse_args(["dataset", "create", *targets])
     assert exc.value.code == 2
 
 
 def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
-    from test_curation import API as SourceAPI, root
+    from smithtune.triage_source import load_snapshot
+    from test_triage import API as SourceAPI, source
 
-    source = SourceAPI([[root(1, "thread-1")]])
-    destination = API([example(1)])
-    source.messages = example(1, 2)["inputs"]["messages"]
-
-    def runner(command, **kwargs):
-        if command[2] in ("/api/v2/runs/query", "/v1/trajectory"):
-            return source(command, **kwargs)
-        return destination(command, **kwargs)
-
-    original = curation.create_dataset
-    monkeypatch.setattr(curation, "create_dataset", lambda **kwargs: original(**kwargs, runner=runner))
-    cli.main(["dataset", "create", "--workspace-id", uid(100), "--project-id", uid(101),
-              "--dataset-id", uid(200), "--start-time", "2026-09-01T00:00:00Z",
-              "--end-time", "2026-09-08T00:00:00Z", "--limit", "1", "--run-dir", str(tmp_path)])
+    dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), **{key: value for key, value in source().items() if key != "seed"})
+    old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
+    old.update(id=uid(1), dataset_id=uid(200))
+    old["inputs"]["messages"] = old["inputs"]["messages"][:3]
+    old["metadata"]["smithtune_source"]["assistant_runs"] = old["metadata"]["smithtune_source"]["assistant_runs"][:1]
+    destination = API([old])
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *a, **kw: original(*a, **kw, runner=destination))
+    cli.main(["dataset", "push", str(tmp_path), "--dataset-id", uid(200), "--confirm"])
     result = json.loads(capsys.readouterr().out)
     assert result["updated"] == 1
     assert destination.writes[0][0] == "PATCH"
-    assert (tmp_path / "selection.json").exists()
+    assert (tmp_path / "snapshot.json").exists()
 
 
 def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypatch, capsys):
@@ -215,19 +224,21 @@ def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypat
     incoming, = triage.selected_examples(tmp_path)
     old = copy.deepcopy(incoming)
     old.update(id=uid(1), dataset_id=uid(200))
-    old["inputs"]["messages"] = old["inputs"]["messages"][:2]
+    old["inputs"]["messages"] = old["inputs"]["messages"][:3]
+    old["metadata"]["smithtune_source"]["assistant_runs"] = old["metadata"]["smithtune_source"]["assistant_runs"][:1]
     old["metadata"].update(note="retain", smithtune_triage={"identity_sha256": "old", "contract": {"old": True}})
     api = API([old])
-    original = triage.create_triaged_dataset
-    monkeypatch.setattr(triage, "create_triaged_dataset", lambda *args, **kwargs: original(*args, **kwargs, runner=api))
-    cli.main(["dataset", "create", "--triage-dir", str(tmp_path), "--dataset-id", uid(200), "--confirm"])
+    original = dataset_workflow.run
+    monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=api))
+    cli.main(["dataset", "push", str(tmp_path), "--dataset-id", uid(200), "--confirm"])
     assert json.loads(capsys.readouterr().out)["updated"] == 1
     method, path, body = api.writes[0]
     assert (method, path) == ("PATCH", f"/api/v1/examples/{uid(1)}")
     assert body["metadata"]["smithtune_triage"] == incoming["metadata"]["smithtune_triage"]
     assert body["metadata"]["note"] == "retain"
     assert body["inputs"] == incoming["inputs"]
-    assert len(dataset.capture_example_contracts(uid(100), [{"id": uid(1), **body}])) == 1
+    from smithtune.bindings import validate_bound_messages
+    assert len(validate_bound_messages({"id": uid(1), **body})) == 2
 
 
 def test_failed_triage_never_reaches_destination(tmp_path):
@@ -302,7 +313,9 @@ def test_failed_upload_retains_completed_bounded_downloads(tmp_path, monkeypatch
             assert second_started.wait(5)
         else:
             second_started.set()
-        return example(1)["inputs"]["messages"]
+        value = example(1)
+        return {"messages": value["inputs"]["messages"], "source": value["metadata"]["smithtune_source"],
+                "training_error": None, "trace_ids": [uid(1)]}
 
     monkeypatch.setattr(curation, "_fetch_trajectory", fetch)
     api = API()
@@ -315,5 +328,5 @@ def test_failed_upload_retains_completed_bounded_downloads(tmp_path, monkeypatch
         curation._import_selection(selection=tmp_path / "selection.json", dataset_id=uid(200), concurrency=2, runner=api)
     assert set(fetched) == {"thread-1", "thread-2"}
     saved = [load_conversation(path) for path in (tmp_path / "conversations").glob("*.json")]
-    assert {item["metadata"]["source_scope_id"] for item in saved} == set(fetched)
+    assert {item["example"]["metadata"]["source_scope_id"] for item in saved} == set(fetched)
     assert len(api.writes) == 1
