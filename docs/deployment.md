@@ -102,12 +102,13 @@ serving configuration.
 Install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) and set
 `FIREWORKS_API_KEY`. Use a Fireworks training run.
 
-Use `deploy` when you want an endpoint for repeated use. It starts the endpoint;
+Use `deploy` when you want an endpoint for repeated use. It automatically promotes
+the selected checkpoint to a named Fireworks model, then starts the endpoint;
 it does not run the evaluation. The endpoint stays available and can incur
 charges until you run `undeploy`:
 
 ```text
-promote -> deploy -> use endpoint -> undeploy
+deploy -> use endpoint -> undeploy
 ```
 
 ```bash
@@ -117,12 +118,20 @@ run_id='my-sft'
 deployment_id='my-sft'
 deployment_shape='<compatible-deployment-shape>'
 
-smithtune promote --run-dir "$run_dir" --output-model-id "$run_id" --confirm
-smithtune deploy \
+smithtune deploy --provider fireworks \
   --run-dir "$run_dir" --account-id "$account_id" \
   --output-model-id "$run_id" --deployment-id "$deployment_id" \
   --deployment-shape "$deployment_shape" --confirm
 ```
+
+`--account-id` must be the account that owns the training checkpoint. A matching
+saved promotion is reused, including one created with standalone `promote`.
+If deployment creation fails after promotion succeeds, retrying does not promote
+again. An existing deployment or a promotion with an uncertain outcome still
+needs inspection in Fireworks before retrying.
+
+Standalone `smithtune promote --run-dir "$run_dir" --output-model-id "$run_id" --confirm`
+remains available to register a model without starting an endpoint.
 
 For replay, use [`evaluate --run-dir`](../README.md#evaluate-a-trained-model). The serverless sampler
 uses the saved training checkpoint independently of this production endpoint.

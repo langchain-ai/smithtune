@@ -507,7 +507,7 @@ class FireworksProvider:
         _write_run_md(run_dir / "run.md", plan, "training_completed", "inspect replay/summary.json" if replay is not None else "run evaluate --run-dir")
         return result
 
-    def promote(self, run_dir: Path, output_model_id: str, *, confirm: bool) -> None:
+    def promote(self, run_dir: Path, output_model_id: str, *, confirm: bool, account_id: str | None = None) -> None:
         _require_confirm(confirm, "checkpoint promotion")
         _validate_resource_id(output_model_id, "output model id")
         if not os.environ.get("FIREWORKS_API_KEY"):
@@ -522,6 +522,16 @@ class FireworksProvider:
         base_model = plan.get("base_model")
         if not isinstance(base_model, str):
             raise PipelineError("run plan does not contain a base model")
+        if account_id is not None and not checkpoint.startswith(f"accounts/{account_id}/"):
+            raise PipelineError("--account-id must match the account owning the selected training checkpoint")
+        receipt = run_dir / "promotion.json"
+        identity = {"job_id": job_id, "checkpoint": checkpoint, "output_model_id": output_model_id}
+        if receipt.exists():
+            saved = _load_json(receipt)
+            if saved.get("output_model_id") == output_model_id:
+                if any(saved.get(key) != value for key, value in identity.items()) or saved.get("base_model", base_model) != base_model:
+                    raise PipelineError("saved promotion does not match the selected checkpoint or base model; choose a new --output-model-id")
+                return
         _set_skill_session(run_dir)
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
         from fireworks.training.sdk import FireworksClient
@@ -539,8 +549,8 @@ class FireworksProvider:
         finally:
             client.close()
         _json_dump(
-            run_dir / "promotion.json",
-            {"promoted_at_utc": _utc_now(), "job_id": job_id, "checkpoint": checkpoint, "output_model_id": output_model_id},
+            receipt,
+            {"promoted_at_utc": _utc_now(), **identity, "base_model": base_model},
         )
 
     def deploy(
@@ -553,11 +563,13 @@ class FireworksProvider:
         *,
         confirm: bool,
     ) -> dict[str, Any]:
-        _require_confirm(confirm, "deployment and smoke-test inference")
+        _require_confirm(confirm, "checkpoint promotion, deployment, and smoke-test inference")
+        _validate_resource_id(account_id, "account id")
         _validate_resource_id(output_model_id, "output model id")
         _validate_resource_id(deployment_id, "deployment id")
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
+        self.promote(run_dir, output_model_id, confirm=confirm, account_id=account_id)
         _set_skill_session(run_dir)
         model = f"accounts/{account_id}/models/{output_model_id}"
         deployment = f"accounts/{account_id}/deployments/{deployment_id}"
