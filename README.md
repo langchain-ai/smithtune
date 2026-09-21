@@ -122,8 +122,9 @@ Preparation validates trajectories and their per-assistant tools, then creates
 approximately 80% training, 10% validation, and 10% test data. Each source trajectory
 stays in one split; the memberships are also published to the LangSmith dataset.
 
-Recorded messages are preserved. Unsupported or overlong trajectories are excluded
-without truncation and listed in `prepared/rejected.json`. Each supported assistant
+Recorded system messages are preserved; reasoning is omitted by default. Unsupported
+or overlong trajectories are excluded without truncation and listed in
+`prepared/rejected.json`. Each supported assistant
 answer is trained once with its preceding context and the tools available at that call.
 See the [preparation reference](docs/reference.md#prepare-data) for data requirements,
 reasoning options, and split recovery.
