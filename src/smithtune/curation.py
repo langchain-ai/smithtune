@@ -306,7 +306,7 @@ def _fetch_trajectory(
             try:
                 trajectory = _api(workspace_id, "POST", "/v1/trajectory", body, runner=runner)
                 break
-            except _TrajectoryPageTooLarge as exc:
+            except _TrajectoryPageTooLarge:
                 if body.get("page_size") == 1:
                     # Keep only the rejection, never a prefix from earlier pages.
                     return {"messages": [], "source": None, "trace_ids": [],
