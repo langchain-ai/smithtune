@@ -133,7 +133,9 @@ def _download_summary(frozen):
         if error:
             reason = _malformed_trajectory_reason(unit["example"]["id"], PipelineError(error))
             if reason is None:
-                if "returned no messages" in error:
+                if "trajectory fetch limit" in error:
+                    reason = "trajectory_fetch_limit"
+                elif "returned no messages" in error:
                     reason = "missing_messages"
                 elif "unknown tool availability" in error:
                     reason = "missing_tool_availability"

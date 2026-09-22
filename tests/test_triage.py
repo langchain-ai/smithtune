@@ -1,12 +1,13 @@
 import copy
+import io
 import json
 import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
+from urllib.error import HTTPError
 
 import pytest
 
@@ -162,6 +163,52 @@ def test_empty_trajectory_is_rejected_without_stopping_pull_or_resume(tmp_path):
     selected, = triage.selected_examples(tmp_path)
     assert selected["id"] == valid["example"]["id"]
     assert selected["inputs"] == valid["example"]["inputs"]
+
+
+@pytest.mark.parametrize("oversized_cursor", [None, "next"])
+def test_fetch_limit_excludes_whole_trajectory_and_survives_resume(tmp_path, oversized_cursor):
+    api = API()
+    api.root_pages[0].append({"trace_id": uid(3), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
+    requests = []
+
+    def runner(command, **kwargs):
+        body = json.loads(kwargs.get("input") or "{}")
+        if command[2] == "/v1/trajectory" and body.get("thread_id") == "conversation-a":
+            requests.append(body)
+            if body.get("cursor") == oversized_cursor:
+                raise subprocess.CalledProcessError(1, command, output=
+                    "HTTP 400: trajectory view exceeded response data size limit. "
+                    "Narrow the requested trajectory page; private source content")
+        return api(command, **kwargs)
+
+    frozen = triage_source.snapshot(source(), tmp_path, runner=runner)
+    excluded, valid = frozen["units"]
+    assert excluded["example"]["inputs"]["messages"] == []
+    assert "smithtune_source" not in excluded["example"]["metadata"]
+    assert "trajectory fetch limit" in excluded["training_error"]
+    assert "page_size=1" in excluded["training_error"]
+    assert "private source content" not in excluded["training_error"]
+    assert valid["training_error"] is None
+    failed = [request for request in requests if request.get("cursor") == oversized_cursor]
+    assert len(failed) == 2 and failed[1] == {**failed[0], "page_size": 1}
+    assert dataset_workflow._download_summary(frozen)["exclusion_reasons"] == {"trajectory_fetch_limit": 1}
+
+    # An interruption before snapshot completion must not retry the permanent exclusion.
+    (tmp_path / "snapshot.json").unlink()
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("saved exclusion or completed trajectory was fetched again")
+    resumed = triage_source.snapshot(source(), tmp_path, runner=unexpected_read)
+    assert list(resumed["units"]) == [excluded, valid]
+
+    def judge_valid(slot, prompt, tokens):
+        assert json.loads(prompt[1]["content"])["untrusted_trajectory"] == valid["example"]["inputs"]["messages"]
+        return judge_call(slot, prompt, tokens)
+    result = triage.run_triage(source(), tmp_path, runner=unexpected_read, judge_call=judge_valid, confirm=True)
+    assert result["filtered_training"] == 1 and result["kept"] == 1
+    dataset_workflow.run("push", tmp_path, name="within-limits", confirm=True, runner=api)
+    assert len(api.imported) == 1
+    assert api.imported[0]["inputs"] == valid["example"]["inputs"]
 
 
 def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
@@ -688,21 +735,32 @@ def test_judge_output_is_a_score_and_reason(change):
         triage_judges.validate_judgment({"keep": 1, "reason": "complete", **change})
 
 
-def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path):
+@pytest.mark.parametrize("body", [
+    {"error": {"code": "context_length_exceeded"}},
+    {"error": {"message": "Input length 880063 exceeds maximum allowed token limit 262112"}},
+    {"detail": "Input is too long: 880063 tokens, limit 262112"},
+    {"error": "Input token count 880063 exceeds the limit of 262112 tokens"},
+    {"detail": [{"msg": "The input (880063 tokens) is longer than the model's context length (262112 tokens)."}]},
+])
+@pytest.mark.parametrize("http_error", [False, True])
+def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path, body, http_error):
     api = API()
     api.trajectory_pages[None]["messages"][1]["content"] = "x" * 20_000
     calls = []
 
-    class ContextError(Exception):
-        status_code = 400
-        body: ClassVar[dict] = {"error": {"code": "context_length_exceeded"}}
-
     def reject(judge, prompt, tokens):
         assert json.loads(prompt[-1]["content"])["untrusted_trajectory"][1]["content"] == "x" * 20_000
         calls.append(judge["name"])
-        raise ContextError()
+        if http_error:
+            error = HTTPError("https://example.invalid/chat/completions", 400, "Bad Request", {},
+                              io.BytesIO(json.dumps(body).encode()))
+            raise PipelineError("triage judge failed with HTTP 400") from error
+        error = RuntimeError("provider error")
+        error.status_code, error.body = 400, body
+        raise error
 
-    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True)
+    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True,
+                              sleeper=lambda _: pytest.fail("context rejection retried"))
     assert result["incomplete"] == 0 and result["filtered_context"] == 1
     assert len(calls) == 3
     label = json.loads((tmp_path / "labels.jsonl").read_text())
@@ -998,6 +1056,16 @@ def test_old_trace_votes_cannot_be_reused_or_imported(tmp_path):
     (400, {"error": {"message": "prompt is too long: 120000 tokens > 100000 maximum"}}, True),
     (429, {"message": "Rate limit reached"}, False),
     (400, {"message": "max_tokens exceeds the output limit"}, False),
+    (422, {"detail": "Input length 880063 exceeds maximum allowed token limit 262112"}, True),
+    (400, {"detail": "Output token count exceeds the limit of 4096 tokens"}, False),
+    (400, {"detail": "Input token budget exceeded for this account"}, False),
+    (400, {"detail": "Input token budget exceeded the account limit"}, False),
+    (400, {"detail": "Input token count 880063 exceeds the account limit of 262112"}, False),
+    (400, {"detail": "Input validation error: requested output tokens exceed the maximum allowed output length"}, False),
+    (429, {"error": "Input token count 880063 exceeds the limit of 262112 tokens"}, False),
+    (503, {"message": "prompt is too long"}, False),
+    (401, {"error": {"code": "context_length_exceeded"}}, False),
+    (400, {"error": {"code": {}, "message": "Invalid request"}}, False),
 ])
 def test_only_context_rejections_filter_trajectories(status, body, expected):
     error = RuntimeError("provider error")

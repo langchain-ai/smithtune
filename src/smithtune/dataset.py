@@ -813,13 +813,15 @@ def prepare_sft_rows(
 
 def capture_example_bindings(examples, workspace_id, *, runner=_run, source_workspace_id=None, checkpoint_path=None):
     """Attach trajectory-native tools only when recorded messages match exactly."""
-    from smithtune.curation import _fetch_trajectory
+    from smithtune.curation import _fetch_trajectory, _trajectory_page_too_large
     from smithtune.triage_source import _fetch
 
     def read(command, **kwargs):
         try:
             return _fetch(command, runner=runner, cache_dir=Path("."), use_cache=False, **kwargs)
         except subprocess.CalledProcessError as exc:
+            if _trajectory_page_too_large(exc):
+                raise
             detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
             raise PipelineError(detail) from None
 
@@ -851,12 +853,12 @@ def capture_example_bindings(examples, workspace_id, *, runner=_run, source_work
             except PipelineError as exc:
                 raise PipelineError(f"example {example['id']}: cannot read trajectory tools: {exc}") from exc
             try:
+                if trajectory["training_error"]:
+                    raise PipelineError(trajectory["training_error"])
                 if json_sha256(trajectory["messages"]) != json_sha256(example["inputs"]["messages"]):
                     raise PipelineError("source trajectory messages differ from the saved dataset example; pull a fresh dataset or supply --inference-contract")
                 if scope == "trace" and set(trajectory["trace_ids"]) != {scope_id}:
                     raise PipelineError("trajectory evidence belongs to another trace")
-                if trajectory["training_error"]:
-                    raise PipelineError(trajectory["training_error"])
                 metadata["smithtune_source"] = trajectory["source"]
                 captured[example["id"]] = metadata["smithtune_source"]
                 if checkpoint_path is not None:

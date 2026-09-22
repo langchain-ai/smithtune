@@ -730,11 +730,17 @@ def test_oversized_page_narrows_same_cursor_without_partial_import(
         assert load_conversation(saved)["example"]["metadata"]["smithtune_source"] == api.examples[0]["metadata"]["smithtune_source"]
         assert calls[-1]["page_size"] == 1
     else:
-        with pytest.raises(PipelineError, match="HTTP 400.*page_size=1.*full conversation") as caught:
-            curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
-        assert "private source content" not in str(caught.value)
+        result = curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+        assert result["rejected"] == 1 and result["created"] == 0
         assert api.examples == []
-        assert not list((tmp_path / "conversations").glob("*.json"))
+        saved, = (tmp_path / "conversations").glob("*.json")
+        unit = load_conversation(saved)
+        assert unit["example"]["inputs"]["messages"] == []
+        assert "trajectory fetch limit" in unit["rejection"]["reason"]
+        assert "private source content" not in saved.read_text()
+        calls_before = list(calls)
+        repeated = curation._import_selection(selection=tmp_path / "selection.json", name="new", concurrency=1, runner=runner)
+        assert repeated["rejected"] == 1 and calls == calls_before
     failed = [body for body in calls if body.get("cursor") == oversized_cursor]
     assert len(failed) == 2
     assert failed[1] == {**failed[0], "page_size": 1}
