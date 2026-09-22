@@ -207,7 +207,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
     if not roots:
         raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
-    print(f"Downloading conversations for {len(roots)} selected traces...", file=sys.stderr)
+    print(f"Downloading trajectories for {len(roots)} selected roots...", file=sys.stderr)
     if "project_start" not in checkpoint:
         checkpoint["project_start"] = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
         storage.save(output_dir, checkpoint)

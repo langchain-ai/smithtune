@@ -100,8 +100,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--project-id")
             command.add_argument("--start-time", help="inclusive root start time (default: 24 hours before end)")
             command.add_argument("--end-time", help="exclusive root start time (default: now)")
-            command.add_argument("--filter", help="LangSmith root-run filter; create skips council when no judging criteria are supplied")
-            command.add_argument("--limit", type=int, help="distinct trajectories to select (default: 100, maximum: 2000)")
+            command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window; create skips council when no judging criteria are supplied")
+            command.add_argument("--limit", type=int, help="distinct candidate trajectories, newest first; exclusions are not replaced (default: 100, maximum: 2000)")
         if name in {"push", "create"}:
             destination = command.add_mutually_exclusive_group()
             destination.add_argument("--name", help="new dataset name; saved for resume")

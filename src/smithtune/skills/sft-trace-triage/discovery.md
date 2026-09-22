@@ -9,7 +9,17 @@ behavior throughout the example, not only its final answer.
 Use the user's task goal and source IDs. Check the project's actual feedback,
 metadata, tags, and errors before writing source filters. Download with
 `dataset pull DIR` and source flags. This makes no judge calls. Reuse saved
-downloads; threads can contain earlier turns outside the selected time window.
+downloads. Filters select roots, then download their full threads, including
+other invocations outside the filter and time window. `--limit` counts candidates;
+excluded trajectories are not replaced. Read `download_summary` before inspecting
+examples; structural eligibility still needs model-specific checks in `prepare`.
+
+Use the [dataset guide](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md)
+for name, metadata, and exact-root filter examples. Target a known root by ID
+within its time window, rather than assuming a narrow window isolates it. Check
+`snapshot.json`'s `selected_trace_ids` and `checkpoint.json`'s root/thread mapping
+when verifying selection. An example's `source_trace_id` is the earliest trace
+in its full thread, so it can differ from the selected root.
 
 Read the recorded instructions, tools, requests, and outcomes. Explain what the
 assistant does and what the target model must do at evaluation time. Separate:

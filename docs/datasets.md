@@ -35,6 +35,11 @@ calls**. The CLI uses the expression you or your coding agent supply; it does no
 translate natural language or guess whether a score means success. Use your
 project's actual fields and [LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
 
+For example, select initial reviewer runs with
+`--filter 'and(eq(name,"reviewer"),eq(metadata_key,"re_review"),eq(metadata_value,false))'`.
+To select a known root, use `--filter 'eq(id,"<root-run-id>")'` instead of a narrow
+time window; it still selects that root's full thread. Set time bounds that include the root.
+
 For criteria requiring trajectory content, add `--rule`:
 
 ```bash
@@ -76,7 +81,11 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
 Whole trajectories with invalid messages or unsupported tool evidence are
 excluded before council calls and upload. The triage preview lists rejection
 reasons and counts only eligible judge tasks. Recorded messages are preserved. The result includes
-`eligible` and `rejected` counts; saved units retain validation errors. Model-specific
+`eligible` and `rejected` counts; saved units retain validation errors. After downloading,
+`pull` and `create` also report selected roots, full threads, total traces, and
+structural exclusion counts by reason, in stderr and the JSON `download_summary`.
+The existing `downloaded` count includes excluded trajectories. Inspect files
+listed in `snapshot.json` for each trajectory's error and source IDs. Model-specific
 rendering and context checks remain in `prepare`.
 
 Saved trajectories are read individually during judging and upload; queued judge

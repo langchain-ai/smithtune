@@ -80,6 +80,40 @@ def test_staged_pull_triage_push_uses_only_local_evidence(tmp_path):
     assert result["created"] == 1 and len(api.datasets) == len(api.imported) == 1
 
 
+@pytest.mark.parametrize("command", ["pull", "create"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_download_summary_reports_expansion_and_exclusions_on_reuse(tmp_path, capsys, command, empty):
+    api = API()
+    if empty:
+        api.trajectory_pages = {None: {"messages": [], "next_cursor": None}}
+        reason = "missing_messages"
+    else:
+        api.trajectory_pages["next"]["messages"].insert(0, {"role": "system", "content": "Another invocation"})
+        reason = "misplaced_system_message"
+    api.root_pages[0].append({"trace_id": uid(3), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
+    options = {"name": "filtered", "filter": FILTER} if command == "create" else {}
+    result = run(tmp_path, api, command, judge=no_judge, **options)
+    summary = result["download_summary"]
+    assert summary == {"selected_roots": 2, "threads": 1, "standalone_traces": 1, "traces": 3,
+                       "structurally_usable": 1, "excluded": 1, "exclusion_reasons": {reason: 1}}
+    assert result["downloaded"] == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Full threads: 1; standalone traces: 1; total traces: 3" in captured.err
+    assert "outside those criteria" in captured.err
+    assert "Downloaded 2 trajectories: 1 structurally usable, 1 excluded" in captured.err
+    assert f"Exclusions: 1 {reason.replace('_', ' ')}" in captured.err
+    assert "snapshot.json" in captured.err
+    assert not api.imported
+
+    # Reuse the frozen source without fetching or judging, and show the same counts.
+    api.calls.clear()
+    repeated = run(tmp_path, api, "pull", judge=no_judge)
+    assert repeated["download_summary"] == summary
+    assert api.calls == []
+
+
 def test_pull_then_push_does_not_require_council(tmp_path):
     api = API()
     run(tmp_path, api, "pull", judge=no_judge)

@@ -3,12 +3,13 @@
 import copy
 import shlex
 import sys
+from collections import Counter
 from pathlib import Path
 
 from smithtune import checkpoint as storage, dataset_import, triage, triage_source
 from smithtune.artifacts import _load_json, _run, output_lock
 from smithtune.curation import MAX_LIMIT, _destination, _time, _uuid
-from smithtune.dataset import _source_key
+from smithtune.dataset import _malformed_trajectory_reason, _source_key
 from smithtune.dataset_artifacts import LazySequence, new_run_directory
 from smithtune.providers.base import PipelineError
 
@@ -122,6 +123,44 @@ def _pending(directory, state):
     return pending
 
 
+def _download_summary(frozen):
+    reasons = Counter()
+    threads = traces = 0
+    for unit in frozen["units"]:
+        threads += bool(unit["example"].get("metadata", {}).get("source_thread_id"))
+        traces += len(unit["trace_ids"])
+        error = triage_source.training_error(unit)
+        if error:
+            reason = _malformed_trajectory_reason(unit["example"]["id"], PipelineError(error))
+            if reason is None:
+                if "returned no messages" in error:
+                    reason = "missing_messages"
+                elif "unknown tool availability" in error:
+                    reason = "missing_tool_availability"
+                elif "unsupported available_tools" in error:
+                    reason = "unsupported_tool_definitions"
+                else:
+                    reason = "other_structural_or_tool_error"
+            reasons[reason] += 1
+    downloaded = len(frozen["units"])
+    excluded = sum(reasons.values())
+    summary = {"selected_roots": len(frozen["selected_trace_ids"]), "threads": threads,
+               "standalone_traces": downloaded - threads, "traces": traces,
+               "structurally_usable": downloaded - excluded, "excluded": excluded,
+               "exclusion_reasons": dict(sorted(reasons.items()))}
+    print(f"Selected roots: {summary['selected_roots']}. Full threads: {threads}; "
+          f"standalone traces: {summary['standalone_traces']}; total traces: {traces}.", file=sys.stderr)
+    if threads:
+        print("Filters and time bounds select roots; full threads can include other runs outside those criteria.", file=sys.stderr)
+    print(f"Downloaded {downloaded} trajectories: {summary['structurally_usable']} structurally usable, "
+          f"{excluded} excluded. Model-specific checks run during prepare.", file=sys.stderr)
+    if reasons:
+        print("Exclusions: " + "; ".join(f"{count} {reason.replace('_', ' ')}"
+                                        for reason, count in summary["exclusion_reasons"].items()) + ".", file=sys.stderr)
+        print("Per-trajectory errors and source IDs are saved in the files referenced by snapshot.json.", file=sys.stderr)
+    return summary
+
+
 def _examples(directory, frozen, state):
     if "triage" in state["stages"]:
         return triage.selected_examples(directory, frozen=frozen, require_complete=True, allow_empty=True)
@@ -214,7 +253,7 @@ def run(command, directory=None, *, confirm=False, runner=_run, judge_call=None,
                     if frozen is None:
                         frozen = triage_source.snapshot(checkpoint["source"], directory, runner=runner,
                                                        concurrency=state.get("download_concurrency", 4))
-                    result.update(downloaded=len(frozen["units"]))
+                    result.update(downloaded=len(frozen["units"]), download_summary=_download_summary(frozen))
                 elif frozen is None:
                     raise PipelineError("download is incomplete; run dataset resume DIR --confirm or dataset pull DIR first")
                 elif stage == "triage":
