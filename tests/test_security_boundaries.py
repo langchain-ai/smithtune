@@ -95,6 +95,31 @@ def test_successful_subprocess_capture_contract(capture, capfd):
     assert not output.out and not output.err
 
 
+def test_subprocess_preserves_stdin_without_echoing_it(capfd):
+    command = [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
+    result = dataset._run_langsmith(command, capture=True, input=PRIVATE)
+    assert result.stdout == PRIVATE
+    output = capfd.readouterr()
+    assert not output.out and not output.err
+
+
+def test_trajectory_tool_reads_sanitize_both_error_streams(monkeypatch, capsys):
+    monkeypatch.setattr("smithtune.triage_source.time.sleep", lambda _: None)
+    monkeypatch.setattr("smithtune.curation._sleep", lambda _: None)
+    def fail(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr=PRIVATE,
+                                           output=f"HTTP 504: Client.Timeout exceeded; {PRIVATE}")
+    example = {"id": "example-123", "metadata": {"source_scope": "thread", "source_scope_id": "thread-123",
+                                                 "source_project_id": "project-123"}}
+    with pytest.raises(PipelineError) as error:
+        dataset.capture_example_bindings([example], "workspace-123", runner=fail)
+    assert "HTTP 504; request timed out" in str(error.value)
+    assert "example example-123" in str(error.value)
+    assert PRIVATE not in "".join(traceback.format_exception(error.value))
+    output = capsys.readouterr()
+    assert PRIVATE not in output.out + output.err
+
+
 @pytest.fixture
 def fireworks_transport(monkeypatch):
     requests = []

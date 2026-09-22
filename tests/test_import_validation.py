@@ -125,7 +125,7 @@ def rejection_entries(receipt, destination):
     ("image", "unsupported_native_content"),
     ("invalid-role", "invalid_message"),
     ("misplaced-system", "misplaced_system_message"),
-    ("unknown-tool", "unknown tool unknown"),
+    ("unknown-tool", "unknown tool in recorded tool call"),
     ("invalid-schema-args", "do not match its JSON Schema"),
     ("string-args", "invalid_message"),
     ("text-after-tool", "invalid_message"),
