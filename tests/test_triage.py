@@ -311,7 +311,7 @@ def tool_conversation(name="lookup", args=None, result=True, repeat=False):
 
 
 @pytest.mark.parametrize("kwargs,error", [
-    ({"name": "missing_tool"}, "unknown tool missing_tool"),
+    ({"name": "missing_tool"}, "unknown tool in recorded tool call"),
     ({"args": {"limit": "many"}}, "do not match its JSON Schema"),
     ({"result": False}, "unmatched tool calls or results"),
     ({"repeat": True}, "repeats tool call id"),

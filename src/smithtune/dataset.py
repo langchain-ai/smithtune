@@ -69,12 +69,29 @@ class Audit:
     readable_reasoning_blocks: int = 0
 
 
+def _langsmith_failure(exc: subprocess.CalledProcessError) -> str:
+    diagnostic = "\n".join((exc.stderr or "", exc.stdout or ""))
+    status = re.search(r"\bHTTP [45]\d\d\b", diagnostic, re.I)
+    timeout = re.search(
+        r"\b(context deadline exceeded|Client\.Timeout exceeded|request timed out|Query timeout exceeded)\b",
+        diagnostic, re.I,
+    )
+    details = [status.group().upper()] if status else []
+    if timeout:
+        details.append("request timed out")
+    detail = "; ".join(details) or f"exited with status {exc.returncode}"
+    return f"langsmith failed: {detail}"
+
+
 def _run_langsmith(command: list[str], *, capture: bool = False, input: str | None = None) -> subprocess.CompletedProcess[str]:
     try:
-        return _run(command, capture=capture, **({"input": input} if input is not None else {}))
+        # Export commands must not bypass sanitization by inheriting stderr.
+        result = _run(command, capture=True, **({"input": input} if input is not None else {}))
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
-        raise PipelineError(detail) from None
+        raise PipelineError(_langsmith_failure(exc)) from None
+    if not capture:
+        return subprocess.CompletedProcess(result.args, result.returncode)
+    return result
 
 
 def _langsmith_dataset_command(workspace_id: str, dataset_id: str) -> list[str]:
@@ -662,7 +679,7 @@ def _recorded_tool_call_reason(error: ContractError) -> str:
     detail = str(error)
     if detail.startswith("unknown tool "):
         return "unknown_tool"
-    if " do not match its JSON Schema:" in detail:
+    if " do not match its JSON Schema" in detail:
         return "invalid_tool_arguments"
     if " are not valid JSON" in detail:
         return "invalid_tool_arguments_json"
@@ -822,8 +839,7 @@ def capture_example_bindings(examples, workspace_id, *, runner=_run, source_work
         except subprocess.CalledProcessError as exc:
             if _trajectory_page_too_large(exc):
                 raise
-            detail = (exc.stderr or "").strip() or (exc.stdout or "").strip() or f"langsmith exited with status {exc.returncode}"
-            raise PipelineError(detail) from None
+            raise PipelineError(_langsmith_failure(exc)) from None
 
     identity = json_sha256({"schema_version": 2, "workspace_id": workspace_id,
                            "source_workspace_id": source_workspace_id, "examples": examples})

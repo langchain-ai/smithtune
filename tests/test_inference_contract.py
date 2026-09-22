@@ -215,7 +215,7 @@ def test_contract_validates_recorded_tool_names_and_arguments(tmp_path: Path):
             ],
         },
     ]
-    with pytest.raises(inference_contract.ContractError, match="unknown tool missing"):
+    with pytest.raises(inference_contract.ContractError, match="unknown tool in recorded tool call"):
         contract.validate_messages(unknown)
 
     invalid_arguments = copy.deepcopy(unknown)
@@ -241,7 +241,7 @@ def test_tool_schema_never_fetches_external_references(tmp_path, monkeypatch, ke
     path = tmp_path / "contract.json"
     write_contract(path, payload)
     contract = inference_contract.load_inference_contract(path)
-    with pytest.raises(inference_contract.ContractError, match="tool lookup.*external retrieval is disabled"):
+    with pytest.raises(inference_contract.ContractError, match="tool at index 0.*external retrieval is disabled"):
         contract.validate_tool_arguments("lookup", {"query": "x"})
     fetch.assert_not_called()
 

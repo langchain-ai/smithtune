@@ -21,14 +21,16 @@ def retry_sleeps(monkeypatch):
 
 
 @pytest.mark.parametrize(("stderr", "stdout", "expected"), [
-    ("Error: HTTP 429\n", "ignored response", "Error: HTTP 429"),
-    ("request timed out\n", None, "request timed out"),
-    ("", '{"detail":["Invalid run type"]}\nHTTP 422\n', '{"detail":["Invalid run type"]}\nHTTP 422'),
-    (" \n", "request failed\n", "request failed"),
-    ("", "", "langsmith exited with status 1"),
-    (None, None, "langsmith exited with status 1"),
+    ("Error: HTTP 429\n", "ignored response", "langsmith failed: HTTP 429"),
+    ("request timed out\n", None, "langsmith failed: request timed out"),
+    ("", '{"detail":["Invalid run type"]}\nHTTP 422\n', 'langsmith failed: HTTP 422'),
+    (" \n", "request failed\n", "langsmith failed: exited with status 1"),
+    ("", "", "langsmith failed: exited with status 1"),
+    (None, None, "langsmith failed: exited with status 1"),
+    ("HTTP 403: private-token\nprivate-message", None, "langsmith failed: HTTP 403"),
+    (None, "private-message" * 10000, "langsmith failed: exited with status 1"),
 ])
-def test_cli_bubbles_up_diagnostic_without_command(monkeypatch, capsys, tmp_path, stderr, stdout, expected, retry_sleeps):
+def test_cli_sanitizes_diagnostic_without_command(monkeypatch, capsys, tmp_path, stderr, stdout, expected, retry_sleeps):
     def fail(argv, **kwargs):
         raise subprocess.CalledProcessError(1, argv, stderr=stderr, output=stdout)
 
@@ -90,17 +92,17 @@ def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, ca
     assert f"LangSmith {reason}; retrying in 5.5s (1/5)" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("diagnostic", "attempts"), [
-    ('{"detail":"Rate limit exceeded."}\nHTTP 429', 6),
-    ("HTTP 403", 1),
-    ("HTTP 500", 1),
-    ("context canceled", 1),
-    ("request timed out", 6),
-    (REQUEST_TIMEOUT, 6),
-    ('{"detail":"deadline exceeded: Query timeout exceeded"}\nHTTP 504', 6),
-    ("Client.Timeout exceeded while awaiting headers", 6),
+@pytest.mark.parametrize(("diagnostic", "attempts", "expected"), [
+    ('{"detail":"Rate limit exceeded."}\nHTTP 429', 6, "HTTP 429"),
+    ("HTTP 403", 1, "HTTP 403"),
+    ("HTTP 500", 1, "HTTP 500"),
+    ("context canceled", 1, "exited with status 1"),
+    ("request timed out", 6, "request timed out"),
+    (REQUEST_TIMEOUT, 6, "request timed out"),
+    ('{"detail":"deadline exceeded: Query timeout exceeded"}\nHTTP 504', 6, "HTTP 504; request timed out"),
+    ("Client.Timeout exceeded while awaiting headers", 6, "request timed out"),
 ])
-def test_query_retry_limit_preserves_original_error(monkeypatch, retry_sleeps, diagnostic, attempts):
+def test_query_retry_limit_preserves_safe_error(monkeypatch, retry_sleeps, diagnostic, attempts, expected):
     calls = []
 
     def fail(argv, **kwargs):
@@ -110,7 +112,7 @@ def test_query_retry_limit_preserves_original_error(monkeypatch, retry_sleeps, d
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
     with pytest.raises(PipelineError) as error:
         dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
-    assert str(error.value) == diagnostic
+    assert str(error.value) == f"langsmith failed: {expected}"
     assert len(calls) == attempts
     assert retry_sleeps == ([5.5, 10.5, 20.5, 40.5, 60] if attempts == 6 else [])
 

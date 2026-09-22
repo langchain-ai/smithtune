@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _load_jsonl, _run, _utc_now
-from smithtune.capabilities import preflight_model
+from smithtune.capabilities import open_without_redirects, preflight_model
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
@@ -652,7 +652,7 @@ def _inference_smoke_test(model_route: str) -> dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with open_without_redirects(request, timeout=180) as response:
             body = json.load(response)
     except urllib.error.HTTPError as exc:
         raise PipelineError(f"inference smoke test failed with HTTP {exc.code}") from exc

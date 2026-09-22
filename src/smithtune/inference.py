@@ -130,7 +130,9 @@ def _fireworks_chat_completion(
             "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"],
         },
     )
-    return _completion_message(_post_json(request, f"inference for {model}"), model)
+    return _completion_message(
+        _post_json(request, f"inference for {model}", opener=open_without_redirects), model,
+    )
 
 
 def _baseten_chat_completion(
