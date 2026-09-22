@@ -16,12 +16,12 @@ run_dir='./runs/my-sft'
 data_dir='./data/my-sft'
 ```
 
-Install the optional deployment tools:
+Add the deployment tools, keeping the council support from the README installation:
 
 ```bash
 uv tool install --upgrade --python 3.12 \
   --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
-  'smithtune[baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
+  'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
 Set `BASETEN_API_KEY`. Evaluation also requires `LANGSMITH_API_KEY` for dataset

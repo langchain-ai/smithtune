@@ -1,7 +1,8 @@
 <h1 align="center">smithtune</h1>
 
-Fine-tune models on LangSmith trajectories with Fireworks or Baseten. Compare the
-base and tuned models in LangSmith, then optionally deploy an endpoint for your application.
+Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
+recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
+in LangSmith, then optionally deploy an endpoint for your application.
 
 ```text
 dataset create → prepare → plan → train --evaluate → deploy (optional)
@@ -21,14 +22,14 @@ Install with [uv](https://docs.astral.sh/uv/getting-started/installation/) and G
 ```bash
 uv tool install --python 3.12 \
   --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
-  'git+https://github.com/langchain-ai/smithtune.git'
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
-Add `--upgrade` to update. The override selects smithtune's tested Transformers
-version; keep it aligned with the Git ref if pinning a release or commit.
+This includes using an **Agent Council** for dataset selection. A council is a group of
+models that votes on which conversations to keep. Add `--upgrade` to update.
+The override is in place to select a more up to date version of the HuggingFace Transformer's package. Keep its Git ref aligned with the package when pinning a release or commit.
 
-Install and authenticate the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli)
-for reading traces and datasets:
+Install the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) for reading traces and datasets:
 
 ```bash
 curl -fsSL https://cli.langsmith.com/install.sh | sh
@@ -36,7 +37,7 @@ curl -fsSL https://cli.langsmith.com/install.sh | sh
 
 ### Credentials and first-use setup
 
-Configure a LangSmith key, **one training provider's key**, and a judge key:
+Set these environment variables in the shell where you run smithtune:
 
 | Variable | Needed for |
 | --- | --- |
@@ -44,9 +45,10 @@ Configure a LangSmith key, **one training provider's key**, and a judge key:
 | `FIREWORKS_API_KEY` **or** `BASETEN_API_KEY` | Your chosen provider's preparation, training, and evaluation |
 | `ANTHROPIC_API_KEY` | The default replay judge, Claude Sonnet 5 |
 
-[Other replay judges](docs/reference.md#replay-options) include Fireworks and the
-internal LangSmith gateway (`LANGSMITH_GATEWAY_API_KEY`). Dataset council review
-uses Fireworks and OpenAI by default, requiring `FIREWORKS_API_KEY` and `OPENAI_API_KEY`.
+The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
+Agent Council review by default requires a `FIREWORKS_API_KEY` and `OPENAI_API_KEY` with the default models. The model choices are configurable.
+
+See [other replay judges](docs/reference.md#replay-options) to change the judge.
 
 Read [Data Rights and Permitted Use](docs/data-rights-and-permitted-use.md).
 The first workflow requires an interactive acknowledgment, saved locally;
@@ -59,6 +61,24 @@ smithtune doctor
 
 `doctor` checks local prerequisites, not service access. Use `smithtune --help`
 or `smithtune <command> --help` for command options.
+
+### Confirm paid work
+
+Paid model calls and GPU capacity require `--confirm` on the command to run them.
+
+| Command | Without `--confirm` |
+| --- | --- |
+| `dataset create` | Downloads and previews; no council calls or upload |
+| `dataset triage` | Previews council calls |
+| `dataset resume` | Shows pending work |
+| `train`, `evaluate`, `deploy` | Stops before paid work |
+| `dataset push` | Previews the upload |
+| `promote`, `undeploy` | Stops before changing provider resources |
+
+Use `plan` before training and `eval-plan` before evaluation. Neither starts paid
+compute. Commands without confirmation can still read remote data or write local
+files. `prepare` and `dataset publish-splits` also write LangSmith split metadata;
+they do not train or call models. Running endpoints keep incurring charges until stopped.
 
 ### Choose your provider and directories
 
@@ -95,12 +115,14 @@ smithtune dataset create data/datasets/my-sft \
 smithtune dataset create data/datasets/my-sft --confirm
 ```
 
-- `--filter` alone selects without model calls. Add `--rule` or `--rubric FILE` for council review
-- Without a filter, `create` defaults to council review; `--no-triage` skips it
-- Defaults: up to 100 distinct trajectories from the last 24 hours. Set `--limit`, `--start-time`, and `--end-time` to change them
-- Filters match trace roots; each match selects its whole thread when present, including earlier turns outside the time window
+- `--filter` alone selects without model calls. Add `--rule` or `--rubric FILE` for council review.
+- Without a filter, `create` defaults to council review; `--no-triage` skips it.
+- Defaults: up to 100 candidate trajectories from the last 24 hours. Set `--limit`, `--start-time`, and `--end-time` to change them.
+- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window.
 
-Invalid or empty trajectories are recorded as rejections before judging or upload.
+Check the download summary for selected roots, full threads, and usable or excluded
+trajectories. Invalid or empty trajectories are excluded before judging or upload;
+the download does not replace them with more candidates.
 Resume interrupted work with `smithtune dataset resume data/datasets/my-sft --confirm`.
 For separate `dataset pull`, `dataset triage`, and `dataset push` stages, see
 [dataset curation](docs/datasets.md).
@@ -108,7 +130,6 @@ For separate `dataset pull`, `dataset triage`, and `dataset push` stages, see
 ## Prepare data
 
 Use the dataset ID returned by creation, or your existing dataset ID:
-
 ```bash
 dataset_id='<dataset-id>'
 
@@ -118,21 +139,20 @@ smithtune prepare \
   --data-dir "$data_dir"
 ```
 
-Preparation validates trajectories and their per-assistant tools, then creates
-approximately 80% training, 10% validation, and 10% test data. Each source trajectory
+Preparation checks each conversation and the tools available at each assistant turn.
+It assigns about 80% to training, 10% to validation, and 10% to testing. Each source trajectory
 stays in one split; the memberships are also published to the LangSmith dataset.
 
 Recorded system messages are preserved; reasoning is omitted by default. Unsupported
 or overlong trajectories are excluded without truncation and listed in
-`prepared/rejected.json`. Each supported assistant
-answer is trained once with its preceding context and the tools available at that call.
+`"$data_dir/prepared/rejected.json"`. Each supported assistant answer becomes one
+training target, with its preceding context and the tools available at that call.
 See the [preparation reference](docs/reference.md#prepare-data) for data requirements,
 reasoning options, and split recovery.
 
 ## Plan and train
 
 Preview the work, then run training and evaluation:
-
 ```bash
 smithtune plan \
   --provider "$provider" --data-dir "$data_dir" \
@@ -152,9 +172,11 @@ generates and judges a base response and a tuned response, plus judge calibratio
 Use a new or empty run directory. Repeat custom settings on both commands;
 `plan` is a preview and does not save settings for `train`.
 
-The CLI selects the checkpoint with the lowest validation loss and compares it
-with the base model on held-out test data. Both providers use training API samplers,
-so evaluation needs no deployment. Omit `--evaluate` and its replay options to train only.
+The CLI selects the saved model checkpoint with the lowest validation loss and
+compares it with the base model on held-out test data. Evaluation uses provider
+samplers to generate responses. Fireworks reuses its training session; Baseten starts temporary paid
+samplers and deactivates them on exit. You do not need to run `deploy` for this step.
+Omit `--evaluate` and its replay options to train only.
 
 ## Review results in LangSmith
 
@@ -162,8 +184,8 @@ The CLI prints **one comparison link** for the base and tuned experiments when
 evaluation starts. Results publish in the background; each trajectory's row appears
 when all its selected comparisons finish. The final JSON includes `langsmith.comparison_url`.
 
-- `teacher_agreement`: whether an assistant action passed the judge, with an explanation
-- `trajectory_teacher_agreement`: the trajectory's average score
+- `teacher_agreement`: whether an assistant action passed the judge, with an explanation.
+- `trajectory_teacher_agreement`: the trajectory's average score.
 
 Replay predicts the next response or tool call from recorded context; generated
 tool calls are **not executed**. Scores measure agreement with recorded behavior,
@@ -193,11 +215,11 @@ To change the judge, replay cap, or sampling settings, use a fresh
 
 ## Deploy a trained model
 
-Deploy **optionally**, when you want an endpoint for your application. Both providers
+Deploy when you want an endpoint for your application. Both providers
 use `deploy`; Fireworks handles promotion automatically and reuses saved promotions.
 Run the command for your training provider:
 
-**Fireworks** — install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl)
+**Fireworks**: install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl)
 and use the account owning your checkpoint:
 
 ```bash
@@ -207,7 +229,7 @@ smithtune deploy --provider fireworks --run-dir "$run_dir" \
   --confirm
 ```
 
-**Baseten** — install the [deployment extra](docs/deployment.md#deploy-a-baseten-checkpoint)
+**Baseten**: install the [deployment extra](docs/deployment.md#deploy-a-baseten-checkpoint)
 first. Choose hardware and a context cap suitable for your model; these are example values:
 
 ```bash
