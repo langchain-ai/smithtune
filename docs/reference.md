@@ -14,6 +14,11 @@ Run `smithtune models list --provider fireworks` or
 Only listed models are supported. Preparation and training check provider
 availability and select the tokenizer and renderer for the model.
 
+A Baseten workspace can be unapproved for a listed model, or approved for it only
+up to a shorter sequence length. When Baseten reports either, preparation and
+training stop before any paid work and repeat Baseten's own explanation and
+remediation instead of reporting the model as unavailable.
+
 ## Preparation defaults
 
 - One complete trajectory per dataset example

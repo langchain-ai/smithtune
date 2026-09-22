@@ -408,6 +408,150 @@ def test_capability_preflight_refuses_a_missing_model():
         )
 
 
+def _capability_response(**overrides):
+    entry = {
+        "model_name": "Qwen/Qwen3.8-27B",
+        "max_seq_len": 262_144,
+        "max_enabled_seq_len": 262_144,
+        "max_context_length": 262_144,
+        "supports_vision_language": False,
+        "enabled": True,
+        "enablement_details": None,
+    }
+    entry.update(overrides)
+    return {"supported_models": [entry]}
+
+
+def _fetch_capability(response, required=131_072):
+    return baseten.fetch_model_capability(
+        "Qwen/Qwen3.8-27B",
+        required,
+        api_key="fake-key",
+        opener=lambda request, timeout: io.BytesIO(json.dumps(response).encode()),
+    )
+
+
+def test_capability_preflight_keeps_the_enablement_fields_for_an_enabled_model():
+    capability = _fetch_capability(_capability_response(max_enabled_seq_len=131_072))
+
+    assert capability.enabled is True
+    assert capability.max_seq_len == 262_144
+    assert capability.max_enabled_seq_len == 131_072
+    assert capability.enablement_details is None
+    assert asdict(capability)["max_enabled_seq_len"] == 131_072
+
+
+def test_capability_preflight_refuses_a_model_the_workspace_cannot_run():
+    response = _capability_response(
+        max_seq_len=32_768,
+        max_enabled_seq_len=0,
+        max_context_length=32_768,
+        enabled=False,
+        enablement_details={
+            "reason": "needs_approval",
+            "reason_detail": (
+                "This model is supported, but it requires hardware your "
+                "workspace is not currently approved for."
+            ),
+            "remediation": (
+                "Contact Baseten to have the required hardware approved for "
+                "your workspace."
+            ),
+        },
+    )
+
+    with pytest.raises(baseten.BasetenModelNotEnabled) as failure:
+        _fetch_capability(response, required=32_768)
+
+    message = str(failure.value)
+    assert "requires hardware your workspace is not currently approved for" in message
+    assert "Contact Baseten to have the required hardware approved" in message
+    assert failure.value.reason == "needs_approval"
+    assert failure.value.model == "Qwen/Qwen3.8-27B"
+    assert isinstance(failure.value, baseten.BasetenRuntimeError)
+
+
+def test_disabled_model_is_refused_even_with_a_sufficient_context_limit():
+    # The deprecated catalog ceiling alone would have cleared preflight.
+    response = _capability_response(enabled=False, enablement_details=None)
+
+    with pytest.raises(baseten.BasetenModelNotEnabled, match="not enabled for the model"):
+        _fetch_capability(response)
+
+
+@pytest.mark.parametrize("reason", ["loops_not_enabled", "a_reason_this_client_predates"])
+def test_unrecognized_enablement_reasons_are_reported_verbatim(reason: str):
+    response = _capability_response(
+        enabled=False, enablement_details={"reason": reason},
+    )
+
+    with pytest.raises(baseten.BasetenModelNotEnabled) as failure:
+        _fetch_capability(response)
+
+    assert failure.value.reason == reason
+    assert reason in str(failure.value)
+
+
+def test_enabled_sequence_length_below_the_request_is_refused():
+    response = _capability_response(max_enabled_seq_len=65_536)
+
+    with pytest.raises(
+        baseten.BasetenRuntimeError, match="enabled for 65,536 tokens"
+    ):
+        _fetch_capability(response, required=131_072)
+
+
+def test_enabled_sequence_length_at_the_request_is_accepted():
+    capability = _fetch_capability(
+        _capability_response(max_enabled_seq_len=131_072), required=131_072
+    )
+
+    assert capability.max_enabled_seq_len == 131_072
+
+
+def test_capability_preflight_accepts_a_response_without_the_enablement_fields():
+    response = {
+        "supported_models": [
+            {
+                "model_name": "Qwen/Qwen3.8-27B",
+                "max_context_length": 262_144,
+                "supports_vision_language": False,
+            }
+        ]
+    }
+
+    capability = _fetch_capability(response)
+
+    assert capability.max_context_length == 262_144
+    assert capability.enabled is None
+    assert capability.max_seq_len is None
+    assert capability.max_enabled_seq_len is None
+    assert capability.enablement_details is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enabled": "true"}, "invalid model enablement flag"),
+        ({"enabled": 1}, "invalid model enablement flag"),
+        ({"enabled": None}, "invalid model enablement flag"),
+        ({"max_enabled_seq_len": None}, "invalid max_enabled_seq_len"),
+        ({"max_enabled_seq_len": -1}, "invalid max_enabled_seq_len"),
+        ({"max_enabled_seq_len": True}, "invalid max_enabled_seq_len"),
+        ({"max_enabled_seq_len": "65536"}, "invalid max_enabled_seq_len"),
+        ({"max_seq_len": None}, "invalid max_seq_len"),
+        ({"max_seq_len": 1.5}, "invalid max_seq_len"),
+        ({"enabled": False, "enablement_details": []}, "invalid model enablement details"),
+        ({"enabled": False, "enablement_details": "needs_approval"}, "invalid model enablement details"),
+        ({"enabled": False, "enablement_details": {"reason": 7}}, "invalid model enablement details"),
+        ({"enabled": False, "enablement_details": {"remediation": " "}}, "invalid model enablement details"),
+    ],
+)
+def test_malformed_enablement_fields_are_rejected(overrides: dict, message: str):
+    with pytest.raises(baseten.BasetenRuntimeError, match=message):
+        _fetch_capability(_capability_response(**overrides))
+
+
 def test_capability_read_retries_a_transient_response_with_bounded_backoff():
     response = {
         "supported_models": [

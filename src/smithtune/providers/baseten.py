@@ -260,10 +260,39 @@ class BudgetGuard:
 
 
 @dataclass(frozen=True)
+class BasetenEnablementDetails:
+    """Why a supported Baseten model is unavailable to this workspace."""
+
+    # `reason` is an open enum; unrecognized values mean "not enabled, reason
+    # unknown" and are kept verbatim for programmatic use.
+    reason: str | None = None
+    reason_detail: str | None = None
+    remediation: str | None = None
+
+
+@dataclass(frozen=True)
 class BasetenModelCapability:
     model_name: str
+    # `max_context_length` is Baseten's deprecated spelling of `max_seq_len`:
+    # both are the catalog ceiling and neither depends on the workspace.
+    # `max_enabled_seq_len` is what this workspace may actually reach, and is 0
+    # when the workspace cannot run the model at all. The new fields stay None
+    # when the workspace is on an API that does not send them yet.
     max_context_length: int
     supports_vision_language: bool | None = None
+    max_seq_len: int | None = None
+    max_enabled_seq_len: int | None = None
+    enabled: bool | None = None
+    enablement_details: BasetenEnablementDetails | None = None
+
+
+class BasetenModelNotEnabled(BasetenRuntimeError):
+    """The workspace is not enabled to train an otherwise supported model."""
+
+    def __init__(self, message: str, *, model: str, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.model = model
+        self.reason = reason
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -277,6 +306,57 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_constant(value: str) -> None:
     raise BasetenRuntimeError(f"non-finite Baseten response value: {value}")
+
+
+def _optional_sequence_limit(entry: dict[str, Any], field: str) -> int | None:
+    """Read an optional non-negative ceiling, distinguishing absent from null."""
+    if field not in entry:
+        return None
+    value = entry[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BasetenRuntimeError(f"Baseten returned an invalid {field}")
+    return value
+
+
+def _enablement(entry: dict[str, Any]) -> tuple[bool | None, BasetenEnablementDetails | None]:
+    """Parse the per-model enablement fields; absence means an older API."""
+    enabled: bool | None = None
+    if "enabled" in entry:
+        enabled = entry["enabled"]
+        if not isinstance(enabled, bool):
+            raise BasetenRuntimeError("Baseten returned an invalid model enablement flag")
+    raw_details = entry.get("enablement_details")
+    if raw_details is None:
+        return enabled, None
+    if not isinstance(raw_details, dict):
+        raise BasetenRuntimeError("Baseten returned invalid model enablement details")
+    fields: dict[str, str | None] = {}
+    for name in ("reason", "reason_detail", "remediation"):
+        value = raw_details.get(name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise BasetenRuntimeError("Baseten returned invalid model enablement details")
+        fields[name] = value
+    return enabled, BasetenEnablementDetails(**fields)
+
+
+def _not_enabled(model: str, details: BasetenEnablementDetails | None) -> BasetenModelNotEnabled:
+    """Repeat Baseten's own explanation instead of reporting the model missing."""
+    reason = details.reason if details is not None else None
+    explanation = " ".join(
+        part for part in (
+            details.reason_detail if details is not None else None,
+            details.remediation if details is not None else None,
+        ) if part
+    )
+    if not explanation:
+        explanation = "this workspace is not enabled for the model"
+        if reason:
+            explanation += f" ({reason})"
+    return BasetenModelNotEnabled(
+        f"Baseten workspace cannot train {model}: {explanation}",
+        model=model,
+        reason=reason,
+    )
 
 
 def fetch_model_capability(
@@ -329,11 +409,14 @@ def fetch_model_capability(
         raise BasetenRuntimeError("Baseten returned an invalid context limit")
     if vision is not None and not isinstance(vision, bool):
         raise BasetenRuntimeError("Baseten returned an invalid vision support flag")
-    if maximum < max_sequence_length:
-        raise BasetenRuntimeError(
-            f"Baseten workspace context limit is below {max_sequence_length:,}"
-        )
-    return BasetenModelCapability(model, maximum, vision)
+    supported = _optional_sequence_limit(matches[0], "max_seq_len")
+    enabled_limit = _optional_sequence_limit(matches[0], "max_enabled_seq_len")
+    enabled, details = _enablement(matches[0])
+    capability = BasetenModelCapability(
+        model, maximum, vision, supported, enabled_limit, enabled, details,
+    )
+    _validate_capability(capability, model, max_sequence_length)
+    return capability
 
 
 def retry_idempotent(operation: Any, *, sleeper: Any = time.sleep, attempts: int = 3) -> Any:
@@ -1458,12 +1541,33 @@ def _validate_canonical_rows(rows: list[dict[str, Any]], *, split: str) -> None:
 def _validate_capability(capability: Any, expected_model: str, required_context: int) -> None:
     model_name = getattr(capability, "model_name", None)
     maximum = getattr(capability, "max_context_length", None)
+    enabled = getattr(capability, "enabled", None)
+    enabled_limit = getattr(capability, "max_enabled_seq_len", None)
+    details = getattr(capability, "enablement_details", None)
     if model_name != expected_model:
         raise BasetenRuntimeError(f"Baseten workspace does not advertise {expected_model}")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise BasetenRuntimeError("Baseten returned an invalid model enablement flag")
+    if details is not None and not isinstance(details, BasetenEnablementDetails):
+        raise BasetenRuntimeError("Baseten returned invalid model enablement details")
+    # A missing flag means an API that predates per-model enablement, not a
+    # disabled model; only an explicit false stops the run.
+    if enabled is False:
+        raise _not_enabled(expected_model, details)
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < required_context:
         raise BasetenRuntimeError(
             f"Baseten workspace context limit is below {required_context:,}"
         )
+    if enabled_limit is not None:
+        if isinstance(enabled_limit, bool) or not isinstance(enabled_limit, int) or enabled_limit < 0:
+            raise BasetenRuntimeError("Baseten returned an invalid max_enabled_seq_len")
+        # The catalog ceiling above says what Baseten supports; this one says
+        # what the workspace is approved to reach, and it is the binding limit.
+        if enabled_limit < required_context:
+            raise BasetenRuntimeError(
+                f"Baseten workspace is enabled for {enabled_limit:,} tokens of "
+                f"{expected_model}, below the required {required_context:,}"
+            )
 
 
 def _finite_metrics(result: Any, *, operation: str) -> dict[str, float]:
