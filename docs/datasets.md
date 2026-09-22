@@ -129,7 +129,7 @@ files; the CLI saves the rubric but does not verify human agreement.
 
 `triage` reads only downloaded trajectories. Its default council is DeepSeek
 V4.1 Flash and GLM-5.3-Flash on Fireworks plus GPT-5.6 Terra on OpenAI, managed by a
-Deep Agent. Install the optional `deepagents` extra from the README and configure
+Deep Agent. The [README installation](../README.md#setup) includes the `deepagents` extra. Configure
 credentials for the selected providers. Use `--judges` to choose aliases or
 `provider:model`, and `--concurrency` to set concurrent judge tasks (default 4,
 maximum 16). Direct Anthropic uses `ANTHROPIC_API_KEY`; the Anthropic gateway uses
