@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from importlib.resources import files
@@ -43,7 +44,7 @@ def context_window_exceeded(exc: Exception) -> bool:
     """Use the provider's context rejection, never a guessed character limit."""
     error = exc.__cause__ if isinstance(exc.__cause__, urllib.error.HTTPError) else exc
     status = error.code if isinstance(error, urllib.error.HTTPError) else getattr(error, "status_code", None)
-    if status not in {400, 413}:
+    if status not in {400, 413, 422}:
         return False
     if isinstance(error, urllib.error.HTTPError):
         try:
@@ -52,18 +53,31 @@ def context_window_exceeded(exc: Exception) -> bool:
             return False
     else:
         body = getattr(error, "body", None)
-    if not isinstance(body, dict):
-        return False
-    detail = body.get("error", body)
-    if not isinstance(detail, dict):
-        return False
-    if detail.get("code") in {"context_length_exceeded", "max_context_length_exceeded"}:
-        return True
-    message = str(detail.get("message", "")).lower()
-    return any(phrase in message for phrase in (
-        "maximum context length", "context window exceeded", "exceeds the context window",
-        "prompt is too long", "input is too long", "exceeds the model's context",
-    ))
+    # Providers use both OpenAI-style errors and string/list `detail` bodies.
+    pending = [body]
+    while pending:
+        detail = pending.pop()
+        if isinstance(detail, dict):
+            code = detail.get("code")
+            if isinstance(code, str) and code in {"context_length_exceeded", "max_context_length_exceeded"}:
+                return True
+            pending.extend(detail[key] for key in ("error", "detail", "message", "msg") if key in detail)
+        elif isinstance(detail, list):
+            pending.extend(detail)
+        elif isinstance(detail, str):
+            message = detail.lower()
+            if any(phrase in message for phrase in (
+                "maximum context length", "context window exceeded", "exceeds the context window",
+                "prompt is too long", "input is too long", "exceeds the model's context",
+            )):
+                return True
+            if re.search(
+                r"\b(?:input|prompt)(?:\s+(?:token count|tokens?|length))?\s*[:=(]?\s*[\d,]+"
+                r"(?:\s+tokens?)?\)?\s+(?:is\s+)?(?:exceeds?|exceeded|longer than|greater than)"
+                r"\b.{0,120}\b(?:maximum|max|context|limit)\b", message,
+            ) and not re.search(r"\b(?:account|quota|rate|budget|output)\b", message):
+                return True
+    return False
 
 
 def reasoning_effort(provider: str, model: str) -> str:

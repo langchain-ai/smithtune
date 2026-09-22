@@ -74,7 +74,8 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
   Use `--concurrency 1` to reduce memory peaks for very large trajectories.
 - Oversized trajectory response pages are retried at the same cursor with `page_size=1`.
   All messages and per-assistant tool metadata are preserved. If the smallest page
-  still exceeds the server limit, the download stops without saving a partial trajectory.
+  still exceeds the server limit, the whole trajectory is excluded and downloading
+  continues. The saved rejection is reused on resume; partial messages are discarded.
 - Source settings are frozen in the directory. Use a new directory to select a
   different project, time window, filter, or limit.
 
@@ -137,7 +138,9 @@ maximum 16). Direct Anthropic uses `ANTHROPIC_API_KEY`; the Anthropic gateway us
 
 Every council member judges the full trajectory. All votes must finish; a strict
 majority keeps it, and ties drop it. Multimodal and provider context-window
-rejections are excluded without truncation. Request failures remain incomplete.
+rejections are excluded without truncation. A recognized context-limit rejection
+is saved without retrying that request and remains excluded on resume. Request
+failures such as timeouts and rate limits remain incomplete after retries.
 `labels.jsonl` contains `trajectory_id`, `keep`, and `reason`; `report.md` summarizes
 them. Rules and models can change during preview, but changing them after votes
 requires a new directory.

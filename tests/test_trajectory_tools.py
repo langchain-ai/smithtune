@@ -1,6 +1,7 @@
 """The trajectory UI response is the only automatic tool/provenance source."""
 import copy
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -130,6 +131,28 @@ def test_unbound_export_requires_exact_source_messages(change):
     enriched, errors = dataset.capture_example_bindings([value], "workspace", runner=api)
     assert enriched == [] and "messages differ" in errors[0]["reason"]
     assert "smithtune_source" not in value["metadata"]
+
+
+def test_unbound_export_fetch_limit_excludes_only_oversized_example():
+    values = [example(i, thread=f"thread-{i}") for i in (1, 2)]
+    for value in values:
+        del value["metadata"]["smithtune_source"]
+    requests = []
+    def api(command, *, input, **kwargs):
+        assert command[2] == "/v1/trajectory"
+        body = json.loads(input)
+        requests.append(body)
+        if body["thread_id"] == "thread-1":
+            raise subprocess.CalledProcessError(1, command, output=
+                "HTTP 400: trajectory view exceeded response data size limit. Narrow the requested trajectory page")
+        return SimpleNamespace(stdout=json.dumps({
+            "items": items(values[1]["inputs"]["messages"]), "next_cursor": None}))
+    enriched, errors = dataset.capture_example_bindings(values, "workspace", runner=api)
+    assert len(enriched) == len(errors) == 1
+    assert enriched[0]["id"] == values[1]["id"]
+    assert errors[0]["example_id"] == values[0]["id"]
+    assert "trajectory fetch limit" in errors[0]["reason"]
+    assert len(requests) == 3 and requests[1] == {**requests[0], "page_size": 1}
 
 
 def test_unbound_exports_route_same_thread_to_its_own_project_and_workspace():

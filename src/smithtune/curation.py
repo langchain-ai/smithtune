@@ -308,7 +308,10 @@ def _fetch_trajectory(
                 break
             except _TrajectoryPageTooLarge as exc:
                 if body.get("page_size") == 1:
-                    raise PipelineError(f"{exc} even with page_size=1; cannot fetch the full conversation") from exc
+                    # Keep only the rejection, never a prefix from earlier pages.
+                    return {"messages": [], "source": None, "trace_ids": [],
+                            "training_error": f"{item['key']} {item['id']} exceeds the trajectory fetch limit "
+                                              "even with page_size=1; whole trajectory excluded"}
                 # Narrow only the transport page. Preserve the cursor, all saved
                 # messages, and system-message inclusion; never truncate a turn.
                 body["page_size"] = 1

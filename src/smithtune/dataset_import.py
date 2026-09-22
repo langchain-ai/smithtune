@@ -238,10 +238,15 @@ def import_dataset(workspace, examples, source_keys, run_dir, receipt_path, *, n
                         raise PipelineError("pending upload conflicts with changed destination content; inspect the receipt before retrying")
                 elif pending["action"] == "updated":
                     raise PipelineError("pending update destination no longer exists")
-            action, body = _action(incoming, existing, triaged=triaged)
-            rejection = None
-            if action != "skipped":
-                rejection = validation(incoming) if validation is not None else import_rejection(incoming, workspace)
+            # An un-downloadable source has a saved rejection and no messages.
+            # Reconcile it without treating the placeholder as an import payload.
+            rejection = validation(incoming) if validation is not None and incoming.get("inputs", {}).get("messages") == [] else None
+            if rejection is not None:
+                action, body = "rejected", None
+            else:
+                action, body = _action(incoming, existing, triaged=triaged)
+                if action != "skipped":
+                    rejection = validation(incoming) if validation is not None else import_rejection(incoming, workspace)
             if rejection is not None:
                 action = "rejected"
             if pending is not None and action != pending["action"]:
