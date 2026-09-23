@@ -39,13 +39,20 @@ Filtering by agent name selects relevant trajectories; it does not establish
 training quality. The council reviews the saved trajectories against your
 criteria. Repeat `--rule` for multiple criteria, or pass a file with `--rubric`.
 Choose models with `--judges`. Inspect the labels before pushing; council review
-helps assess quality but does not guarantee good training data.
+helps assess quality but does not guarantee good training data. Review stops once
+the cumulative council-approved target is reached; remaining candidates stay saved.
+If the pool is exhausted below target, repeat `pull DIR` and then `triage DIR --confirm`
+to collect and review new candidates. Completed votes are reused. Small approved datasets
+receive a reliability advisory after review and in the upload summary; it does
+not block upload.
 
-You can skip council review when trusted feedback or quality labels already
+Use `--no-triage` on the first `pull` when trusted feedback or quality labels already
 establish which trajectories meet your training criteria. For example, filter
 on a validated correctness score using
-`--filter 'and(eq(feedback_key,"correctness"),gte(feedback_score,0.9))'`, then
-proceed directly from `pull` to `push` without model calls. Use thresholds suited
+`--filter 'and(eq(feedback_key,"correctness"),gte(feedback_score,0.9))' --no-triage`, then
+proceed directly from `pull` to `push` without model calls. This mode counts
+structurally usable trajectories toward the target and stops downloading when it
+is met. The mode is fixed for that directory. Use thresholds suited
 to your project; ordinary metadata or the absence of errors alone is not evidence
 of quality. An attached council plan must finish before upload.
 
@@ -65,9 +72,24 @@ Previews report pending stages and the next command. Flagless reruns use the sav
   part of the trajectory.
 - `--end-time` defaults to now; `--start-time` defaults to 24 hours before it.
   Explicit times must use ISO 8601 with a timezone. Resume reuses the original bounds.
-- `--limit` defaults to 100, up to 2000 distinct trajectories. Selection follows
-  the order LangSmith returns roots and stops paging once the limit is reached.
-  Rejections are not replaced, and the limit is not a target dataset size.
+- `--target-count` is the cumulative goal (default 100): council-approved
+  trajectories by default, or structurally usable trajectories with `--no-triage`.
+  `--max-candidates` caps **new** candidates per round (default 1000, maximum 2000).
+  These replace `--limit`. A round can collect fewer candidates if the source is
+  exhausted, or if a `--no-triage` pull reaches its target.
+- Council mode downloads the candidate pool before review; the council stops at
+  the approved target. When a fully reviewed pool falls short, another explicit
+  `pull DIR` collects unseen candidates. Neither review nor resume automatically
+  starts another collection round. Previously encountered threads, including
+  rejected and structurally excluded ones, are skipped.
+- Up to three collection rounds are allowed. Interruptions and judge errors resume
+  the same round. Source exhaustion stops collection earlier. After the limit or
+  source exhaustion, the eligible subset can still be uploaded; broader source
+  criteria require a new directory. Filters, time bounds, review mode, and limits
+  stay fixed within a directory.
+- Summaries report candidate and usable counts, review progress, the current round,
+  and why collection stopped. Resume reuses candidate pages, downloaded evidence,
+  and completed votes. Existing completed trajectory content is never refreshed.
 - `--concurrency` defaults to 4; downloads cap at 4 workers and uploads are sequential.
   Use `--concurrency 1` to reduce memory peaks for very large trajectories.
 - Oversized trajectory response pages are retried at the same cursor with `page_size=1`.
@@ -98,7 +120,7 @@ snapshots remain readable but must fit in memory; new downloads use individual f
 ```bash
 smithtune dataset pull data/datasets/reviewed \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --limit 100
+  --target-count 100 --max-candidates 1000
 
 smithtune dataset triage data/datasets/reviewed \
   --rubric ./rubric.md

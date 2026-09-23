@@ -27,7 +27,7 @@ def no_judge(*_args):
 @pytest.mark.parametrize("concurrency", [None, 16])
 def test_filtered_pull_push_preview_and_resume(tmp_path, concurrency):
     api = API()
-    run(tmp_path, api, filter=FILTER, concurrency=concurrency, judge=no_judge)
+    run(tmp_path, api, filter=FILTER, concurrency=concurrency, no_triage=True, judge=no_judge)
     preview = run(tmp_path, api, "push", name="selected", judge=no_judge)
     assert preview["status"] == "preview" and preview["selection"]["mode"] == "filters"
     assert preview["created"] == preview["eligible"] == 1
@@ -71,7 +71,7 @@ def test_staged_pull_triage_push_uses_only_local_evidence(tmp_path):
     api = API()
     pulled = run(tmp_path, api, "pull", judge=no_judge)
     assert pulled["status"] == "complete" and pulled["downloaded"] == 1
-    assert pulled["pending_stages"] == []
+    assert pulled["pending_stages"] == ["triage"]
     api.calls.clear()
     run(tmp_path, api, "triage", judge=no_judge, rules=["The answer completes the request."])
     assert api.calls == []
@@ -99,7 +99,9 @@ def test_download_summary_reports_expansion_and_exclusions_on_reuse(tmp_path, ca
     # Empty payloads retain only the selected root as source evidence.
     trace_count = 2 if empty else 3
     assert summary == {"selected_roots": 2, "threads": 1, "standalone_traces": 1, "traces": trace_count,
-                       "structurally_usable": 1, "excluded": 1, "exclusion_reasons": {reason: 1}}
+                       "structurally_usable": 1, "excluded": 1, "exclusion_reasons": {reason: 1},
+                       "target_count": 100, "max_candidates": 1000, "examined": 2, "usable": 1,
+                       "source_exhausted": True, "round": 1, "round_examined": 2, "stop_reason": "source_exhausted"}
     assert result["downloaded"] == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -119,7 +121,7 @@ def test_download_summary_reports_expansion_and_exclusions_on_reuse(tmp_path, ca
 
 def test_pull_then_push_does_not_require_council(tmp_path):
     api = API()
-    run(tmp_path, api, "pull", judge=no_judge)
+    run(tmp_path, api, "pull", no_triage=True, judge=no_judge)
     result = run(tmp_path, api, "push", name="raw", confirm=True, judge=no_judge)
     assert result["selection"]["mode"] == "unreviewed"
     assert result["created"] == 1 and not (tmp_path / "judgments.jsonl").exists()
@@ -141,7 +143,7 @@ def test_empty_trajectories_never_reach_judging_or_upload(tmp_path, with_council
         assert json.loads(prompt[1]["content"])["untrusted_trajectory"]
         return judge_call(slot, prompt, tokens)
 
-    run(tmp_path, api, "pull", judge=no_judge)
+    run(tmp_path, api, "pull", no_triage=not with_council, judge=no_judge)
     if with_council:
         run(tmp_path, api, "triage", confirm=True, judge=judge)
     result = run(tmp_path, api, "push", name="nonempty", confirm=True, judge=no_judge)
@@ -289,7 +291,7 @@ def test_interrupted_pull_can_resume_without_source_flags(tmp_path):
 
     api.failure = interrupted
     with pytest.raises(KeyboardInterrupt):
-        run(tmp_path, api, "pull", filter=FILTER)
+        run(tmp_path, api, "pull", no_triage=True, filter=FILTER)
     api.calls.clear()
     preview = run(tmp_path, api, "resume", judge=no_judge)
     assert preview["pending_stages"] == ["pull"] and api.calls == []
@@ -299,7 +301,7 @@ def test_interrupted_pull_can_resume_without_source_flags(tmp_path):
 
 def test_upload_response_loss_uses_existing_recovery(tmp_path):
     api = API()
-    run(tmp_path, api, "pull", filter=FILTER)
+    run(tmp_path, api, "pull", no_triage=True, filter=FILTER)
     run(tmp_path, api, "push", name="saved")
     failed = False
 
@@ -317,15 +319,15 @@ def test_upload_response_loss_uses_existing_recovery(tmp_path):
     assert len(api.imported) == 1 and len(api.datasets) == 1
 
 
-@pytest.mark.parametrize("change", [{"project_id": uid(999)}, {"filter": "eq(error,true)"}, {"limit": 5},
+@pytest.mark.parametrize("change", [{"project_id": uid(999)}, {"filter": "eq(error,true)"}, {"target_count": 5}, {"max_candidates": 500},
                                     {"name": "different"}])
 def test_saved_selection_and_destination_are_fixed(tmp_path, change):
     api = API()
-    run(tmp_path, api, "pull", filter=FILTER)
+    run(tmp_path, api, "pull", no_triage=True, filter=FILTER)
     run(tmp_path, api, "push", name="original")
     api.calls.clear()
     with pytest.raises(PipelineError, match="conflicts"):
-        run(tmp_path, api, "push" if "name" in change else "pull", **change)
+        run(tmp_path, api, "push" if "name" in change else "pull", no_triage=True, **change)
     assert api.calls == []
 
 
@@ -341,9 +343,9 @@ def test_council_rules_can_change_in_preview_but_not_after_votes(tmp_path):
 
 def test_no_council_can_be_added_after_upload_started(tmp_path):
     api = API()
-    run(tmp_path, api, "pull", filter=FILTER)
+    run(tmp_path, api, "pull", no_triage=True, filter=FILTER)
     run(tmp_path, api, "push", name="filtered", confirm=True, judge=no_judge)
-    with pytest.raises(PipelineError, match="after upload started"):
+    with pytest.raises(PipelineError, match="no-triage"):
         run(tmp_path, api, "triage", confirm=True)
 
 
@@ -360,13 +362,13 @@ def test_all_dropped_avoids_empty_dataset_and_completes(tmp_path):
 def test_all_invalid_filters_avoid_judging_and_upload(tmp_path):
     api = API()
     api.trajectory_pages[None]["messages"].append({"role": "system", "content": "misplaced"})
-    pulled = run(tmp_path, api, "pull", filter=FILTER)
+    pulled = run(tmp_path, api, "pull", no_triage=True, filter=FILTER)
     result = run(tmp_path, api, "push", name="invalid", confirm=True, judge=no_judge)
     assert result["rejected"] == pulled["downloaded"] == 1
     assert result["example_count"] == 0 and not api.datasets
 
 
-def test_distinct_trajectory_limit_stops_query_pagination(tmp_path):
+def test_distinct_trajectory_target_stops_query_pagination(tmp_path):
     api = API()
     api.root_pages = [[{"trace_id": uid(1), "thread_id": "conversation-a"},
                        {"trace_id": uid(2), "thread_id": "conversation-a"},
@@ -375,7 +377,7 @@ def test_distinct_trajectory_limit_stops_query_pagination(tmp_path):
     for page in api.root_pages:
         for root in page:
             root["start_time"] = "2026-09-02T00:00:00Z"
-    result = run(tmp_path, api, "pull", limit=2)
+    result = run(tmp_path, api, "pull", no_triage=True, target_count=2)
     assert result["downloaded"] == 2
     root_queries = [json.loads(body) for command, body in api.calls if command[2] == "/api/v2/runs/query" and body]
     assert len(root_queries) == 1 and "cursor" not in root_queries[0]
@@ -494,7 +496,7 @@ def test_parallel_pull_preserves_inflight_downloads_and_order_on_resume(tmp_path
 
     monkeypatch.setattr(triage_source, "_fetch_trajectory", interrupted)
     with pytest.raises(PipelineError, match="source read interrupted"):
-        run(tmp_path, api, "pull", concurrency=16)
+        run(tmp_path, api, "pull", no_triage=True, concurrency=16)
     assert peak == 4 and len(seen) == 4
     assert len(checkpoint.load(tmp_path)["downloads"]) == 3
     assert not (tmp_path / "snapshot.json").exists()
@@ -536,7 +538,7 @@ def test_staged_dataset_can_be_downloaded_and_prepared(tmp_path):
     api.root_pages[0].extend({"trace_id": uid(n), "thread_id": None,
                               "start_time": "2026-09-02T01:00:00Z"} for n in range(3, 14))
     directory = tmp_path / "curation"
-    run(directory, api, "pull")
+    run(directory, api, "pull", no_triage=True)
     uploaded = run(directory, api, "push", name="prepared", confirm=True, judge=no_judge)
     assert uploaded["example_count"] == 12
 

@@ -101,7 +101,9 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--start-time", help="inclusive root start time (default: 24 hours before end)")
             command.add_argument("--end-time", help="exclusive root start time (default: now)")
             command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window")
-            command.add_argument("--limit", type=int, help="distinct candidate trajectories, newest first; exclusions are not replaced (default: 100, maximum: 2000)")
+            command.add_argument("--target-count", type=int, help="desired council-approved trajectories, or structurally usable trajectories with --no-triage (default: 100)")
+            command.add_argument("--max-candidates", type=int, help="maximum new candidates per collection round (default: 1000, maximum: 2000)")
+            command.add_argument("--no-triage", action="store_true", default=None, help="count structurally usable trajectories toward the target; skip council review (saved for this directory)")
         if name == "push":
             destination = command.add_mutually_exclusive_group()
             destination.add_argument("--name", help="new dataset name; saved for resume")
@@ -551,7 +553,7 @@ def main(argv: list[str] | None = None) -> None:
                                  "--triage-dir": "dataset push DIR", "--output-dir": "dataset triage DIR"}.items():
             if old in flags:
                 parser.error(f"{old} was replaced by the directory argument; use {replacement}")
-        if arguments[1] == "triage" and flags & {"--workspace-id", "--project-id", "--start-time", "--end-time", "--filter", "--limit", "--seed"}:
+        if arguments[1] == "triage" and flags & {"--workspace-id", "--project-id", "--start-time", "--end-time", "--filter", "--target-count", "--max-candidates", "--seed"}:
             parser.error("triage uses saved local trajectories; run dataset pull DIR with source flags first")
     args = parser.parse_args(arguments)
     activity = ExitStack()
@@ -589,7 +591,7 @@ def main(argv: list[str] | None = None) -> None:
                 value = reporting.publish_prepared_splits(args.data_dir)
             else:
                 options = {key: getattr(args, key, None) for key in (
-                    "workspace_id", "project_id", "start_time", "end_time", "filter", "limit",
+                    "workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates", "no_triage",
                     "name", "dataset_id", "concurrency", "attempts", "max_output_tokens",
                 )}
                 options.update(judges=args.judges.split(",") if getattr(args, "judges", None) is not None else None,

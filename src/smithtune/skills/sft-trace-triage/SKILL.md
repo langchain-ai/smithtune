@@ -63,7 +63,7 @@ task, keep/drop criteria, and concrete examples.
 Review it with the user, then pass `--rubric ./rubric.md` for council judging.
 Use `--rule` as a shortcut for short additional criteria.
 
-- Use `dataset pull DIR` with source IDs, time window, and optional `--filter` / `--limit`.
+- Use `dataset pull DIR` with source IDs, time window, and `--filter`, `--target-count`, and `--max-candidates` as needed.
   Inspect its download summary, exclusion reasons, and representative saved trajectories.
   Pull makes no model calls. Selecting an agent by name or filtering out errors
   alone does not establish training quality.
@@ -71,15 +71,17 @@ Use `--rule` as a shortcut for short additional criteria.
   `dataset triage DIR --rubric ./rubric.md` to preview. Check the saved text in
   `plan.json`, then use `dataset triage DIR --confirm` when judging is authorized.
   Inspect a small batch's decisions before scoring the larger pool.
+  If the reviewed pool falls short, follow the returned `pull` command to add
+  unseen candidates, then review again. Up to three rounds reuse completed votes.
   Read `labels.jsonl`, individual votes in `judgments.jsonl`, and `report.md`
   and explain the counts and reasons. Failed judge requests remain incomplete.
-- Skip council review only when trusted feedback or quality labels already establish
+- Set `--no-triage` on the first pull only when trusted feedback or quality labels already establish
   which trajectories meet the training criteria. Explain the evidence and decision
   to the user. Council review helps assess quality; it does not guarantee it.
 - Preview upload with `dataset push DIR --name NAME` (or `--dataset-id ID`).
   Add `--confirm` when upload is authorized. Push respects any council plan
-  already attached to the directory. Pull followed directly by push uses the
-  source filters and structural checks without model calls.
+  saved for the directory. With `--no-triage` on the first pull, pull followed
+  directly by push uses source filters and structural checks without model calls.
 - `dataset resume DIR` shows pending stages without network calls. With
   `--confirm`, it continues the saved workflow and reuses completed work.
 - On failure, identify the stage and saved directory, inspect pending work, and resume

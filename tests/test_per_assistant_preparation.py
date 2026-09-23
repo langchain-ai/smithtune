@@ -137,7 +137,7 @@ def test_pull_upload_prepare_and_replay_preserve_changing_tools(tmp_path, monkey
         assert [len(b['tools']) for b in evidence['untrusted_assistant_tool_bindings']] == [1, 2, 0]
         return {'keep': 1, 'reason': 'Complete answer.'}
     directory = tmp_path / 'curation'
-    dataset_workflow.run('pull', directory, runner=api, filter='eq(name,"agent")', **SOURCE)
+    dataset_workflow.run('pull', directory, runner=api, filter='eq(name,"agent")', no_triage=not triaged, **SOURCE)
     if triaged:
         dataset_workflow.run('triage', directory, runner=api, judge_call=judge, confirm=True,
                              rules=['Keep complete answers.'])

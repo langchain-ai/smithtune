@@ -10,9 +10,14 @@ Use the user's task goal and source IDs. Check the project's actual feedback,
 metadata, tags, and errors before writing source filters. Download with
 `dataset pull DIR` and source flags. This makes no judge calls. Reuse saved
 downloads. Filters select roots, then download their full threads, including
-other invocations outside the filter and time window. `--limit` counts candidates;
-excluded trajectories are not replaced. Read `download_summary` before inspecting
-examples; structural eligibility still needs model-specific checks in `prepare`.
+other invocations outside the filter and time window. `--target-count` requests
+council-approved trajectories across rounds; `--max-candidates` caps new candidates
+per pull. Review stops at the approved target. If the pool is exhausted below
+target, follow the returned next command to pull unseen candidates into the same
+directory, then review again. At most three rounds are allowed; saved votes and
+exclusions are reused. With `--no-triage` on the first pull, the target instead
+counts structurally usable trajectories. Inspect `download_summary` and
+`collection` before proceeding; model-specific checks still run in `prepare`.
 
 Use the [dataset guide](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md)
 for name, metadata, and exact-root filter examples. Target a known root by ID

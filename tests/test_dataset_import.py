@@ -202,7 +202,7 @@ def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
     from smithtune.triage_source import load_snapshot
     from test_triage import API as SourceAPI, source
 
-    dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), **{key: value for key, value in source().items() if key != "seed"})
+    dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), no_triage=True, **{key: value for key, value in source().items() if key != "seed"})
     old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
     old.update(id=uid(1), dataset_id=uid(200))
     old["inputs"]["messages"] = old["inputs"]["messages"][:3]

@@ -14,7 +14,7 @@ from test_triage import API as TriageAPI, judge_call, source
 
 def test_completed_stages_resume_without_source_or_destination_calls(tmp_path):
     api = TriageAPI()
-    workflow(tmp_path, api, "pull")
+    workflow(tmp_path, api, "pull", no_triage=True)
     workflow(tmp_path, api, "push", name="saved", confirm=True)
     api.calls.clear()
     api.failure = lambda *_: pytest.fail("completed workflow made a remote call")
@@ -27,7 +27,7 @@ def test_completed_stages_resume_without_source_or_destination_calls(tmp_path):
 @pytest.mark.parametrize("operation", ["dataset", "example"])
 def test_lost_upload_response_is_adopted_by_saved_id(tmp_path, operation):
     api = TriageAPI()
-    workflow(tmp_path, api, "pull")
+    workflow(tmp_path, api, "pull", no_triage=True)
     failed = False
 
     def lost_response(command, **kwargs):
@@ -48,7 +48,7 @@ def test_lost_upload_response_is_adopted_by_saved_id(tmp_path, operation):
 
 def test_dataset_absent_after_failed_creation_retries_same_id(tmp_path):
     api = TriageAPI()
-    workflow(tmp_path, api, "pull")
+    workflow(tmp_path, api, "pull", no_triage=True)
     api.failure = lambda command: (_ for _ in ()).throw(PipelineError("HTTP 504")) if command[2] == "/api/v1/datasets" else None
     with pytest.raises(PipelineError):
         workflow(tmp_path, api, "push", name="saved", confirm=True)
@@ -185,7 +185,7 @@ def test_checkpoint_rejects_unsafe_paths(tmp_path, path):
 
 def test_checkpoint_rejects_changed_download_before_upload(tmp_path):
     api = TriageAPI()
-    workflow(tmp_path, api, "pull")
+    workflow(tmp_path, api, "pull", no_triage=True)
     path, = (tmp_path / "conversations").glob("*.json")
     unit = json.loads(path.read_text())
     unit["example"]["inputs"]["messages"][0]["content"] = "tampered"
