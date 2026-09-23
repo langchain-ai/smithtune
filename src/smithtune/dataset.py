@@ -22,7 +22,6 @@ from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
 from smithtune.inference_contract import (
     ContractError,
     InferenceContract,
-    contract_from_runs,
     load_inference_contract,
     parse_inference_contract,
     json_sha256,
@@ -126,7 +125,7 @@ def _langsmith_page_command(
     ]
 
 
-def _contract_read(command: list[str], *, runner: Callable[..., Any], attempts: int = 6) -> Any:
+def _langsmith_read(command: list[str], *, runner: Callable[..., Any], attempts: int = 6) -> Any:
     for attempt in range(attempts):
         try:
             result = runner(command, capture=True)
@@ -145,19 +144,8 @@ def _contract_read(command: list[str], *, runner: Callable[..., Any], attempts: 
         raise PipelineError("LangSmith run query returned invalid JSON") from exc
 
 
-def _read_contract_run(workspace_id: str, run_id: str, *, runner: Callable[..., Any]) -> dict[str, Any]:
-    # V2 queries require a project. A direct lookup resolves it when only a run ID is known.
-    run = _contract_read([
-        "langsmith", "api", f"/api/v1/runs/{quote(run_id, safe='')}",
-        "--workspace", workspace_id, "--method", "GET",
-    ], runner=runner)
-    if not isinstance(run, dict) or run.get("id") != run_id:
-        raise PipelineError(f"LangSmith did not return the requested run {run_id}")
-    return run
-
-
 def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[..., Any], read_attempts: int = 6) -> str:
-    project = _contract_read([
+    project = _langsmith_read([
         "langsmith", "api", f"/api/v1/sessions/{quote(project_id, safe='')}",
         "--workspace", workspace_id, "--method", "GET",
     ], runner=runner, attempts=read_attempts)
@@ -173,7 +161,7 @@ def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[
     return start
 
 
-def _query_contract_runs(
+def _query_runs(
     workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any], read_attempts: int = 6,
 ) -> list[dict[str, Any]]:
     body = {
@@ -193,7 +181,7 @@ def _query_contract_runs(
         body.pop("cursor", None)
         cursors: set[str] = set()
         while True:
-            response = _contract_read([
+            response = _langsmith_read([
                 "langsmith", "api", "/api/v2/runs/query", "--workspace", workspace_id,
                 "--method", "POST", "--body", _canonical(body),
             ], runner=runner, attempts=read_attempts)
@@ -204,7 +192,7 @@ def _query_contract_runs(
                     raise PipelineError("LangSmith returned an invalid run")
                 if item.get("project_id") not in body["project_ids"]:
                     raise PipelineError("LangSmith returned a run from a different project")
-                # Keep the contract's existing representation independent of API wire names.
+                # Keep saved run records independent of API wire names.
                 run = {**item, "session_id": item["project_id"]}
                 run.pop("project_id")
                 if isinstance(run.get("run_type"), str):
@@ -213,7 +201,7 @@ def _query_contract_runs(
                 if metadata is not None:
                     run["extra"] = {**(run.get("extra") or {}), "metadata": metadata}
                 if run["id"] in runs and runs[run["id"]] != run:
-                    raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; capture again")
+                    raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; pull again")
                 runs[run["id"]] = run
             cursor = response.get("next_cursor")
             if cursor is None:
@@ -226,79 +214,6 @@ def _query_contract_runs(
             break
         start = window_end
     return list(runs.values())
-
-
-def _query_thread_llm_runs(
-    workspace_id: str, project_id: str, thread_id: str, *, start_time: str, runner: Callable[..., Any],
-) -> list[dict[str, Any]]:
-    # Child calls need not repeat their thread ID. Resolve roots first to
-    # avoid an expensive trace_filter join when retrieving their LLM calls.
-    trace_ids: set[str] = set()
-    for key in ("thread_id", "conversation_id", "session_id"):
-        thread_filter = f"and(eq(metadata_key,{json.dumps(key)}),eq(metadata_value,{json.dumps(thread_id)}))"
-        roots = _query_contract_runs(workspace_id, {
-            "project_ids": [project_id], "is_root": True, "filter": thread_filter,
-            "selects": ["ID", "PROJECT_ID"], "min_start_time": start_time,
-        }, runner=runner)
-        trace_ids.update(root["id"] for root in roots)
-    ordered_traces = sorted(trace_ids)
-    thread_runs: dict[str, dict[str, Any]] = {}
-    for offset in range(0, len(ordered_traces), LANGSMITH_PAGE_SIZE):
-        batch = ordered_traces[offset : offset + LANGSMITH_PAGE_SIZE]
-        for run in _query_contract_runs(workspace_id, {
-            "project_ids": [project_id], "run_type": "LLM",
-            "filter": f"in(trace_id, {json.dumps(batch)})", "min_start_time": start_time,
-        }, runner=runner):
-            if run.get("trace_id") not in batch:
-                raise PipelineError("LangSmith returned a run from a different trace")
-            if run["id"] in thread_runs and thread_runs[run["id"]] != run:
-                raise PipelineError(f"run {run['id']} changed during the thread scan; capture again")
-            thread_runs[run["id"]] = run
-    return list(thread_runs.values())
-
-
-def capture_inference_contract(
-    workspace_id: str,
-    run_id: str,
-    output: Path,
-    *,
-    runner: Callable[..., Any] = _run_langsmith,
-) -> dict[str, Any]:
-    """Collect all function tools in the selected LLM run's conversation thread."""
-    source = _read_contract_run(workspace_id, run_id, runner=runner)
-    if source.get("run_type") != "llm":
-        raise PipelineError("contract capture requires an LLM run ID inside the sample conversation")
-    project_id, trace_id = source.get("session_id"), source.get("trace_id")
-    if not isinstance(project_id, str) or not project_id or not isinstance(trace_id, str) or not trace_id:
-        raise PipelineError("source LLM run has no project or trace ID")
-    start_time = _project_start_time(workspace_id, project_id, runner=runner)
-    roots = _query_contract_runs(
-        workspace_id, {"project_ids": [project_id], "ids": [trace_id], "page_size": 1, "min_start_time": start_time}, runner=runner,
-    )
-    if len(roots) != 1 or roots[0]["id"] != trace_id:
-        raise PipelineError(f"LangSmith did not return the source trace root {trace_id}")
-    metadata = (roots[0].get("extra") or {}).get("metadata") or {}
-    thread_keys = ("thread_id", "conversation_id", "session_id")
-    thread_id = next((metadata[key] for key in thread_keys if isinstance(metadata.get(key), str) and metadata[key]), None)
-    if thread_id is None:
-        raise PipelineError("source trace has no thread ID; choose an LLM run from a conversation thread")
-    runs = _query_thread_llm_runs(workspace_id, project_id, thread_id, start_time=start_time, runner=runner)
-    try:
-        payload = contract_from_runs(runs, workspace_id=workspace_id, source_run_id=run_id, thread_id=thread_id)
-    except ContractError as exc:
-        raise PipelineError(f"cannot capture inference contract: {exc}") from exc
-    # Only publish a usable contract after every page and every tool passes.
-    _json_dump(output, payload)
-    return {
-        "output": str(output),
-        "source_run_id": run_id,
-        "source_thread_id": thread_id,
-        "llm_run_count": len(runs),
-        "trace_count": len(payload["provenance"]["source_trace_ids"]),
-        "contract_sha256": payload["contract_sha256"],
-        "tools_sha256": payload["tools_sha256"],
-        "tool_count": len(payload["tools"]),
-    }
 
 
 def download_dataset(
@@ -673,17 +588,6 @@ def _malformed_trajectory_reason(example_id: str, error: PipelineError) -> str |
     if detail == f"example {example_id} has misplaced system message":
         return "misplaced_system_message"
     return None
-
-
-def _recorded_tool_call_reason(error: ContractError) -> str:
-    detail = str(error)
-    if detail.startswith("unknown tool "):
-        return "unknown_tool"
-    if " do not match its JSON Schema" in detail:
-        return "invalid_tool_arguments"
-    if " are not valid JSON" in detail:
-        return "invalid_tool_arguments_json"
-    return "recorded_tool_call_incompatible"
 
 
 def _exclude_malformed_trajectories(

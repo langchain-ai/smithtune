@@ -111,7 +111,7 @@ def test_queued_council_tasks_hold_only_summaries(tmp_path, monkeypatch, runner_
         seen.append(slot["name"])
         return judge_call(slot, messages, tokens)
     def dispatch(pending, run_task, save_record, *args, **kwargs):
-        assert len(pending) == 6
+        assert len(pending) == 4
         assert all(set(trajectory) == {"trajectory_id", "multimodal_types", "has_assistant_runs"}
                    for trajectory, _ in pending)
         for trajectory, slot in pending:
@@ -125,7 +125,7 @@ def test_queued_council_tasks_hold_only_summaries(tmp_path, monkeypatch, runner_
         monkeypatch.setattr(triage_agent, "check_installation", lambda: None)
         monkeypatch.setattr(triage_coordinator, "coordinate", dispatch)
     summary = triage.run_triage(source(), tmp_path, runner=api, runner_mode=runner_mode, confirm=True, attempts=1)
-    assert summary["kept"] == 2 and len(seen) == 6
+    assert summary["kept"] == 2 and len(seen) == 4
     examples = triage.selected_examples(tmp_path, require_complete=True)
     assert isinstance(examples, LazySequence) and len(examples) == 2
     assert all(example["metadata"]["smithtune_triage"] for example in examples)

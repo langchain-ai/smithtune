@@ -18,8 +18,17 @@ from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
 
 ANTHROPIC_ENDPOINTS = {
     "anthropic": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
-    "anthropic-gateway": ("https://gateway.smith.langchain.com/anthropic", "LANGSMITH_GATEWAY_API_KEY"),
 }
+# Baseten Model APIs (shared hosted models), used for judges; not dedicated deployments.
+BASETEN_MODEL_API_URL = "https://inference.baseten.co/v1"
+
+
+def judge_endpoint(judge_model: str) -> str | None:
+    """Return the fixed endpoint for a judge route; None means Fireworks inference."""
+    provider = judge_model.partition("/")[0]
+    if provider in ANTHROPIC_ENDPOINTS:
+        return ANTHROPIC_ENDPOINTS[provider][0]
+    return BASETEN_MODEL_API_URL if provider == "baseten" else None
 
 
 REQUEST_TIMEOUT_SECONDS = 300
@@ -157,6 +166,24 @@ def _baseten_chat_completion(
     return _completion_message(result, model)
 
 
+def _baseten_model_api_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    json_mode: bool = False,
+) -> dict[str, Any]:
+    key = os.environ.get("BASETEN_API_KEY")
+    if not key or not key.strip():
+        raise PipelineError("BASETEN_API_KEY is not set for the judge")
+    body = _chat_request_body(model, messages, max_tokens, json_mode, None)
+    request = urllib.request.Request(
+        BASETEN_MODEL_API_URL + "/chat/completions", data=json.dumps(body).encode(), method="POST",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    result = _post_json(request, f"Baseten inference for {model}", opener=open_without_redirects)
+    return _completion_message(result, model)
+
+
 def anthropic_connection(provider: str = "anthropic") -> tuple[str, str]:
     """Resolve an explicit endpoint and its own credential; never fall back across providers."""
     if provider not in ANTHROPIC_ENDPOINTS:
@@ -219,6 +246,10 @@ def _chat_completion(
         return _anthropic_chat_completion(
             model_id, messages, max_tokens, json_mode, provider=provider
         )
+    if provider == "baseten":
+        if request_contract is not None:
+            raise PipelineError("agent inference contracts are supported only for Fireworks replay models")
+        return _baseten_model_api_completion(model_id, messages, max_tokens, json_mode)
     return _fireworks_chat_completion(
         model,
         messages,

@@ -4,7 +4,6 @@ import subprocess
 import pytest
 
 from smithtune import artifacts, curation, dataset
-from smithtune.cli import main
 from smithtune.providers.base import PipelineError
 
 
@@ -30,20 +29,19 @@ def retry_sleeps(monkeypatch):
     ("HTTP 403: private-token\nprivate-message", None, "langsmith failed: HTTP 403"),
     (None, "private-message" * 10000, "langsmith failed: exited with status 1"),
 ])
-def test_cli_sanitizes_diagnostic_without_command(monkeypatch, capsys, tmp_path, stderr, stdout, expected, retry_sleeps):
+def test_langsmith_failure_sanitizes_diagnostic_without_command(monkeypatch, stderr, stdout, expected, retry_sleeps):
     def fail(argv, **kwargs):
         raise subprocess.CalledProcessError(1, argv, stderr=stderr, output=stdout)
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
-    with pytest.raises(SystemExit) as error:
-        main(["capture-contract", "--workspace-id", "workspace-123", "--run-id", "private-run",
-              "--output", str(tmp_path / "contract.json")])
-    assert error.value.code == 2
-    output = capsys.readouterr().err
-    assert output.endswith(f"error: {expected}\n")
+    with pytest.raises(PipelineError) as error:
+        dataset._run_langsmith(["langsmith", "api", "/api/v1/runs/private-run", "--body", '{"private": true}'])
+    output = str(error.value)
+    assert output == expected
     assert "--body" not in output
     assert "private" not in output
     assert "ignored response" not in output
+    assert retry_sleeps == []
 
 
 def test_trajectory_failure_keeps_example_context(monkeypatch):
@@ -85,7 +83,7 @@ def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, ca
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(response))
 
     monkeypatch.setattr(artifacts.subprocess, "run", run)
-    runs = dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
+    runs = dataset._query_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
     assert [run["id"] for run in runs] == ["first", "second"]
     assert cursors == [None, "page-2", "page-2", "page-2"]
     assert retry_sleeps == [5.5, 10.5]
@@ -111,7 +109,7 @@ def test_query_retry_limit_preserves_safe_error(monkeypatch, retry_sleeps, diagn
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
     with pytest.raises(PipelineError) as error:
-        dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
+        dataset._query_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
     assert str(error.value) == f"langsmith failed: {expected}"
     assert len(calls) == attempts
     assert retry_sleeps == ([5.5, 10.5, 20.5, 40.5, 60] if attempts == 6 else [])

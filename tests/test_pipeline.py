@@ -178,70 +178,6 @@ def test_download_dataset_pages_past_one_hundred(tmp_path: Path):
     assert all(row["_source"]["source_scope_id"] for row in dataset_ops.prepare_sft_rows(returned))
 
 
-def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
-    run = {
-        "id": "run-id",
-        "trace_id": "trace-id",
-        "session_id": "project-id",
-        "name": "ChatModel",
-        "run_type": "llm",
-        "start_time": "2026-09-03T12:00:00Z",
-        "extra": {
-            "metadata": {"ls_provider": "provider", "ls_model_name": "model"},
-            "invocation_params": {
-                "temperature": 0,
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "lookup",
-                            "description": "Look up a value.",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    }
-                ],
-            },
-        },
-    }
-    commands = []
-
-    def runner(command, capture=False):
-        if not command[2].startswith("/api/v1/sessions/"):
-            commands.append(command)
-        if command[2] == "/api/v1/runs/run-id":
-            return SimpleNamespace(stdout=json.dumps(run))
-        if command[2].startswith("/api/v1/sessions/"):
-            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
-                                                      "start_time": "2026-09-01T00:00:00Z"}))
-        body = json.loads(command[command.index("--body") + 1])
-        if body.get("ids") == ["trace-id"] or body.get("is_root"):
-            result = {"id": "trace-id", "session_id": "project-id",
-                      "extra": {"metadata": {"thread_id": "thread-id"}}}
-        else:
-            result = run
-        from test_tool_capture import page
-        return SimpleNamespace(stdout=json.dumps(page([result])))
-
-    output = tmp_path / "contract.json"
-    summary = dataset_ops.capture_inference_contract(
-        "workspace-id",
-        "run-id",
-        output,
-        runner=runner,
-    )
-    contract = inference_contract.load_inference_contract(output)
-    request_body = json.loads(commands[1][commands[1].index("--body") + 1])
-
-    assert commands[1][:3] == ["langsmith", "api", "/api/v2/runs/query"]
-    assert commands[0][commands[0].index("--workspace") + 1] == "workspace-id"
-    assert request_body["ids"] == ["trace-id"]
-    assert "EXTRA" in request_body["selects"]
-    assert "INPUTS" not in request_body["selects"]
-    assert "system_prompt" not in json.loads(output.read_text())
-    assert summary["contract_sha256"] == contract.contract_sha256
-    assert summary["source_run_id"] == "run-id"
-
-
 def test_tool_call_conversion_preserves_ids_and_arguments():
     source = message(
         "ai",
@@ -832,19 +768,6 @@ def test_prepare_cli_accepts_one_dataset_and_fraction_controls(monkeypatch):
     assert args.dataset_id == "source-dataset"
     assert args.validation_fraction == 0.0
     assert args.test_fraction == 1.0
-
-    capture = parser.parse_args(
-        [
-            "capture-contract",
-            "--workspace-id",
-            "workspace-id",
-            "--run-id",
-            "run-id",
-            "--output",
-            "contract.json",
-        ]
-    )
-    assert capture.output == Path("contract.json")
 
 
 def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyPatch):
@@ -1515,7 +1438,7 @@ def test_anthropic_judge_calls_anthropic_directly(monkeypatch: pytest.MonkeyPatc
     assert result["content"].startswith("{")
 
 
-def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.MonkeyPatch):
+def test_anthropic_judge_ignores_custom_headers(monkeypatch: pytest.MonkeyPatch):
     captured = {}
 
     class Response(io.BytesIO):
@@ -1532,7 +1455,7 @@ def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-key")
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"gateway-key"}')
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"other-key"}')
 
     inference_transport._chat_completion(
         "anthropic/claude-sonnet-5",
@@ -1583,13 +1506,13 @@ def test_inference_transport_reports_failures_as_pipeline_errors(
         inference_transport._chat_completion(model, [{"role": "user", "content": "hi"}], 16)
 
 
-def test_claude_sonnet_5_is_the_default_judge(monkeypatch):
+def test_baseten_glm_flash_is_the_default_judge(monkeypatch):
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     args = pipeline._parser().parse_args(
         ["evaluate", "--output-dir", "evaluation", "--tuned-model", "tuned"]
     )
 
-    assert args.judge_model == "anthropic/claude-sonnet-5"
+    assert args.judge_model == "baseten/zai-org/GLM-5.3-Flash"
 
 
 def test_judge_marks_reference_tool_results_as_future_evidence():
@@ -2059,11 +1982,9 @@ def test_source_uses_official_provider_urls_and_no_embedded_secret():
             fireworks,
         )
     )
-    assert "gateway.smith.langchain.com/fireworks" not in source
     assert "https://api.fireworks.ai/training/v1/serverless" in source
     assert "https://api.fireworks.ai/inference/v1" in source
     assert "https://api.anthropic.com" in source
-    assert "https://gateway.smith.langchain.com/anthropic" in source
     assert "fw_" not in source
     assert "lsv2_pt_" not in source
 

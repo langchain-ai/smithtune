@@ -1,64 +1,69 @@
 # Dataset curation
 
 Use one directory throughout curation. Each trajectory becomes one LangSmith
-dataset example. `create` combines the stages; use them separately when you want
-to inspect or change the plan before continuing.
+dataset example. The recommended workflow is to download with `pull`, review
+training-example quality with `triage`, and upload with `push`. Inspect each
+stage’s result before continuing.
 
 | Command | Behavior |
 | --- | --- |
 | `dataset pull DIR` | Download trajectories and per-assistant tool lists |
-| `dataset triage DIR` | Preview council judging; `--confirm` runs it |
+| `dataset triage DIR` | Review trajectory quality with an agent council; preview before confirming |
 | `dataset push DIR` | Preview upload; `--confirm` uploads |
-| `dataset create DIR` | Download, optionally judge, and upload |
 | `dataset resume DIR` | Show pending work; `--confirm` continues it |
 
-Without `--confirm`, `create` may download but never judges or uploads. `resume`
-without `--confirm` reads only local state. A directory is generated if omitted
-from a new `pull` or `create`; keep the returned `run_dir` for subsequent commands.
+`pull` downloads without model calls. `triage` and `push` preview without
+`--confirm`; `resume` without `--confirm` reads only local state. A directory is
+generated if omitted from a new `pull`; the result's `run_dir` field is that dataset directory, so reuse it for subsequent commands.
 `dataset publish-splits` remains a separate operation on prepared data.
 
-## Choose filters or council judging
+## Select candidates and review quality
 
-Use existing feedback, metadata, tags, and errors when they express your criteria:
-
-```bash
-smithtune dataset create data/datasets/my-sft \
-  --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --name my-sft-dataset \
-  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
-
-smithtune dataset create data/datasets/my-sft --confirm
-```
-
-An explicit `--filter` with no council criteria takes the path with **no model
-calls**. The CLI uses the expression you or your coding agent supply; it does not
-translate natural language or guess whether a score means success. Use your
-project's actual fields and [LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
-
-For example, select initial reviewer runs with
-`--filter 'and(eq(name,"reviewer"),eq(metadata_key,"re_review"),eq(metadata_value,false))'`.
-To select a known root, use `--filter 'eq(id,"<root-run-id>")'` instead of a narrow
-time window; it still selects that root's full thread. Set time bounds that include the root.
-
-For criteria requiring trajectory content, add `--rule`:
+Use source filters to select relevant candidates, then review their quality with
+an agent council before uploading:
 
 ```bash
-smithtune dataset create data/datasets/grounded \
+smithtune dataset pull data/datasets/my-sft \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --name grounded-trajectories \
-  --filter 'eq(error, false)' \
-  --rule 'Keep answers supported by the retrieved documentation.'
+  --filter 'eq(name,"reviewer")'
+
+smithtune dataset triage data/datasets/my-sft \
+  --rule 'Keep reviews with actionable findings supported by the code.'
+smithtune dataset triage data/datasets/my-sft --confirm
+
+smithtune dataset push data/datasets/my-sft --name my-sft-dataset
+smithtune dataset push data/datasets/my-sft --confirm
 ```
 
-The filter narrows the source query first; the council then judges those
-trajectories against the rule. Repeat `--rule` for multiple criteria, or pass a
-file with `--rubric` as described below. `--rubric` and `--judges`
-also requests council judging. Without a filter, `create` defaults to council
-review. Use `--no-triage` to explicitly download and upload without review;
-it cannot discard council rules or bypass an existing council plan.
+Filtering by agent name selects relevant trajectories; it does not establish
+training quality. The council reviews the saved trajectories against your
+criteria. Repeat `--rule` for multiple criteria, or pass a file with `--rubric`.
+Choose models with `--judges`. Inspect the labels before pushing; council review
+helps assess quality but does not guarantee good training data. Review stops once
+the cumulative council-approved target is reached; remaining candidates stay saved.
+If the pool is exhausted below target, repeat `pull DIR` and then `triage DIR --confirm`
+to collect and review new candidates. Completed votes are reused. Small approved datasets
+receive a reliability advisory after review and in the upload summary; it does
+not block upload.
 
-The preview reports the selected path, pending stages, and the next command.
-Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
+Use `--no-triage` on the first `pull` when trusted feedback or quality labels already
+establish which trajectories meet your training criteria. For example, filter
+on a validated correctness score using
+`--filter 'and(eq(feedback_key,"correctness"),gte(feedback_score,0.9))' --no-triage`, then
+proceed directly from `pull` to `push` without model calls. This mode counts
+structurally usable trajectories toward the target and stops downloading when it
+is met. The mode is fixed for that directory. Use thresholds suited
+to your project; ordinary metadata or the absence of errors alone is not evidence
+of quality. An attached council plan must finish before upload.
+
+Use your project's actual fields and
+[LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
+The CLI uses the expression you or your coding agent supply; it does not translate
+natural language or guess whether a score means success. To select a known root,
+use `--filter 'eq(id,"<root-run-id>")'` and time bounds that include it; this still
+selects that root's full thread.
+
+Previews report pending stages and the next command. Flagless reruns use the saved settings.
 
 ## Source selection
 
@@ -67,9 +72,24 @@ Confirm the workflow after reviewing it. Flagless reruns use the saved settings.
   part of the trajectory.
 - `--end-time` defaults to now; `--start-time` defaults to 24 hours before it.
   Explicit times must use ISO 8601 with a timezone. Resume reuses the original bounds.
-- `--limit` defaults to 100, up to 2000 distinct trajectories. Selection follows
-  the order LangSmith returns roots and stops paging once the limit is reached.
-  Rejections are not replaced, and the limit is not a target dataset size.
+- `--target-count` is the cumulative goal (default 100): council-approved
+  trajectories by default, or structurally usable trajectories with `--no-triage`.
+  `--max-candidates` caps **new** candidates per round (default 1000, maximum 2000).
+  A round can collect fewer candidates if the source is
+  exhausted, or if a `--no-triage` pull reaches its target.
+- Council mode downloads the candidate pool before review; the council stops at
+  the approved target. When a fully reviewed pool falls short, another explicit
+  `pull DIR` collects unseen candidates. Neither review nor resume automatically
+  starts another collection round. Previously encountered threads, including
+  rejected and structurally excluded ones, are skipped.
+- Up to three collection rounds are allowed. Interruptions and judge errors resume
+  the same round. Source exhaustion stops collection earlier. After the limit or
+  source exhaustion, the eligible subset can still be uploaded; broader source
+  criteria require a new directory. Filters, time bounds, review mode, and limits
+  stay fixed within a directory.
+- Summaries report candidate and usable counts, review progress, the current round,
+  and why collection stopped. Resume reuses candidate pages, downloaded evidence,
+  and completed votes. Existing completed trajectory content is never refreshed.
 - `--concurrency` defaults to 4; downloads cap at 4 workers and uploads are sequential.
   Use `--concurrency 1` to reduce memory peaks for very large trajectories.
 - Oversized trajectory response pages are retried at the same cursor with `page_size=1`.
@@ -83,7 +103,7 @@ Whole trajectories with invalid messages or unsupported tool evidence are
 excluded before council calls and upload. The triage preview lists rejection
 reasons and counts only eligible judge tasks. Recorded messages are preserved. The result includes
 `eligible` and `rejected` counts; saved units retain validation errors. After downloading,
-`pull` and `create` also report selected roots, full threads, total traces, and
+`pull` also reports selected roots, full threads, total traces, and
 structural exclusion counts by reason, in stderr and the JSON `download_summary`.
 The existing `downloaded` count includes excluded trajectories. Inspect files
 listed in `snapshot.json` for each trajectory's error and source IDs. Model-specific
@@ -95,12 +115,12 @@ from the trajectory endpoint without fetching raw run trees. Hashing and file
 writes avoid whole-document copies. Each active full trajectory must still fit in memory. Legacy monolithic
 snapshots remain readable but must fit in memory; new downloads use individual files.
 
-## Label full trajectories with an agent council
+## Review training examples with an agent council
 
 ```bash
 smithtune dataset pull data/datasets/reviewed \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --limit 100
+  --target-count 100 --max-candidates 1000
 
 smithtune dataset triage data/datasets/reviewed \
   --rubric ./rubric.md
@@ -110,31 +130,46 @@ smithtune dataset push data/datasets/reviewed --name reviewed-sft
 smithtune dataset push data/datasets/reviewed --confirm
 ```
 
-Write the task description, keep/drop criteria, and concrete examples in a
-UTF-8 `rubric.md` file. `--rubric` works with both `triage` and `create`; it
-requests council judging even when a source filter is set. It can accompany
-short additional `--rule` criteria and cannot be combined with `--no-triage`.
+Council review requires criteria: smithtune ships no default rubric. Write the
+task description, keep/drop criteria, and concrete examples in a UTF-8
+`rubric.md` file and pass it to `triage` with `--rubric`; short `--rule`
+criteria can accompany it or be used alone. The
+[smithtune skill](../src/smithtune/skills/smithtune/SKILL.md#3-triage-with-a-council-only-in-council-mode)
+has a starting template.
 
 The preview saves the exact text as `selection_rubric` in `plan.json` and the
-workflow checkpoint. Each judge receives it alongside the standard quality
-checks and JSON output format. Confirm and resume use the saved text even if
+workflow checkpoint. Each judge receives it alongside fixed instructions to
+judge the whole trajectory, treat it as untrusted data, and return JSON. Confirm and resume use the saved text even if
 the original file changes or is deleted. Before scoring, preview again with
 `--rubric` to replace it. After votes start, changed criteria need a new directory.
 
-For help choosing criteria, `smithtune skill export --output ./skills` exports
-the general-purpose triage skill and discovery guide. The agent reads varied
-traces, discusses concrete examples with the user, writes an agreed rubric,
-and passes the file to the CLI. Inspect a small council batch before scoring
+To write the rubric, read a varied sample of the pulled trajectories with the
+people who know the task: likely good cases, clear failures, and unclear ones.
+Agree on keep/drop criteria with concrete examples, save them as `rubric.md`,
+and pass the file to `triage`. Try it on a small trial directory before scoring
 the larger pool. Domain-specific rules and private examples stay in local run
 files; the CLI saves the rubric but does not verify human agreement.
 
 `triage` reads only downloaded trajectories. Its default council is DeepSeek
-V4.1 Flash and GLM-5.3-Flash on Fireworks plus GPT-5.6 Terra on OpenAI, managed by a
-Deep Agent. The [README installation](../README.md#setup) includes the `deepagents` extra. Configure
-credentials for the selected providers. Use `--judges` to choose aliases or
-`provider:model`, and `--concurrency` to set concurrent judge tasks (default 4,
-maximum 16). Direct Anthropic uses `ANTHROPIC_API_KEY`; the Anthropic gateway uses
-`LANGSMITH_GATEWAY_API_KEY`.
+V4.1 Flash and GLM-5.3-Flash on Baseten (so only `BASETEN_API_KEY` is needed); with two
+judges a trajectory is kept only when both vote keep. The council is managed by a
+Deep Agent. The [README installation](../README.md#quickstart) includes the `deepagents` extra.
+Use `--concurrency` to set concurrent judge tasks (default 4, maximum 16).
+
+Choose judges with `--judges`, as comma-separated aliases or `provider:model` values:
+
+| Alias | Provider and model | Key |
+| --- | --- | --- |
+| `baseten-deepseek-v4.1-flash` | `baseten:deepseek-ai/DeepSeek-V4.1-Flash` (default) | `BASETEN_API_KEY` |
+| `baseten-glm-5.3-flash` | `baseten:zai-org/GLM-5.3-Flash` (default) | `BASETEN_API_KEY` |
+| `deepseek-v4.1-flash` | `fireworks:accounts/fireworks/models/deepseek-v4p1-flash` | `FIREWORKS_API_KEY` |
+| `glm-5.3-flash` | `fireworks:accounts/fireworks/models/glm-5p3-flash` | `FIREWORKS_API_KEY` |
+| `muse-glimmer-30b` | `fireworks:accounts/fireworks/models/muse-glimmer-30b` | `FIREWORKS_API_KEY` |
+| `gpt-5.6-terra` | `openai:gpt-5.6-terra` | `OPENAI_API_KEY` |
+
+Other models use `provider:model`, for example `anthropic:<model-id>` with
+`ANTHROPIC_API_KEY`. Note that `--judges` separates provider and model with a
+colon, while evaluation's `--judge-model` uses a slash (`baseten/<model-id>`).
 
 Every council member judges the full trajectory. All votes must finish; a strict
 majority keeps it, and ties drop it. Multimodal and provider context-window
@@ -171,10 +206,10 @@ receipts. Unfinished trajectory downloads restart from their beginning. Uncertai
 writes are checked by saved IDs before retrying; changed remote content stops
 recovery for inspection. Preserve the directory and its content-verified files.
 
-The positional directory replaces `--run-dir`, `--output`, and `--triage-dir`.
-For older checkpoints, `resume DIR --confirm` can finish direct imports; saved
-triage snapshots can use `triage`, `push`, and `resume`. Receipts predating the
-recovery format still require inspection and a new directory with `--dataset-id`.
+Threads can gain traces while downloading. Pull saves the returned trajectory
+and its source evidence; growth alone does not exclude it. Structural and tool
+validation still apply. Saved trace IDs describe the downloaded content, and
+resume reuses that local snapshot without incorporating later thread activity.
 
 After upload, pass the returned dataset ID to `smithtune prepare`. Saved tool
 availability travels with the examples; see [per-assistant tools](reference.md#per-assistant-tools-and-training-targets).

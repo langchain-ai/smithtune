@@ -64,16 +64,20 @@ conversation messages and have no tools.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
-The default council is read from the packaged `config.example.json`; CLI,
-Python, and exported skill defaults must agree. Terra uses OpenAI Responses
-with `reasoning.effort=none`; Fireworks calls set `reasoning_effort=none`.
+The default council is `DEFAULT_COUNCIL` in `triage.py`. The judge prompt
+(`triage_judges.JUDGE_PROMPT`) and coordinator prompt
+(`triage_coordinator.COORDINATOR_PROMPT`) are internal; operator guidance
+belongs in `src/smithtune/skills/smithtune/SKILL.md`. The optional `gpt-5.6-terra` judge
+alias uses OpenAI Responses with `reasoning.effort=none`; Fireworks calls set
+`reasoning_effort=none`.
 GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the saved plan
 records that exception.
 Keep the request checks when changing either transport. Bump the triage agent version
 when model transport or evidence presentation changes.
 
-`sfw` is used for contributor dependency installation. It is not a smithtune runtime
-prerequisite. Companion CLIs and provider credentials are only needed for live
+`sfw` (Socket Firewall) screens packages during
+contributor dependency installation. It is optional: drop the `sfw` prefix if you do not
+use it. It is not a smithtune runtime prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.
 
 CI runs `ruff check` with the rules in `pyproject.toml`; it does not enforce
@@ -158,8 +162,7 @@ This builds smithtune's wheel and source distribution, installs dependencies fro
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
 The default wheel is tested first, then the optional Deep Agents extra. Both
-distributions must include the portable skill and support `skill export` outside
-the checkout.
+distributions must include the workflow skill as package data.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves
@@ -169,12 +172,12 @@ the smithtune artifacts and matching `overrides.txt` for inspection.
 
 Merge the changes and let CI pass. Set the version in `pyproject.toml`, regenerate
 `uv.lock`, and tag the tested commit (for example, `v0.1.0`). Customers install that
-tag directly:
+tag directly, and the README quickstart pins the same tag (update both URLs there when releasing):
 
 ```bash
 uv tool install --python 3.12 \
   --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
-  'git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
 ```
 
 The example tag must be created before this command works. Repeat the command with
