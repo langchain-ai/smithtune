@@ -99,7 +99,9 @@ def test_download_summary_reports_expansion_and_exclusions_on_reuse(tmp_path, ca
     # Empty payloads retain only the selected root as source evidence.
     trace_count = 2 if empty else 3
     assert summary == {"selected_roots": 2, "threads": 1, "standalone_traces": 1, "traces": trace_count,
-                       "structurally_usable": 1, "excluded": 1, "exclusion_reasons": {reason: 1}}
+                       "structurally_usable": 1, "excluded": 1, "exclusion_reasons": {reason: 1},
+                       "target_count": 100, "max_candidates": 1000, "examined": 2, "usable": 1,
+                       "target_met": False, "stop_reason": "source_exhausted"}
     assert result["downloaded"] == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -317,7 +319,7 @@ def test_upload_response_loss_uses_existing_recovery(tmp_path):
     assert len(api.imported) == 1 and len(api.datasets) == 1
 
 
-@pytest.mark.parametrize("change", [{"project_id": uid(999)}, {"filter": "eq(error,true)"}, {"limit": 5},
+@pytest.mark.parametrize("change", [{"project_id": uid(999)}, {"filter": "eq(error,true)"}, {"target_count": 5}, {"max_candidates": 500},
                                     {"name": "different"}])
 def test_saved_selection_and_destination_are_fixed(tmp_path, change):
     api = API()
@@ -366,7 +368,7 @@ def test_all_invalid_filters_avoid_judging_and_upload(tmp_path):
     assert result["example_count"] == 0 and not api.datasets
 
 
-def test_distinct_trajectory_limit_stops_query_pagination(tmp_path):
+def test_distinct_trajectory_target_stops_query_pagination(tmp_path):
     api = API()
     api.root_pages = [[{"trace_id": uid(1), "thread_id": "conversation-a"},
                        {"trace_id": uid(2), "thread_id": "conversation-a"},
@@ -375,7 +377,7 @@ def test_distinct_trajectory_limit_stops_query_pagination(tmp_path):
     for page in api.root_pages:
         for root in page:
             root["start_time"] = "2026-09-02T00:00:00Z"
-    result = run(tmp_path, api, "pull", limit=2)
+    result = run(tmp_path, api, "pull", target_count=2)
     assert result["downloaded"] == 2
     root_queries = [json.loads(body) for command, body in api.calls if command[2] == "/api/v2/runs/query" and body]
     assert len(root_queries) == 1 and "cursor" not in root_queries[0]

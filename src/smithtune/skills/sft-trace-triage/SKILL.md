@@ -63,7 +63,7 @@ task, keep/drop criteria, and concrete examples.
 Review it with the user, then pass `--rubric ./rubric.md` for council judging.
 Use `--rule` as a shortcut for short additional criteria.
 
-- Use `dataset pull DIR` with source IDs, time window, and optional `--filter` / `--limit`.
+- Use `dataset pull DIR` with source IDs, time window, and `--filter`, `--target-count`, and `--max-candidates` as needed.
   Inspect its download summary, exclusion reasons, and representative saved trajectories.
   Pull makes no model calls. Selecting an agent by name or filtering out errors
   alone does not establish training quality.

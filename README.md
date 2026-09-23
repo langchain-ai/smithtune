@@ -136,8 +136,8 @@ smithtune dataset push data/datasets/my-sft --confirm
 - `pull` downloads without model calls. Inspect its summary for usable trajectories and exclusion reasons.
 - `triage` reviews training-example quality with an agent council. Use `--rule` or `--rubric FILE` to specify your criteria, then inspect the decisions.
 - `push` previews the upload; `--confirm` uploads the eligible trajectories. If council review was started, it must finish first.
-- Defaults: up to 100 candidate trajectories from the last 24 hours. Set `--limit`, `--start-time`, and `--end-time` on `pull` to change them.
-- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. Excluded candidates are not replaced.
+- Defaults: target 100 structurally usable trajectories, examining at most 1,000 candidates from the last 24 hours. Set `--target-count`, `--max-candidates`, and time bounds on `pull` to change them.
+- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. Structural exclusions are backfilled within those bounds; council rejections are not.
 
 You can skip council review when trusted feedback or quality labels already
 establish which trajectories meet your training criteria. Selecting an agent by

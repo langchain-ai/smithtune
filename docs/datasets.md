@@ -39,7 +39,10 @@ Filtering by agent name selects relevant trajectories; it does not establish
 training quality. The council reviews the saved trajectories against your
 criteria. Repeat `--rule` for multiple criteria, or pass a file with `--rubric`.
 Choose models with `--judges`. Inspect the labels before pushing; council review
-helps assess quality but does not guarantee good training data.
+helps assess quality but does not guarantee good training data. Council rejections
+never trigger additional downloads or paid review calls. Small approved datasets
+receive a reliability advisory after review and in the upload summary; it does
+not block upload.
 
 You can skip council review when trusted feedback or quality labels already
 establish which trajectories meet your training criteria. For example, filter
@@ -65,9 +68,16 @@ Previews report pending stages and the next command. Flagless reruns use the sav
   part of the trajectory.
 - `--end-time` defaults to now; `--start-time` defaults to 24 hours before it.
   Explicit times must use ISO 8601 with a timezone. Resume reuses the original bounds.
-- `--limit` defaults to 100, up to 2000 distinct trajectories. Selection follows
-  the order LangSmith returns roots and stops paging once the limit is reached.
-  Rejections are not replaced, and the limit is not a target dataset size.
+- `--target-count` requests structurally usable trajectories before council review
+  (default 100). `--max-candidates` caps distinct candidates examined (default 1000,
+  maximum 2000; must be at least the target). These replace `--limit`.
+  Pull follows the order LangSmith returns roots and backfills structural exclusions
+  until it reaches the target, exhausts matching data, or hits the candidate cap.
+  Each thread counts once. Filters and time bounds stay fixed.
+- The download summary reports examined, usable, and excluded counts, whether the
+  target was met, and why discovery stopped. A completed pull can fall short of its
+  target. Resume reuses saved candidate pages, completed downloads, and exclusions.
+  Use a new directory to change the target or candidate cap.
 - `--concurrency` defaults to 4; downloads cap at 4 workers and uploads are sequential.
   Use `--concurrency 1` to reduce memory peaks for very large trajectories.
 - Oversized trajectory response pages are retried at the same cursor with `page_size=1`.
@@ -98,7 +108,7 @@ snapshots remain readable but must fit in memory; new downloads use individual f
 ```bash
 smithtune dataset pull data/datasets/reviewed \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --limit 100
+  --target-count 100 --max-candidates 1000
 
 smithtune dataset triage data/datasets/reviewed \
   --rubric ./rubric.md

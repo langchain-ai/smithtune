@@ -11,13 +11,12 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from itertools import islice
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from smithtune import checkpoint as storage
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
-from smithtune.curation import _api, _fetch_trajectory, _matches, _trajectory_page_too_large, _uuid, resolve_time_window
+from smithtune.curation import MAX_LIMIT, _api, _fetch_trajectory, _matches, _trajectory_page_too_large, _uuid, resolve_time_window
 from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
 from smithtune.bindings import validate_bound_messages
@@ -108,13 +107,18 @@ def multimodal_types(trace: dict) -> list[str]:
     return sorted(found)
 
 
-def _root_selection(source: dict, *, runner) -> list[dict]:
+def _root_query(source: dict) -> dict:
     bound = f"lt(start_time,{json.dumps(source['end_time'])})"
     user_filter = source.get("filter")
     body = {"project_ids": [source["project_id"]], "is_root": True,
             "min_start_time": source["start_time"], "max_start_time": source["end_time"],
             "filter": f"and({user_filter},{bound})" if user_filter else bound,
             "page_size": 100, "selects": ["ID", "TRACE_ID", "THREAD_ID", "START_TIME", "FEEDBACK_STATS"]}
+    return body
+
+
+def _root_selection(source: dict, *, runner) -> list[dict]:
+    body = _root_query(source)
     rows, cursors, trajectories = {}, set(), {}
     while True:
         if len(cursors) >= MAX_SOURCE_PAGES:
@@ -143,6 +147,49 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
     return sorted(random.Random(source["seed"]).sample(roots, min(source["limit"], len(roots))), key=lambda r: r["trace_id"]) if source["limit"] else roots
 
 
+def _candidate_roots(source: dict, output_dir: Path, checkpoint: dict, *, runner):
+    """Resume candidate discovery from saved pages; count each scope once."""
+    roots = checkpoint["roots"]
+    yield from list(roots)
+    seen = {_scope_key(root) for root in roots}
+    selection = checkpoint.setdefault("root_selection", {
+        "pending": [], "cursor": None, "exhausted": False, "cursors": [],
+    })
+    while len(roots) < source["max_candidates"]:
+        if selection["pending"]:
+            root = selection["pending"].pop(0)
+            key = _scope_key(root)
+            if key in seen:
+                continue
+            roots.append(root)
+            seen.add(key)
+            storage.save(output_dir, checkpoint)
+            yield root
+            continue
+        if selection["exhausted"]:
+            return
+        if len(selection["cursors"]) >= MAX_SOURCE_PAGES:
+            raise PipelineError("root query exceeds the page limit; narrow the time window or filter")
+        body = _root_query(source)
+        if selection["cursor"] is not None:
+            body["cursor"] = selection["cursor"]
+        page = _api(source["workspace_id"], "POST", "/api/v2/runs/query", body, runner=runner)
+        if not isinstance(page, dict):
+            raise PipelineError("invalid root query page")
+        cursor = page.get("next_cursor")
+        if cursor is not None:
+            if not isinstance(cursor, str) or not cursor or cursor in selection["cursors"]:
+                raise PipelineError("invalid root query cursor")
+            selection["cursors"].append(cursor)
+        selection.update(pending=list(_matches(page.get("items")).values()),
+                         cursor=cursor, exhausted=cursor is None)
+        storage.save(output_dir, checkpoint)
+
+
+def _scope_key(root):
+    return ("thread", root["thread_id"]) if root["thread_id"] else ("trace", root["trace_id"])
+
+
 def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: str, end_time: str, runner) -> list[str]:
     # Query metadata over the full project history, not the selected time window.
     # Messages and tools come from /v1/trajectory; these IDs verify thread membership.
@@ -158,7 +205,7 @@ def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: s
                              for root in sorted(roots, key=lambda r: (r.get("start_time") or "", r["id"]))))
 
 
-def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42) -> dict:
+def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42, target_count=None, max_candidates=None) -> dict:
     start_time, end_time = resolve_time_window(start_time, end_time)
     value = {"workspace_id": _uuid(workspace_id, "workspace id"), "project_id": _uuid(project_id, "project id"),
              "start_time": start_time, "end_time": end_time, "filter": filter, "limit": limit, "seed": seed}
@@ -166,6 +213,14 @@ def source_options(workspace_id, project_id, start_time=None, end_time=None, *, 
         raise PipelineError("trace limit must be positive")
     if type(seed) is not int or (filter is not None and (not isinstance(filter, str) or not filter.strip())):
         raise PipelineError("invalid source seed or filter")
+    if target_count is not None:
+        if type(target_count) is not int or not 1 <= target_count <= MAX_LIMIT:
+            raise PipelineError(f"target count must be between 1 and {MAX_LIMIT}")
+        if type(max_candidates) is not int or not target_count <= max_candidates <= MAX_LIMIT:
+            raise PipelineError(f"max candidates must be between target count and {MAX_LIMIT}")
+        value.pop("limit")
+        value.pop("seed")
+        value.update(target_count=target_count, max_candidates=max_candidates)
     return value
 
 
@@ -198,18 +253,18 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
     # Raw API pages and run trees are temporary. Resume reuses complete units,
     # never stitches an interrupted conversation to newly fetched pages.
     runner = partial(_fetch, runner=runner, cache_dir=output_dir, use_cache=False)
+    target = source.get("target_count")
     if "roots" not in checkpoint:
-        checkpoint.update(roots=_root_selection(source, runner=runner), captured_at=_utc_now())
+        checkpoint.update(roots=[] if target is not None else _root_selection(source, runner=runner), captured_at=_utc_now())
         storage.save(output_dir, checkpoint)
     roots = checkpoint["roots"]
-    if not roots:
-        raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
-    print(f"Downloading trajectories for {len(roots)} selected roots...", file=sys.stderr)
-    if "project_start" not in checkpoint:
-        checkpoint["project_start"] = _project_start_time(workspace, project, runner=runner) if any(root["thread_id"] for root in roots) else None
-        storage.save(output_dir, checkpoint)
-    project_start = checkpoint["project_start"]
+    if target is not None:
+        candidates = _candidate_roots(source, output_dir, checkpoint, runner=runner)
+        print(f"Downloading toward {target} usable trajectories; examining at most {source['max_candidates']} candidates...", file=sys.stderr)
+    else:
+        candidates = iter(roots)
+        print(f"Downloading trajectories for {len(roots)} selected roots...", file=sys.stderr)
     def download(entry):
         key, root = entry
         thread, tid = root["thread_id"], root["trace_id"]
@@ -220,7 +275,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
                                        runner=runner, retain_empty=True)
         # Validate the downloaded evidence's source, without requiring a live
         # thread to remain unchanged while its pages are read.
-        source_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
+        source_traces = thread_trace_ids(workspace, project, thread, start_time=checkpoint["project_start"],
                                         end_time=_utc_now(), runner=runner) if thread else [tid]
         if tid not in source_traces:
             raise PipelineError("selected root was not found in its conversation")
@@ -247,26 +302,38 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
         return key, unit
 
     selected = {}
-    for root in roots:
-        key = ("thread", root["thread_id"]) if root["thread_id"] else ("trace", root["trace_id"])
-        selected.setdefault(key, root)
-    remaining = iter(selected.items())
-    downloaded = trace_count = 0
+    downloaded = trace_count = usable = 0
+    exhausted = False
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        pending = deque(pool.submit(download, entry) for entry in islice(remaining, concurrency))
+        pending = deque()
         try:
-            while pending:
+            while True:
+                # Reserve one remaining target slot per in-flight download, so
+                # successful workers cannot overshoot the requested count.
+                while not exhausted and len(pending) < concurrency and (target is None or usable + len(pending) < target):
+                    root = next(candidates, None)
+                    if root is None:
+                        exhausted = True
+                        break
+                    key = _scope_key(root)
+                    if key in selected:
+                        continue
+                    if root["thread_id"] and "project_start" not in checkpoint:
+                        checkpoint["project_start"] = _project_start_time(workspace, project, runner=runner)
+                        storage.save(output_dir, checkpoint)
+                    selected[key] = root
+                    pending.append(pool.submit(download, (key, root)))
+                if not pending:
+                    break
                 key, unit = pending.popleft().result()
                 trace_count += len(unit["traces"])
                 if trace_count > MAX_EXPANDED_TRACES:
                     raise PipelineError("thread expansion exceeds 10000 traces; select fewer roots")
                 storage.record_download(output_dir, checkpoint, key, unit)
                 downloaded += 1
+                usable += not unit["training_error"] and not unit.get("multimodal_types")
                 if downloaded % 10 == 0:
                     print(f"Downloaded {downloaded} trajectories, {trace_count} traces.", file=sys.stderr)
-                entry = next(remaining, None)
-                if entry is not None:
-                    pending.append(pool.submit(download, entry))
         finally:
             for future in pending:
                 if future.cancel():
@@ -276,9 +343,18 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
                 except Exception:
                     continue
                 storage.record_download(output_dir, checkpoint, key, unit)
+    if not selected:
+        raise PipelineError("no traces match the source query; check the project, time window, and filter")
     value = {"schema_version": 3, "source": source,
              "selected_trace_ids": [root["trace_id"] for root in roots],
              "unit_files": [checkpoint["downloads"][json_sha256(key)] for key in selected]}
+    if target is not None:
+        value["selection_result"] = {
+            "target_count": target, "max_candidates": source["max_candidates"],
+            "examined": downloaded, "usable": usable, "target_met": usable >= target,
+            "stop_reason": "target_reached" if usable >= target else
+                           "candidate_cap" if downloaded >= source["max_candidates"] else "source_exhausted",
+        }
     value["snapshot_sha256"] = json_sha256(value)
     _json_dump(path, value)
     return load_snapshot(output_dir)
