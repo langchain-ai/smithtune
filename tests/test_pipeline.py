@@ -1438,7 +1438,7 @@ def test_anthropic_judge_calls_anthropic_directly(monkeypatch: pytest.MonkeyPatc
     assert result["content"].startswith("{")
 
 
-def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.MonkeyPatch):
+def test_anthropic_judge_ignores_custom_headers(monkeypatch: pytest.MonkeyPatch):
     captured = {}
 
     class Response(io.BytesIO):
@@ -1455,7 +1455,7 @@ def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-key")
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"gateway-key"}')
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"other-key"}')
 
     inference_transport._chat_completion(
         "anthropic/claude-sonnet-5",
@@ -1982,11 +1982,9 @@ def test_source_uses_official_provider_urls_and_no_embedded_secret():
             fireworks,
         )
     )
-    assert "gateway.smith.langchain.com/fireworks" not in source
     assert "https://api.fireworks.ai/training/v1/serverless" in source
     assert "https://api.fireworks.ai/inference/v1" in source
     assert "https://api.anthropic.com" in source
-    assert "https://gateway.smith.langchain.com/anthropic" in source
     assert "fw_" not in source
     assert "lsv2_pt_" not in source
 

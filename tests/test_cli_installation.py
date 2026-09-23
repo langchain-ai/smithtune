@@ -138,7 +138,7 @@ def test_doctor_redacts_configuration_and_is_offline(monkeypatch, capsys):
     assert report["credentials"]["FIREWORKS_API_KEY"] == "set"
     assert report["credentials"]["BASETEN_API_KEY"] == "unset"
     assert report["packages"]["smithtune"] == version("smithtune")
-    assert report["tools"]["firectl"]["required_for"] == "deploy, undeploy"
+    assert report["tools"]["firectl"]["required_for"] == "Fireworks deploy, undeploy"
     assert "https://" in report["tools"]["langsmith"]["help"]
 
 

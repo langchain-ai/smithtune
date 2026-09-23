@@ -125,7 +125,7 @@ def _langsmith_page_command(
     ]
 
 
-def _contract_read(command: list[str], *, runner: Callable[..., Any], attempts: int = 6) -> Any:
+def _langsmith_read(command: list[str], *, runner: Callable[..., Any], attempts: int = 6) -> Any:
     for attempt in range(attempts):
         try:
             result = runner(command, capture=True)
@@ -145,7 +145,7 @@ def _contract_read(command: list[str], *, runner: Callable[..., Any], attempts: 
 
 
 def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[..., Any], read_attempts: int = 6) -> str:
-    project = _contract_read([
+    project = _langsmith_read([
         "langsmith", "api", f"/api/v1/sessions/{quote(project_id, safe='')}",
         "--workspace", workspace_id, "--method", "GET",
     ], runner=runner, attempts=read_attempts)
@@ -161,7 +161,7 @@ def _project_start_time(workspace_id: str, project_id: str, *, runner: Callable[
     return start
 
 
-def _query_contract_runs(
+def _query_runs(
     workspace_id: str, query: dict[str, Any], *, runner: Callable[..., Any], read_attempts: int = 6,
 ) -> list[dict[str, Any]]:
     body = {
@@ -181,7 +181,7 @@ def _query_contract_runs(
         body.pop("cursor", None)
         cursors: set[str] = set()
         while True:
-            response = _contract_read([
+            response = _langsmith_read([
                 "langsmith", "api", "/api/v2/runs/query", "--workspace", workspace_id,
                 "--method", "POST", "--body", _canonical(body),
             ], runner=runner, attempts=read_attempts)
@@ -192,7 +192,7 @@ def _query_contract_runs(
                     raise PipelineError("LangSmith returned an invalid run")
                 if item.get("project_id") not in body["project_ids"]:
                     raise PipelineError("LangSmith returned a run from a different project")
-                # Keep the contract's existing representation independent of API wire names.
+                # Keep saved run records independent of API wire names.
                 run = {**item, "session_id": item["project_id"]}
                 run.pop("project_id")
                 if isinstance(run.get("run_type"), str):
@@ -201,7 +201,7 @@ def _query_contract_runs(
                 if metadata is not None:
                     run["extra"] = {**(run.get("extra") or {}), "metadata": metadata}
                 if run["id"] in runs and runs[run["id"]] != run:
-                    raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; capture again")
+                    raise PipelineError(f"LangSmith returned conflicting records for run {run['id']}; pull again")
                 runs[run["id"]] = run
             cursor = response.get("next_cursor")
             if cursor is None:
@@ -588,17 +588,6 @@ def _malformed_trajectory_reason(example_id: str, error: PipelineError) -> str |
     if detail == f"example {example_id} has misplaced system message":
         return "misplaced_system_message"
     return None
-
-
-def _recorded_tool_call_reason(error: ContractError) -> str:
-    detail = str(error)
-    if detail.startswith("unknown tool "):
-        return "unknown_tool"
-    if " do not match its JSON Schema" in detail:
-        return "invalid_tool_arguments"
-    if " are not valid JSON" in detail:
-        return "invalid_tool_arguments_json"
-    return "recorded_tool_call_incompatible"
 
 
 def _exclude_malformed_trajectories(

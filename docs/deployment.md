@@ -19,9 +19,9 @@ data_dir='./data/my-sft'
 Add the deployment tools, keeping the council support from the README installation:
 
 ```bash
-uv tool install --upgrade --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
-  'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
+uv tool install --force --python 3.12 \
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
+  'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
 ```
 
 Set `BASETEN_API_KEY`; the default judge also uses it. Evaluation also requires
@@ -113,26 +113,26 @@ deploy -> use endpoint -> undeploy
 ```
 
 ```bash
-run_dir='runs/my-sft'
+run_dir='./runs/my-sft'
 account_id='<your-fireworks-account>'
-run_id='my-sft'
+output_model_id='my-sft'
 deployment_id='my-sft'
 deployment_shape='<compatible-deployment-shape>'
 
 smithtune deploy --provider fireworks \
   --run-dir "$run_dir" --account-id "$account_id" \
-  --output-model-id "$run_id" --deployment-id "$deployment_id" \
+  --output-model-id "$output_model_id" --deployment-id "$deployment_id" \
   --deployment-shape "$deployment_shape" --confirm
 ```
 
 `--account-id` must be the account that owns the training checkpoint. A matching
-saved promotion is reused. If deployment creation fails after promotion succeeds, retrying does not promote
-again. An existing deployment or a promotion with an uncertain outcome still
+saved promotion is reused. If deployment creation fails after promotion
+succeeds, retrying does not promote again. An existing deployment or a promotion with an uncertain outcome still
 needs inspection in Fireworks before retrying.
 
 For replay, use [`evaluate --run-dir`](../README.md#evaluate-a-trained-model). The serverless sampler
 uses the saved training checkpoint independently of this production endpoint.
 
 ```bash
-smithtune undeploy --account-id "$account_id" --deployment-id "$deployment_id" --confirm
+smithtune undeploy --provider fireworks --account-id "$account_id" --deployment-id "$deployment_id" --confirm
 ```

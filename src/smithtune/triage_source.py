@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 from smithtune import checkpoint as storage
 from smithtune.artifacts import _atomic_text, _json_dump, _load_json, _run, _utc_now
 from smithtune.curation import MAX_LIMIT, _api, _fetch_trajectory, _matches, _trajectory_page_too_large, _uuid, resolve_time_window
-from smithtune.dataset import _project_start_time, _query_contract_runs, validate_import_messages
+from smithtune.dataset import _project_start_time, _query_runs, validate_import_messages
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
 from smithtune.bindings import validate_bound_messages
 from smithtune.dataset_artifacts import LazySequence
@@ -194,7 +194,7 @@ def _scope_key(root):
 def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: str, end_time: str, runner) -> list[str]:
     # Query metadata over the full project history, not the selected time window.
     # Messages and tools come from /v1/trajectory; these IDs verify thread membership.
-    roots = _query_contract_runs(workspace, {
+    roots = _query_runs(workspace, {
         "project_ids": [project], "is_root": True,
         "filter": f"eq(thread_id,{json.dumps(thread)})",
         "min_start_time": start_time, "max_start_time": end_time,

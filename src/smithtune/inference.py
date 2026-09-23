@@ -18,7 +18,6 @@ from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
 
 ANTHROPIC_ENDPOINTS = {
     "anthropic": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
-    "anthropic-gateway": ("https://gateway.smith.langchain.com/anthropic", "LANGSMITH_GATEWAY_API_KEY"),
 }
 # Baseten Model APIs (shared hosted models), used for judges; not dedicated deployments.
 BASETEN_MODEL_API_URL = "https://inference.baseten.co/v1"

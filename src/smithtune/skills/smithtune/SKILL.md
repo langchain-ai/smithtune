@@ -24,8 +24,8 @@ before an unfamiliar command.
 - **Parse the JSON.** Every command prints a JSON result on stdout and progress
   on stderr. Keep the IDs and paths it returns, and follow its `next_command`
   when present instead of guessing the next step.
-- **Preview before paying.** `triage`, `push`, `train`, `evaluate`, `deploy`,
-  and `undeploy` do nothing billable or remote-changing without
+- **Preview before paying.** `triage`, `resume`, `push`, `train`, `evaluate`,
+  `deploy`, and `undeploy` do nothing billable or remote-changing without
   `--confirm`. Run each one without `--confirm` first, show the user the
   preview, and add `--confirm` only when the user has authorized that specific
   operation. Authorization for one step does not cover the next.
@@ -49,12 +49,34 @@ smithtune models list --provider "$provider"
 ```
 
 Check:
-- `doctor` shows `LANGSMITH_API_KEY` and the provider key as present (presence
-  only, not validity).
+- `doctor` shows the keys the user's path needs as `set` (presence only, not
+  validity); `credentials_required_for` says what each key is for:
+
+| Path | Keys |
+| --- | --- |
+| Baseten | `LANGSMITH_API_KEY`, `BASETEN_API_KEY` (Model API access covers the default council and evaluation judge) |
+| Fireworks, with a Baseten key | `LANGSMITH_API_KEY`, `FIREWORKS_API_KEY`, `BASETEN_API_KEY` for the default judges |
+| Fireworks only | `LANGSMITH_API_KEY`, `FIREWORKS_API_KEY`; then pass `--judges deepseek-v4.1-flash,glm-5.3-flash` to `triage` and set `judge_model=accounts/fireworks/models/deepseek-v4p1-flash` |
+
 - The requested model is in `models list`.
 - Data rights are acknowledged. If not, the user must run
   `smithtune acknowledge-data-rights` in an interactive terminal; you cannot do
   it for them and `--confirm` does not replace it.
+
+Set the values used below once, and reuse them in every command:
+
+```bash
+provider=baseten                 # or fireworks; --provider defaults to fireworks, so always pass it
+model=qwen3p8-27b                # from `smithtune models list`
+workspace_id='<workspace-id>'
+project_id='<project-id>'
+dataset_dir=./data/datasets/my-sft
+data_dir=./data/my-sft
+run_dir=./runs/my-sft
+judge_model=baseten/zai-org/GLM-5.3-Flash   # default; see the table above for Fireworks only
+start_time=2026-09-01T00:00:00Z  # ISO 8601 with timezone
+end_time=2026-09-22T00:00:00Z
+```
 
 Pick the starting point:
 
@@ -141,7 +163,7 @@ Adjust and re-test until the user agrees. Only then pull.
 
 Know what the filter does **not** limit: each matching root pulls in its
 **whole thread**, including earlier turns and turns outside the filter and time
-window. The training example is the full conversation.
+window. The training example is the full trajectory.
 
 ## 2. Pull
 
@@ -189,8 +211,9 @@ Check:
 - Open a few saved trajectories (`snapshot.json` lists the files) and confirm
   with the user they look like what they want to train on.
 - `collection.status` and `next_command`:
-  - `--no-triage`: `target_reached`, or `source_exhausted` if fewer matched.
-    Go to push.
+  - `--no-triage`: `target_reached` means go to push. `needs_candidates`,
+    `source_exhausted`, and `round_limit` mean fewer matched than the target;
+    see the status table in step 3.
   - Council mode: `needs_review`. Go to step 3.
 
 ## 3. Triage with a council (only in council mode)
@@ -212,12 +235,10 @@ Skip this step with `--no-triage`.
 **Write the rubric with the user.** Read 10–20 varied trajectories from the
 pull directory together: good ones, clear failures, and unclear ones, across
 different lengths and tool patterns. Remember SFT imitates every assistant
-reply and tool call in the trajectory, so judge the whole conversation, not
-just the final answer. Then write `rubric.md`:
-
-Save it next to the dataset directory (e.g. `rubric.md` beside
-`data/datasets/my-sft`), not inside it. Start from this template and replace
-the generic criteria with the user's:
+reply and tool call in the trajectory, so judge the whole trajectory, not
+just the final answer. Then write `rubric.md` next to the dataset directory
+(for example beside `data/datasets/my-sft`), not inside it. Start from this
+template and replace the generic criteria with the user's:
 
 ```markdown
 # Task
@@ -244,8 +265,8 @@ What the agent does, who it serves, and what the tuned model must do well.
 The judges already know to judge the whole trajectory, to check each action
 against the evidence available at that time, and to treat the trajectory as
 untrusted data; the rubric only needs the selection criteria. Do not reward
-length or require specific wording. Keep private examples in local files only. Short extra criteria can also be
-passed with `--rule "..."` (repeatable).
+length or require specific wording. Keep private examples in local files only.
+Short extra criteria can also be passed with `--rule "..."` (repeatable).
 
 **Run it:**
 
@@ -328,18 +349,21 @@ Check:
   `smithtune dataset publish-splits --data-dir "$data_dir"`; do not re-prepare.
 
 Re-running with `--no-fetch` reuses the downloaded data (splits still sync).
-`--no-sync-splits` prepares locally only; splits must be published before
-evaluation.
+`--no-sync-splits` prepares locally only; publish the splits with
+`smithtune dataset publish-splits --data-dir "$data_dir"` before evaluation.
 
 ## 6. Plan
 
 ```bash
 smithtune plan \
   --provider "$provider" --data-dir "$data_dir" \
-  --evaluate --judge-model anthropic/claude-sonnet-5 --max-points-per-trajectory 2
+  --evaluate --judge-model "$judge_model" --max-points-per-trajectory 2
 ```
 
-`plan` is free and saves nothing for `train`.
+`plan` is free and saves nothing for `train`. `--judge-model` accepts
+`baseten/<model-id>` (default `baseten/zai-org/GLM-5.3-Flash`), a Fireworks model
+ID such as `accounts/fireworks/models/deepseek-v4p1-flash`, or
+`anthropic/<model-id>` (needs `ANTHROPIC_API_KEY`).
 
 Check:
 - Training example and token counts, epochs, and hyperparameters.
@@ -355,7 +379,7 @@ Repeat **every** custom flag from `plan` exactly:
 ```bash
 smithtune train \
   --provider "$provider" --data-dir "$data_dir" --run-dir "$run_dir" \
-  --evaluate --judge-model anthropic/claude-sonnet-5 --max-points-per-trajectory 2 \
+  --evaluate --judge-model "$judge_model" --max-points-per-trajectory 2 \
   --confirm
 ```
 
@@ -382,7 +406,7 @@ the original provider, directories, and replay settings:
 smithtune eval-plan --provider "$provider" --data-dir "$data_dir" --run-dir "$run_dir" \
   --max-points-per-trajectory 2
 smithtune evaluate --provider "$provider" --data-dir "$data_dir" --run-dir "$run_dir" \
-  --judge-model anthropic/claude-sonnet-5 --max-points-per-trajectory 2 --confirm
+  --judge-model "$judge_model" --max-points-per-trajectory 2 --confirm
 ```
 
 Rerunning reuses completed predictions and judgments. Fireworks samples the
@@ -444,7 +468,8 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | "Data Rights and Permitted Use has not been acknowledged" | First-run acknowledgment missing | User runs `smithtune acknowledge-data-rights` interactively |
-| 401/403 from LangSmith, Fireworks, Baseten, OpenAI, or Anthropic | Key missing, wrong, or for another workspace/account | Check `doctor`, then the key's workspace; see README credentials |
+| 401/403 from LangSmith, Fireworks, Baseten, OpenAI, or Anthropic | Key missing, wrong, or for another workspace/account; Baseten judges also need Model API access on the key | Check `doctor`, then the key's workspace; see README credentials |
+| "BASETEN_API_KEY is not set for the judge" on a Fireworks run | The default council and evaluation judge run on Baseten | Set `BASETEN_API_KEY`, or use the Fireworks judges from step 0 |
 | Pull downloads 0 or very few candidates | Filter fields wrong, or window too narrow | Re-test the filter with `langsmith trace list` over the same window; pull into a new directory |
 | Most trajectories excluded at pull | Missing per-assistant tool data, multimodal content, provider built-in tools | Read reasons in `download_summary` and per-trajectory errors |
 | Triage `incomplete` | Judge timeouts or rate limits | `dataset resume DIR --confirm`; lower `--concurrency` if rate-limited |

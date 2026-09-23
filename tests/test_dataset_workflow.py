@@ -200,8 +200,8 @@ def test_cli_rubric_is_frozen_for_partial_resume_and_upload(tmp_path, monkeypatc
     assert checkpoint.load(directory)["workflow"]["council"]["selection_rubric"] == rubric
     frozen = triage_source.load_snapshot(directory)
     trajectory, = triage_source.conversation_trajectories(frozen)
-    expected = triage.judge_messages(trajectory, triage.rubric_text() + "\nTask-specific selection rubric:\n" + rubric, rules)
-    assert expected[0]["content"].startswith(triage.rubric_text())
+    expected = triage.judge_messages(trajectory, triage.JUDGE_PROMPT + "\nTask-specific selection rubric:\n" + rubric, rules)
+    assert expected[0]["content"].startswith(triage.JUDGE_PROMPT)
     assert json.loads(expected[1]["content"])["untrusted_trajectory"] == trajectory["messages"]
     rubric_path.write_text("Changed criteria", encoding="utf-8")
     api.calls.clear()

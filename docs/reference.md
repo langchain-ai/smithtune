@@ -21,7 +21,7 @@ availability and select the tokenizer and renderer for the model.
 - Approximately 80% training, 10% validation, and 10% replay test, keeping each source trajectory in one split
 - All assistant messages are training targets, including earlier turns
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
-- Examples over the context limit are rejected without truncation; use `--max-seq-len 32768` to lower the limit
+- Examples over the context limit are rejected without truncation; lower the limit with `--max-seq-len`, for example `--max-seq-len 32768`
 
 ## Splits and dataset versions
 
@@ -130,11 +130,9 @@ Model API access. Other Baseten models use `--judge-model baseten/<model-id>`, f
 example `baseten/deepseek-ai/DeepSeek-V4.1-Flash`. For a Fireworks judge, select
 `--judge-model accounts/fireworks/models/deepseek-v4p1-flash` and set
 `FIREWORKS_API_KEY`. For direct Anthropic, select
-`--judge-model anthropic/claude-sonnet-5` and set `ANTHROPIC_API_KEY`. For the
-internal Anthropic gateway, select
-`--judge-model anthropic-gateway/claude-sonnet-5` and set
-`LANGSMITH_GATEWAY_API_KEY`. Gateway credentials do not replace the LangSmith
-API key used to read the dataset and publish experiments.
+`--judge-model anthropic/claude-sonnet-5` and set `ANTHROPIC_API_KEY`. Judge
+credentials do not replace the LangSmith API key used to read the dataset and
+publish experiments.
 
 Replay checks tool selection, JSON arguments, argument schemas, and reference
 arguments. Ambiguous text-encoded argument types fail format validation.
@@ -204,11 +202,5 @@ state. Fully completed, matching parents remain reusable without another upload.
 
 Evaluation always publishes to LangSmith. Local files are recovery artifacts;
 an upload failure leaves evaluation incomplete until publication succeeds.
-Data prepared with `--no-sync-splits` must have its splits synchronized before
-evaluation, using `prepare --no-fetch` with the original settings.
-
-## Troubleshooting older triage snapshots
-
-Snapshots downloaded with the older V2 message readers must be downloaded and
-judged again to include system messages. Start a new triage directory and follow
-the [triage workflow](datasets.md#label-full-trajectories-with-an-agent-council).
+Data prepared with `--no-sync-splits` must have its splits published before
+evaluation, using `smithtune dataset publish-splits --data-dir "$data_dir"`.

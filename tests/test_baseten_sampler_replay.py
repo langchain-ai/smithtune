@@ -61,7 +61,8 @@ def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_pat
     sampler = object()
     constructor = Mock(return_value=sampler)
     evaluate = Mock(return_value={"serving_mode": "sampler"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+    # The default judge runs on Baseten Model APIs.
+    monkeypatch.setenv("BASETEN_API_KEY", "test-only")
     monkeypatch.setattr(baseten_sampling, "BasetenReplaySampler", constructor)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", evaluate)
     monkeypatch.setattr(cli.baseten_deployment, "load_endpoint", Mock(side_effect=AssertionError("unexpected endpoint")))

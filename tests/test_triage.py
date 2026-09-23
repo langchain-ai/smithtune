@@ -780,7 +780,7 @@ def test_council_review_requires_selection_criteria(tmp_path):
 
 
 def test_judge_prompt_ships_no_default_quality_criteria():
-    prompt = triage_judges.rubric_text()
+    prompt = triage_judges.JUDGE_PROMPT
     assert "untrusted data" in prompt and "selection criteria supplied below" in prompt
     assert "Use 1 when" not in prompt and "Use 0 for" not in prompt
 
@@ -890,7 +890,6 @@ def test_source_pagination_is_bounded(tmp_path, monkeypatch):
     ("openai", "https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
     ("baseten", "https://inference.baseten.co/v1/chat/completions", "BASETEN_API_KEY"),
     ("anthropic", "https://api.anthropic.com/v1/messages", "ANTHROPIC_API_KEY"),
-    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "LANGSMITH_GATEWAY_API_KEY"),
 ])
 def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch, provider, url, key):
     from smithtune import inference
@@ -1168,3 +1167,9 @@ def test_baseten_council_settings_record_models_and_reasoning(tmp_path):
     assert plan["reasoning"]["baseten"] == "none"
     assert plan["reasoning"]["zai-org/GLM-5.3-Flash"] == "low"
     assert triage.council_settings(tmp_path)["config"] == settings["config"]
+
+
+def test_baseten_aliases_match_the_default_council(tmp_path):
+    settings = triage.council_settings(tmp_path, judges=["baseten-deepseek-v4.1-flash", "baseten-glm-5.3-flash"])
+    assert [(j["provider"], j["model"]) for j in settings["config"]["judges"]] == [
+        (j["provider"], j["model"]) for j in triage.DEFAULT_COUNCIL["judges"]]
