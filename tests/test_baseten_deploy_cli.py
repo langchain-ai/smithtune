@@ -306,8 +306,9 @@ def test_temporary_evaluation_rejects_invalid_options_before_provisioning(tmp_pa
 def test_temporary_evaluation_requires_credentials_before_provisioning(tmp_path, temporary_baseten, monkeypatch, capsys, missing):
     _, events, plan, _, _ = temporary_baseten
     monkeypatch.delenv(missing)
+    judge = ["--judge-model", "anthropic/claude-sonnet-5"] if missing == "ANTHROPIC_API_KEY" else []
     with pytest.raises(SystemExit):
-        cli.main([*temporary_args(tmp_path), "--confirm"])
+        cli.main([*temporary_args(tmp_path), "--confirm", *judge])
     assert missing in capsys.readouterr().err
     plan.assert_not_called()
     assert events == []

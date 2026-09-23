@@ -1506,13 +1506,13 @@ def test_inference_transport_reports_failures_as_pipeline_errors(
         inference_transport._chat_completion(model, [{"role": "user", "content": "hi"}], 16)
 
 
-def test_claude_sonnet_5_is_the_default_judge(monkeypatch):
+def test_baseten_glm_flash_is_the_default_judge(monkeypatch):
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     args = pipeline._parser().parse_args(
         ["evaluate", "--output-dir", "evaluation", "--tuned-model", "tuned"]
     )
 
-    assert args.judge_model == "anthropic/claude-sonnet-5"
+    assert args.judge_model == "baseten/zai-org/GLM-5.3-Flash"
 
 
 def test_judge_marks_reference_tool_results_as_future_evidence():

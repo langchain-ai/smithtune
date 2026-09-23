@@ -104,8 +104,8 @@ Fireworks reuses its serverless training session for `train --evaluate`.
 Baseten shuts down its trainer, then starts dedicated Loops samplers for the
 best checkpoint and base model; both samplers are deactivated on exit.
 Sampler and judge costs are separate from Baseten's training spend guard.
-Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key when using
-an Anthropic judge. Periodic replay during training is not implemented.
+Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key with the
+default Baseten judge or an Anthropic judge. Periodic replay during training is not implemented.
 
 Fireworks requires its saved serverless training checkpoint; a promoted model ID
 alone cannot be sampled. Baseten requires saved Loops sampler weights. Keep the
@@ -116,7 +116,7 @@ See [Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evalua
 
 | Flag | Use |
 | --- | --- |
-| `--judge-model` | Judge route; default: `anthropic/claude-sonnet-5` |
+| `--judge-model` | Judge route; default: `baseten/zai-org/GLM-5.3-Flash` |
 | `--max-points-per-trajectory` | Cap assistant actions per trajectory; omitted by default, which scores every eligible action |
 | `--max-output-tokens` | Maximum generated response tokens |
 | `--concurrency` | Concurrent evaluation cases; default: 4 |
@@ -125,9 +125,13 @@ With `plan` and `train`, replay options require `--evaluate`. Repeat the same
 options on the preview and paid command. `eval-plan` accepts the case and token
 caps; judge and concurrency options belong on `evaluate`.
 
-For a Fireworks judge, select
+The default judge runs on Baseten Model APIs and needs `BASETEN_API_KEY` with
+Model API access. Other Baseten models use `--judge-model baseten/<model-id>`, for
+example `baseten/deepseek-ai/DeepSeek-V4.1-Flash`. For a Fireworks judge, select
 `--judge-model accounts/fireworks/models/deepseek-v4p1-flash` and set
-`FIREWORKS_API_KEY`. For the internal Anthropic gateway, select
+`FIREWORKS_API_KEY`. For direct Anthropic, select
+`--judge-model anthropic/claude-sonnet-5` and set `ANTHROPIC_API_KEY`. For the
+internal Anthropic gateway, select
 `--judge-model anthropic-gateway/claude-sonnet-5` and set
 `LANGSMITH_GATEWAY_API_KEY`. Gateway credentials do not replace the LangSmith
 API key used to read the dataset and publish experiments.

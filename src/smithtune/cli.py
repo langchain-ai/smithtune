@@ -19,7 +19,7 @@ from smithtune import data_rights, dataset, dataset_workflow
 from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
-from smithtune.inference import ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection
+from smithtune.inference import BasetenEndpoint
 from smithtune.providers.baseten import (
     MODEL_SPECS as BASETEN_MODEL_SPECS,
     BasetenRuntimeError,
@@ -295,7 +295,7 @@ def _parser() -> argparse.ArgumentParser:
             serving.add_argument("--base-model", help="optional base-model route served by the same endpoint")
     evaluation.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
     evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
-                            help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway")
+                            help="judge route (default: baseten/zai-org/GLM-5.3-Flash); also anthropic/<model-id>, anthropic-gateway/<model-id> for the LangSmith gateway, or a Fireworks model ID")
     evaluation.add_argument("--confirm", action="store_true")
 
     remove = sub.add_parser("undeploy", help="stop serving capacity for a deployment")
@@ -344,11 +344,7 @@ def _temporary_baseten_plan(args) -> dict | None:
             raise PipelineError("--max-output-tokens must be positive")
         if not os.environ.get("BASETEN_API_KEY", "").strip():
             raise PipelineError("BASETEN_API_KEY is not set")
-        judge_provider = args.judge_model.partition("/")[0]
-        if judge_provider in ANTHROPIC_ENDPOINTS:
-            anthropic_connection(judge_provider)
-        elif not os.environ.get("FIREWORKS_API_KEY", "").strip():
-            raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
+        replay_evaluation.validate_judge_credentials(args.judge_model)
     return baseten_deployment.plan(
         args.run_dir, accelerator=args.accelerator, max_seq_len=args.max_seq_len,
         timeout=args.deployment_timeout,
