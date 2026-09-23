@@ -127,7 +127,10 @@ caps; judge and concurrency options belong on `evaluate`.
 
 For a Fireworks judge, select
 `--judge-model accounts/fireworks/models/deepseek-v4p1-flash` and set
-`FIREWORKS_API_KEY`. For the internal Anthropic gateway, select
+`FIREWORKS_API_KEY`. For a Baseten Model API judge, select
+`--judge-model baseten/<model-id>`, for example
+`baseten/deepseek-ai/DeepSeek-V4.1-Flash` or `baseten/zai-org/GLM-5.3-Flash`, and
+set `BASETEN_API_KEY` with Model API access. For the internal Anthropic gateway, select
 `--judge-model anthropic-gateway/claude-sonnet-5` and set
 `LANGSMITH_GATEWAY_API_KEY`. Gateway credentials do not replace the LangSmith
 API key used to read the dataset and publish experiments.

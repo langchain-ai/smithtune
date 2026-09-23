@@ -25,7 +25,7 @@ from smithtune.dataset import (
 )
 from smithtune.artifacts import exclusive_output
 from smithtune.inference import (
-    ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection,
+    ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection, judge_endpoint,
     _baseten_chat_completion, _chat_completion, _inference_messages,
 )
 from smithtune.inference_contract import ContractError, InferenceContract
@@ -66,6 +66,9 @@ def validate_judge_credentials(judge_model: str) -> None:
     provider = judge_model.partition("/")[0]
     if provider in ANTHROPIC_ENDPOINTS:
         anthropic_connection(provider)
+    elif provider == "baseten":
+        if not os.environ.get("BASETEN_API_KEY", "").strip():
+            raise PipelineError("BASETEN_API_KEY is not set for the judge")
     elif not os.environ.get("FIREWORKS_API_KEY", "").strip():
         raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
 
@@ -633,13 +636,10 @@ def run_replay_evaluation(
     candidate_credential = "BASETEN_API_KEY" if baseten_endpoint or sampler_provider == "baseten" else "FIREWORKS_API_KEY"
     if chat is None and not os.environ.get(candidate_credential, "").strip():
         raise PipelineError(f"{candidate_credential} is not set")
-    judge_provider = judge_model.partition("/")[0]
-    judge_endpoint = ANTHROPIC_ENDPOINTS.get(judge_provider, (None, None))[0]
-    if chat is None and judge_endpoint is not None:
-        anthropic_connection(judge_provider)
-    if chat is None and judge_endpoint is None and not os.environ.get("FIREWORKS_API_KEY", "").strip():
-        raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
-    if candidate_credential == "FIREWORKS_API_KEY" or judge_endpoint is None:
+    judge_url = judge_endpoint(judge_model)
+    if chat is None:
+        validate_judge_credentials(judge_model)
+    if candidate_credential == "FIREWORKS_API_KEY" or judge_url is None:
         _set_skill_session()
     results_path = output_dir / "results.jsonl"
     results = _load_jsonl(results_path) if results_path.exists() else []
@@ -648,8 +648,8 @@ def run_replay_evaluation(
         models.insert(0, ("base", base_model))
     config = {"models": dict(models), "judge_model": judge_model, "max_output_tokens": max_output_tokens,
               "serving_mode": "temporary" if baseten_lifecycle is not None else (replay_sampler.config["serving_mode"] if replay_sampler else "existing")}
-    if judge_endpoint is not None:
-        config["judge_endpoint"] = judge_endpoint
+    if judge_url is not None:
+        config["judge_endpoint"] = judge_url
     if baseten_endpoint is not None:
         config["baseten_endpoint"] = baseten_endpoint.to_dict()
     if replay_sampler:
@@ -667,7 +667,7 @@ def run_replay_evaluation(
             saved_config = {**saved_config, "training": training}
         if saved_config != config:
             raise PipelineError("existing replay results use different evaluation settings")
-    if results and judge_endpoint is not None and not config_path.exists():
+    if results and judge_url is not None and not config_path.exists():
         raise PipelineError("existing replay results do not record the judge endpoint; use a new output directory")
     if results and baseten_endpoint is not None and not config_path.exists():
         raise PipelineError("existing replay results do not record the Baseten endpoint; use a new output directory")
