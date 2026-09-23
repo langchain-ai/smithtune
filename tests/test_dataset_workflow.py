@@ -95,12 +95,14 @@ def test_download_summary_reports_expansion_and_exclusions_on_reuse(tmp_path, ca
     options = {"name": "filtered", "filter": FILTER} if command == "create" else {}
     result = run(tmp_path, api, command, judge=no_judge, **options)
     summary = result["download_summary"]
-    assert summary == {"selected_roots": 2, "threads": 1, "standalone_traces": 1, "traces": 3,
+    # Empty payloads retain only the selected root as source evidence.
+    trace_count = 2 if empty else 3
+    assert summary == {"selected_roots": 2, "threads": 1, "standalone_traces": 1, "traces": trace_count,
                        "structurally_usable": 1, "excluded": 1, "exclusion_reasons": {reason: 1}}
     assert result["downloaded"] == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "Full threads: 1; standalone traces: 1; total traces: 3" in captured.err
+    assert f"Full threads: 1; standalone traces: 1; total traces: {trace_count}" in captured.err
     assert "outside those criteria" in captured.err
     assert "Downloaded 2 trajectories: 1 structurally usable, 1 excluded" in captured.err
     assert f"Exclusions: 1 {reason.replace('_', ' ')}" in captured.err

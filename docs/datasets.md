@@ -171,10 +171,10 @@ receipts. Unfinished trajectory downloads restart from their beginning. Uncertai
 writes are checked by saved IDs before retrying; changed remote content stops
 recovery for inspection. Preserve the directory and its content-verified files.
 
-If a thread's trace membership changes during download, its payload is discarded
-and the trajectory is excluded while the rest of the download continues. The
-download summary reports `thread_changed_during_download`; resume reuses that
-exclusion. Use a new directory for a fresh snapshot to reconsider the thread.
+Threads can gain traces while downloading. Pull saves the returned trajectory
+and its source evidence; growth alone does not exclude it. Structural and tool
+validation still apply. Saved trace IDs describe the downloaded content, and
+resume reuses that local snapshot without incorporating later thread activity.
 
 The positional directory replaces `--run-dir`, `--output`, and `--triage-dir`.
 For older checkpoints, `resume DIR --confirm` can finish direct imports; saved
