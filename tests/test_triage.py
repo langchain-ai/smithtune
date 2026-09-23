@@ -1084,27 +1084,57 @@ def test_old_snapshot_requires_fresh_system_message_capture(tmp_path):
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume):
+@pytest.mark.parametrize("change", ["added", "removed"])
+def test_snapshot_excludes_changing_threads_and_continues(tmp_path, monkeypatch, resume, change):
     api = API()
+    api.root_pages[0].append({"trace_id": uid(4), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
     # Identical query timestamps must not let the final check reuse cached IDs.
     monkeypatch.setattr(triage_source, "_utc_now", lambda: "2026-09-15T00:00:00+00:00")
+    changed = False
 
-    def new_turn(command):
-        if command[2] == "/v1/trajectory" and len(api.thread_roots) == 2:
+    def change_thread(command):
+        nonlocal changed
+        if command[2] == "/v1/trajectory" and not changed:
             if resume:
                 raise KeyboardInterrupt()
-            api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
-            api.trajectory_pages["next"]["messages"] += messages(3)
+            changed = True
+            if change == "added":
+                api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+                api.trajectory_pages["next"]["messages"] += messages(3)
+            else:
+                api.thread_roots.pop(0)
 
-    api.failure = new_turn
+    api.failure = change_thread
     if resume:
         with pytest.raises(KeyboardInterrupt):
             triage_source.snapshot(source(), tmp_path, runner=api)
-        resume = False  # Interrupt only the first attempt; grow during the next read.
-    with pytest.raises(PipelineError, match="conversation-a changed during download"):
-        triage_source.snapshot(source(), tmp_path, runner=api)
-    assert not (tmp_path / "snapshot.json").exists()
-    assert not list((tmp_path / "conversations").glob("*.json"))
+        resume = False  # Interrupt only the first attempt; change during the next read.
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    excluded, valid = frozen["units"]
+    assert excluded["example"]["inputs"]["messages"] == []
+    assert "smithtune_source" not in excluded["example"]["metadata"]
+    assert excluded["trace_ids"] == [uid(1), uid(2)]
+    assert "thread conversation-a changed during download" in excluded["training_error"]
+    assert "fresh snapshot" in excluded["training_error"]
+    assert valid["training_error"] is None
+    assert dataset_workflow._download_summary(frozen)["exclusion_reasons"] == {"thread_changed_during_download": 1}
+
+    # Even without a completed snapshot, resume must reuse the saved exclusion.
+    (tmp_path / "snapshot.json").unlink()
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("saved exclusion or completed trajectory was fetched again")
+    resumed = triage_source.snapshot(source(), tmp_path, runner=unexpected_read)
+    assert list(resumed["units"]) == [excluded, valid]
+
+    def judge_valid(slot, prompt, tokens):
+        assert json.loads(prompt[1]["content"])["untrusted_trajectory"] == valid["example"]["inputs"]["messages"]
+        return judge_call(slot, prompt, tokens)
+    result = triage.run_triage(source(), tmp_path, runner=unexpected_read, judge_call=judge_valid, confirm=True)
+    assert result["filtered_training"] == 1 and result["kept"] == 1
+    dataset_workflow.run("push", tmp_path, name="stable-trajectories", confirm=True, runner=api)
+    assert len(api.imported) == 1
+    assert api.imported[0]["inputs"] == valid["example"]["inputs"]
 
 
 def test_baseten_council_settings_record_models_and_reasoning(tmp_path):
