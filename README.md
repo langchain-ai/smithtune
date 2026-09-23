@@ -4,6 +4,9 @@ Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observab
 recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
 in LangSmith, then optionally deploy an endpoint for your application.
 
+smithtune is an early beta project. If you run into issues, please report them
+in the [repository](https://github.com/langchain-ai/smithtune/issues).
+
 ```text
 dataset create → prepare → plan → train --evaluate → deploy (optional)
 ```
@@ -33,6 +36,16 @@ Install the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) for r
 
 ```bash
 curl -fsSL https://cli.langsmith.com/install.sh | sh
+```
+
+## Using with a coding agent
+
+Give your agent this prompt, replacing the placeholders:
+
+```text
+Help me <task> with smithtune using <provider>.
+My data: <workspace/project/dataset IDs or prepared-data directory>.
+Follow https://github.com/langchain-ai/smithtune/blob/main/AGENTS.md.
 ```
 
 ### Credentials and first-use setup
@@ -258,13 +271,3 @@ See the [deployment guide](docs/deployment.md) for setup, recovery, and endpoint
 | Configure models, splits, reasoning, or evaluation | [Preparation and evaluation reference](docs/reference.md) |
 | Deploy and manage endpoints | [Deployment](docs/deployment.md) |
 | Contribute to smithtune | [Development setup](CONTRIBUTING.md) |
-
-## Using with a coding agent
-
-Give your agent this prompt, replacing the placeholders:
-
-```text
-Help me <task> with smithtune using <provider>.
-My data: <workspace/project/dataset IDs or prepared-data directory>.
-Follow https://github.com/langchain-ai/smithtune/blob/main/AGENTS.md.
-```
