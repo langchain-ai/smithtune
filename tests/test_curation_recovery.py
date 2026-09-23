@@ -7,48 +7,27 @@ import pytest
 from smithtune import checkpoint, cli, curation, dataset, dataset_import, dataset_workflow, triage, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
-from test_curation import API as SourceAPI, create, root
+from test_dataset_workflow import run as workflow
 from test_dataset_import import API, example, receipt, uid, update
 from test_triage import API as TriageAPI, judge_call, source
 
 
-def test_completed_create_resumes_without_any_source_or_destination_calls(tmp_path):
-    api = SourceAPI([[root(1, "a"), root(2, "b")]])
-    first = create(tmp_path, api)
+def test_completed_stages_resume_without_source_or_destination_calls(tmp_path):
+    api = TriageAPI()
+    workflow(tmp_path, api, "pull")
+    workflow(tmp_path, api, "push", name="saved", confirm=True)
     api.calls.clear()
-    api.contract_calls.clear()
-    api.failure = lambda *_: pytest.fail("completed import made a remote call")
-    assert create(tmp_path, api) == first
-    assert api.calls == api.contract_calls == []
+    api.failure = lambda *_: pytest.fail("completed workflow made a remote call")
+    assert workflow(tmp_path, api, "resume", confirm=True)["status"] == "complete"
+    assert api.calls == []
     units = [load_conversation(path) for path in (tmp_path / "conversations").glob("*.json")]
-    assert len(units) == 2 and all(b["tools"] == [] for unit in units for b in unit["example"]["metadata"]["smithtune_source"]["assistant_runs"])
-
-
-def test_failed_download_resumes_frozen_selection_and_completed_tools(tmp_path, monkeypatch):
-    api = SourceAPI([[root(1, "a"), root(2, "b")]])
-    monkeypatch.setattr(curation, "_sleep", lambda _: None)
-
-    def fail(path, body):
-        if path == "/v1/trajectory" and body.get("thread_id") == "b":
-            raise PipelineError("HTTP 504")
-
-    api.failure = fail
-    with pytest.raises(PipelineError, match="dataset resume"):
-        create(tmp_path, api, start_time=None, end_time=None)
-    api.failure = None
-    api.pages = [[root(3, "new")]]
-    api.calls.clear()
-    api.contract_calls.clear()
-    result = create(tmp_path, api, start_time=None, end_time=None)
-    assert result["created"] == 2 and len(api.datasets) == 1
-    assert api.trajectory_calls() == [{"thread_id": "b"}]
-    assert all(path != "/api/v2/runs/query" for path, _ in api.calls)
-    assert api.contract_calls == []
+    assert len(units) == 1 and all(b["tools"] == [] for unit in units for b in unit["example"]["metadata"]["smithtune_source"]["assistant_runs"])
 
 
 @pytest.mark.parametrize("operation", ["dataset", "example"])
-def test_lost_create_response_is_adopted_by_saved_id(tmp_path, operation):
-    api = SourceAPI([[root(1, "a")]])
+def test_lost_upload_response_is_adopted_by_saved_id(tmp_path, operation):
+    api = TriageAPI()
+    workflow(tmp_path, api, "pull")
     failed = False
 
     def lost_response(command, **kwargs):
@@ -60,23 +39,24 @@ def test_lost_create_response_is_adopted_by_saved_id(tmp_path, operation):
         return response
 
     with pytest.raises(PipelineError, match="import incomplete"):
-        create(tmp_path, lost_response)
-    result = create(tmp_path, api)
+        workflow(tmp_path, lost_response, "push", name="saved", confirm=True)
+    result = workflow(tmp_path, api, "resume", confirm=True)
     assert result["created"] == 1
-    assert len(api.datasets) == len(api.examples) == 1
-    assert sum(path == f"/api/v1/{operation}s" for path, _ in api.calls) == 1
+    assert len(api.datasets) == len(api.imported) == 1
+    assert sum(command[2] == f"/api/v1/{operation}s" for command, _ in api.calls) == 1
 
 
 def test_dataset_absent_after_failed_creation_retries_same_id(tmp_path):
-    api = SourceAPI([[root(1, "a")]])
-    api.failure = lambda path, _: (_ for _ in ()).throw(PipelineError("HTTP 504")) if path == "/api/v1/datasets" else None
+    api = TriageAPI()
+    workflow(tmp_path, api, "pull")
+    api.failure = lambda command: (_ for _ in ()).throw(PipelineError("HTTP 504")) if command[2] == "/api/v1/datasets" else None
     with pytest.raises(PipelineError):
-        create(tmp_path, api)
-    saved = json.loads((tmp_path / "selection.import.json").read_text())
+        workflow(tmp_path, api, "push", name="saved", confirm=True)
+    saved = json.loads((tmp_path / "dataset-import.json").read_text())
     pending_id = saved["pending_write"]["id"]
     api.failure = None
-    assert create(tmp_path, api)["dataset_id"] == pending_id
-    posts = [body["id"] for path, body in api.calls if path == "/api/v1/datasets"]
+    assert workflow(tmp_path, api, "resume", confirm=True)["dataset_id"] == pending_id
+    posts = [json.loads(body)["id"] for command, body in api.calls if command[2] == "/api/v1/datasets"]
     assert posts == [pending_id, pending_id]
 
 
@@ -184,16 +164,16 @@ def test_triage_checkpoint_reuses_complete_units_and_votes(tmp_path):
     assert result["kept"] == 2
 
 
-def test_triage_repeat_source_flags_uses_saved_default_window(tmp_path, monkeypatch, capsys):
+def test_pull_repeat_source_flags_uses_saved_default_window(tmp_path, monkeypatch, capsys):
     original = dataset_workflow.run
     monkeypatch.setattr(dataset_workflow, "run", lambda *a, **kw: original(*a, **kw, runner=TriageAPI(), judge_call=judge_call))
     monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-03T00:00:00+00:00")
-    args = ["dataset", "create", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101), "--name", "same-window"]
+    args = ["dataset", "pull", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101)]
     cli.main(args)
     capsys.readouterr()
     before = (tmp_path / "snapshot.json").read_bytes()
     monkeypatch.setattr(curation, "_utc_now", lambda: "2026-09-04T00:00:00+00:00")
-    cli.main([*args, "--confirm"])
+    cli.main(args)
     assert (tmp_path / "snapshot.json").read_bytes() == before
 
 
@@ -204,32 +184,15 @@ def test_checkpoint_rejects_unsafe_paths(tmp_path, path):
 
 
 def test_checkpoint_rejects_changed_download_before_upload(tmp_path):
-    api = SourceAPI([[root(1, "a")]])
-    create(tmp_path, api)
+    api = TriageAPI()
+    workflow(tmp_path, api, "pull")
     path, = (tmp_path / "conversations").glob("*.json")
     unit = json.loads(path.read_text())
-    unit["contract"]["tools"] = ["tampered"]
+    unit["example"]["inputs"]["messages"][0]["content"] = "tampered"
     path.write_text(json.dumps(unit))
     api.calls.clear()
     with pytest.raises(PipelineError, match="saved conversation has changed"):
-        create(tmp_path, api)
-    assert not api.calls
-
-
-def test_direct_existing_import_skips_unchanged_without_tool_reads(tmp_path, monkeypatch):
-    from test_curation import select
-
-    select(tmp_path, SourceAPI([[root(1, "thread-1")]]))
-    old = example(1)
-    old["metadata"]["source_scope_id"] = "thread-1"
-    api = API([old])
-    monkeypatch.setattr(curation, "_fetch_trajectory", lambda *_a, **_kw: {"messages": old["inputs"]["messages"],
-        "source": old["metadata"]["smithtune_source"], "trace_ids": [uid(1)], "training_error": None})
-    api.source = lambda *_a, **_kw: pytest.fail("unchanged destination refetched tools")
-    result = curation._import_selection(selection=tmp_path / "selection.json", dataset_id=uid(200), runner=api)
-    assert result["skipped"] == 1 and not api.writes
-    api.calls.clear()
-    curation._import_selection(selection=tmp_path / "selection.json", dataset_id=uid(200), runner=api)
+        workflow(tmp_path, api, "push", name="saved", confirm=True)
     assert not api.calls
 
 

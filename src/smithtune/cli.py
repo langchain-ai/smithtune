@@ -88,27 +88,25 @@ def _parser() -> argparse.ArgumentParser:
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
     for name, help_text in {
         "pull": "download trajectories and tool contracts to a saved directory",
-        "triage": "preview local council judging; --confirm runs it",
+        "triage": "review trajectory quality with an agent council; preview before --confirm",
         "push": "preview a dataset upload; --confirm uploads",
-        "create": "download, optionally judge, and upload with one saved directory",
         "resume": "show pending stages; --confirm continues saved work",
     }.items():
         command = curate_sub.add_parser(name, help=help_text, description=help_text)
-        command.add_argument("directory", nargs="?", type=Path, help="saved directory (generated for a new pull/create)")
-        if name in {"pull", "create"}:
+        command.add_argument("directory", nargs="?", type=Path,
+                             help="download directory (generated if omitted)" if name == "pull" else "saved directory from dataset pull")
+        if name == "pull":
             command.add_argument("--workspace-id")
             command.add_argument("--project-id")
             command.add_argument("--start-time", help="inclusive root start time (default: 24 hours before end)")
             command.add_argument("--end-time", help="exclusive root start time (default: now)")
-            command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window; create skips council when no judging criteria are supplied")
+            command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window")
             command.add_argument("--limit", type=int, help="distinct candidate trajectories, newest first; exclusions are not replaced (default: 100, maximum: 2000)")
-        if name in {"push", "create"}:
+        if name == "push":
             destination = command.add_mutually_exclusive_group()
             destination.add_argument("--name", help="new dataset name; saved for resume")
             destination.add_argument("--dataset-id", help="existing dataset to extend")
-        if name == "create":
-            command.add_argument("--no-triage", action="store_true", default=None, help="download and upload without council judging")
-        if name in {"triage", "create"}:
+        if name == "triage":
             command.add_argument("--judges", help="comma-separated model aliases or provider:model; requests council judging")
             command.add_argument("--rule", action="append", help="criterion requiring council judging; repeat for multiple rules")
             command.add_argument("--rubric", type=Path, help="UTF-8 file with selection criteria; requests council judging and saves the text for resume")
@@ -116,10 +114,15 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--runner", choices=("api", "deepagent"), help=argparse.SUPPRESS)
             command.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
             command.add_argument("--attempts", type=int, help=argparse.SUPPRESS)
-        if name in {"pull", "triage", "create"}:
-            command.add_argument("--concurrency", type=int, help="concurrent tasks (default: 4); downloads cap at 4, judges at 16")
+        if name in {"pull", "triage"}:
+            command.add_argument("--concurrency", type=int,
+                                 help="concurrent downloads (default: 4, capped at 4)" if name == "pull" else "concurrent judge tasks (default: 4, maximum: 16)")
         if name != "pull":
-            command.add_argument("--confirm", action="store_true", help="run this workflow's paid judging and uploads; otherwise preview")
+            command.add_argument("--confirm", action="store_true", help={
+                "triage": "run paid council judging; otherwise preview",
+                "push": "upload eligible trajectories; otherwise preview",
+                "resume": "continue saved pending stages; otherwise show local status",
+            }[name])
 
     publish_splits = curate_sub.add_parser(
         "publish-splits",
@@ -542,9 +545,9 @@ def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments[:1] == ["dataset"] and len(arguments) > 1 and arguments[1] in (*dataset_workflow.STAGES, "create", "resume"):
+    if arguments[:1] == ["dataset"] and len(arguments) > 1 and arguments[1] in (*dataset_workflow.STAGES, "resume"):
         flags = {argument.split("=", 1)[0] for argument in arguments[2:]}
-        for old, replacement in {"--run-dir": "dataset create DIR", "--output": "dataset pull DIR",
+        for old, replacement in {"--run-dir": "dataset pull DIR", "--output": "dataset pull DIR",
                                  "--triage-dir": "dataset push DIR", "--output-dir": "dataset triage DIR"}.items():
             if old in flags:
                 parser.error(f"{old} was replaced by the directory argument; use {replacement}")
@@ -587,7 +590,7 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 options = {key: getattr(args, key, None) for key in (
                     "workspace_id", "project_id", "start_time", "end_time", "filter", "limit",
-                    "name", "dataset_id", "no_triage", "concurrency", "attempts", "max_output_tokens",
+                    "name", "dataset_id", "concurrency", "attempts", "max_output_tokens",
                 )}
                 options.update(judges=args.judges.split(",") if getattr(args, "judges", None) is not None else None,
                                rules=getattr(args, "rule", None), config_path=getattr(args, "config", None),

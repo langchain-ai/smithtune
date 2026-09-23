@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from smithtune import dataset, dataset_import, dataset_workflow, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
-from test_curation import API as CurationAPI, COMMON_METADATA, create, root, uid
+from test_curation import API as CurationAPI, COMMON_METADATA, root, uid
 from test_dataset_import import API as DestinationAPI, example, update
 from test_tool_capture import tool
 from binding_fixtures import bound_example
@@ -95,7 +96,11 @@ def import_api(destination, incoming, **kwargs):
 
 
 def run_import(tmp_path, destination, api, incoming):
-    return create(tmp_path, api) if destination == "new" else update(tmp_path, api, incoming)
+    if destination == "new":
+        return dataset_import.import_dataset(uid(100), incoming,
+            {dataset._source_key(item, uid(100), None) for item in incoming},
+            tmp_path, tmp_path / "receipt.json", name="new", runner=api)
+    return update(tmp_path, api, incoming)
 
 
 def uploaded(api, destination):
@@ -182,7 +187,7 @@ def test_mixed_import_prunes_before_writes_and_preserves_whole_conversations(tmp
     assert all(item["outputs"] is None for item in writes)
     source = api if destination == "new" else api.source
     if destination == "new":
-        assert len(source.tool_queries) == 3
+        assert source.tool_queries == []
     else:
         assert source.tool_queries == []  # Upload uses the saved tool evidence.
     if destination == "new":
@@ -230,10 +235,10 @@ def test_trajectory_read_failure_stops_import_without_pruning_or_example_writes(
     incoming = incoming_examples()[:2]
     api = SourceAPI(incoming, failure=failure)
     with pytest.raises(PipelineError, match=error):
-        create(tmp_path, api)
-    receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "incomplete"
-    assert receipt["pending_write"] is None and receipt["rejections"] == []
+        dataset_workflow.run("pull", tmp_path, workspace_id=uid(100), project_id=uid(101),
+                             start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z", runner=api)
+    assert not (tmp_path / "snapshot.json").exists()
+    assert not (tmp_path / "dataset-import.json").exists()
     assert api.examples == []
 
 
@@ -267,11 +272,12 @@ def test_unresolvable_schema_is_not_reported_as_invalid_arguments(tmp_path):
         binding["tools"] = [unresolved]
     api = SourceAPI(incoming)
 
-    result = create(tmp_path, api)
+    dataset_workflow.run("pull", tmp_path, workspace_id=uid(100), project_id=uid(101),
+                         start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z", runner=api)
+    result = dataset_workflow.run("push", tmp_path, name="new", confirm=True, runner=api)
     assert result["rejected"] == 1
 
-    receipt = json.loads((tmp_path / "selection.import.json").read_text())
-    assert receipt["status"] == "complete"
-    assert "cannot resolve schema reference" in receipt["rejections"][0]["reason"]
-    assert "invalid_tool_arguments" not in receipt["rejections"][0]["reason"]
+    error = triage_source.load_snapshot(tmp_path)["units"][0]["training_error"]
+    assert "cannot resolve schema reference" in error
+    assert "invalid_tool_arguments" not in error
     assert api.examples == []
