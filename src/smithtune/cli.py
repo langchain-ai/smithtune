@@ -15,7 +15,7 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smithtune import data_rights, dataset, dataset_workflow, triage
+from smithtune import data_rights, dataset, dataset_workflow
 from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
@@ -88,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
     for name, help_text in {
         "pull": "download trajectories and tool contracts to a saved directory",
-        "triage": "review trajectory quality with an agent council; preview before --confirm",
+        "triage": "review trajectory quality with an agent council against --rubric or --rule criteria; preview before --confirm",
         "push": "preview a dataset upload; --confirm uploads",
         "resume": "show pending stages; --confirm continues saved work",
     }.items():
@@ -135,19 +135,6 @@ def _parser() -> argparse.ArgumentParser:
         "--data-dir", type=Path, required=True,
         help="existing prepared dataset directory containing raw/ and prepared/ artifacts",
     )
-
-    skill = sub.add_parser("skill", help="export the packaged SFT selection skill for any agent")
-    skill_sub = skill.add_subparsers(dest="skill_command", required=True)
-    skill_export = skill_sub.add_parser("export")
-    skill_export.add_argument("--output", type=Path, required=True, help="parent directory for sft-trace-triage/SKILL.md")
-
-    capture_contract = sub.add_parser(
-        "capture-contract",
-        help="collect all function tools from a sample conversation; reject provider built-ins",
-    )
-    capture_contract.add_argument("--workspace-id", required=True)
-    capture_contract.add_argument("--run-id", required=True, help="LLM run ID used to locate the sample thread; scans every LLM call in that thread")
-    capture_contract.add_argument("--output", type=Path, required=True)
 
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")
     prep.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
@@ -269,11 +256,6 @@ def _parser() -> argparse.ArgumentParser:
             "--max-dropped-training-rows", type=int,
             help=f"maximum training rows excluded above the trainer context limit (default: {baseten_defaults.max_dropped_training_rows})",
         )
-
-    promotion = sub.add_parser("promote", help="register the selected Fireworks checkpoint without deploying it (deploy does this automatically)")
-    promotion.add_argument("--run-dir", type=Path, required=True)
-    promotion.add_argument("--output-model-id", required=True)
-    promotion.add_argument("--confirm", action="store_true")
 
     deployment = sub.add_parser("deploy", help="deploy the selected checkpoint and test it; automatically promotes on Fireworks")
     deployment.add_argument("--run-dir", type=Path, required=True)
@@ -558,7 +540,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(arguments)
     activity = ExitStack()
     try:
-        if args.command not in {"doctor", "models", "skill"}:
+        if args.command not in {"doctor", "models"}:
             receipt = data_rights.require_acknowledgment()
             if args.command == "acknowledge-data-rights":
                 print(json.dumps(receipt, indent=2, sort_keys=True))
@@ -567,8 +549,6 @@ def main(argv: list[str] | None = None) -> None:
         activity.enter_context(command_status(f"Running {command}"))
         if args.command == "doctor":
             value = diagnose()
-        elif args.command == "skill":
-            value = triage.export_skill(args.output)
         elif args.command == "models":
             profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
             value = {
@@ -599,12 +579,6 @@ def main(argv: list[str] | None = None) -> None:
                                runner_mode=getattr(args, "runner", None), rubric_path=getattr(args, "rubric", None))
                 value = dataset_workflow.run(args.dataset_command, args.directory,
                                              confirm=getattr(args, "confirm", False), **options)
-        elif args.command == "capture-contract":
-            value = dataset.capture_inference_contract(
-                args.workspace_id,
-                args.run_id,
-                args.output,
-            )
         elif args.command == "prepare":
             contract = None
             if args.inference_contract is not None:
@@ -652,9 +626,6 @@ def main(argv: list[str] | None = None) -> None:
                 **_training_replay(args),
             )
             value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
-        elif args.command == "promote":
-            FireworksProvider().promote(args.run_dir, args.output_model_id, confirm=args.confirm)
-            value = {"status": "promoted", "output_model_id": args.output_model_id}
         elif args.command == "deploy":
             fireworks_options = (args.account_id, args.output_model_id, args.deployment_id, args.deployment_shape)
             if args.provider == "baseten":

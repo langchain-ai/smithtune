@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 import shlex
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from importlib.resources import files
 from pathlib import Path
 from threading import Lock
 
@@ -20,12 +18,8 @@ from smithtune.dataset_artifacts import LazySequence, load_conversation, save_co
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, rubric_text, validate_judgment
+from smithtune.triage_coordinator import COORDINATOR_PROMPT
 from smithtune.triage_source import conversation_trajectories, load_snapshot, multimodal_types, snapshot, training_error
-
-
-# Accept known whole-file hashes for vote recovery only when the coordinator
-# instructions match. Operator guidance does not affect council decisions.
-LEGACY_COORDINATOR_SKILLS = {"2c32f652cb3c3ae3e2155125c892a1fff2e24d4912dea4a9bbcb75135617632b": "a50b912941ff1bd49ceb4cc7e6b0dd0c084590c6651716ed2042cc26c89b1627"}
 
 
 JUDGE_ALIASES = {
@@ -35,9 +29,14 @@ JUDGE_ALIASES = {
     "gpt-5.6-terra": ("openai", "gpt-5.6-terra"),
 }
 
+DEFAULT_COUNCIL = {"judges": [
+    {"name": "judge-1", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash"},
+    {"name": "judge-2", "provider": "baseten", "model": "zai-org/GLM-5.3-Flash"},
+], "rules": []}
+
 
 def load_config(path: Path | None) -> dict:
-    value = _load_json(path) if path else json.loads(files("smithtune").joinpath("skills/sft-trace-triage/config.example.json").read_text(encoding="utf-8"))
+    value = _load_json(path) if path else copy.deepcopy(DEFAULT_COUNCIL)
     return validate_config(value)
 
 
@@ -157,6 +156,8 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     config = validate_config(config) if config is not None else load_config(config_path)
     if selection_rubric is not None and (not isinstance(selection_rubric, str) or not selection_rubric.strip()):
         raise PipelineError("selection rubric must be non-empty text")
+    if selection_rubric is None and not config["rules"]:
+        raise PipelineError("council review needs selection criteria: pass --rubric FILE or --rule TEXT")
     if runner_mode not in {"api", "deepagent"}:
         raise PipelineError("triage runner must be api or deepagent")
     if not 1 <= concurrency <= 16 or not 1 <= attempts <= 5 or not 128 <= max_output_tokens <= 16384:
@@ -204,15 +205,9 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
         identity["reasoning"].update({judge["model"]: BASETEN_REASONING[judge["model"]] for judge in config["judges"]
                                       if judge["provider"] == "baseten" and judge["model"] in BASETEN_REASONING})
     if runner_mode == "deepagent":
-        # The coordinator skill changes scheduling decisions and belongs in
-        # the resume identity just like the judge rubric.
-        skill = files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text(encoding="utf-8")
-        skill_hash = json_sha256(skill.partition("## Agent helping a user")[0])
-        saved_identity = _load_json(output_dir / "triage-config.json") if (output_dir / "triage-config.json").exists() else {}
-        previous = saved_identity.get("skill_sha256")
-        if LEGACY_COORDINATOR_SKILLS.get(previous) == skill_hash:
-            skill_hash = previous
-        identity.update(agent_version=11, skill_sha256=skill_hash)
+        # The coordinator prompt changes scheduling decisions and belongs in
+        # the resume identity just like the judge instructions.
+        identity.update(agent_version=11, skill_sha256=json_sha256(COORDINATOR_PROMPT))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(multimodal_filtered),
@@ -512,15 +507,3 @@ def create_triaged_dataset(triage_dir: Path, name: str | None = None, *, dataset
                     for unit, path in zip(frozen["units"], frozen.get("unit_files", []), strict=False)}
     return import_dataset(workspace, examples, keys, triage_dir, receipt_path, name=name, dataset_id=dataset_id,
                           runner=runner, triaged=True, saved_inputs=saved_inputs)
-
-
-def export_skill(output: Path) -> dict:
-    destination = output / "sft-trace-triage"
-    if destination.exists():
-        raise PipelineError("skill destination already exists; choose a new directory")
-    source = files("smithtune").joinpath("skills/sft-trace-triage")
-    destination.mkdir(parents=True)
-    for item in source.iterdir():
-        if item.is_file():
-            (destination / item.name).write_bytes(item.read_bytes())
-    return {"skill": str(destination / "SKILL.md")}

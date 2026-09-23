@@ -42,7 +42,7 @@ deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==
 override-dependencies = ["transformers==5.10.4"]
 
 [tool.setuptools.package-data]
-smithtune = ["skills/*/*.md", "skills/*/*.json"]
+smithtune = ["skills/*/*.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -51,7 +51,10 @@ include = ["smithtune*"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-markers = ["sdk_integration: exercise LangSmith integration with an explicitly supplied test client"]
+markers = [
+    "sdk_integration: exercise LangSmith integration with an explicitly supplied test client",
+    "no_default_rule: run council review without the shared test selection rule",
+]
 
 [tool.ruff]
 target-version = "py312"

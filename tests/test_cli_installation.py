@@ -26,7 +26,6 @@ def test_module_entrypoint_and_version_outside_checkout(tmp_path):
 @pytest.mark.parametrize("argv", [
     ["--help"], ["models", "list", "--help"],
     ["dataset", "triage", "--help"], ["dataset", "publish-splits", "--help"],
-    ["skill", "export", "--help"],
     ["models", "list"], ["models", "list", "--provider", "baseten"],
     ["models", "list", "--provider", "fireworks"],
 ])
@@ -177,3 +176,13 @@ def test_missing_companion_uses_cli_error_path(tmp_path):
     assert result.returncode == 2
     assert "Install firectl" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("argv", [["skill", "export"], ["capture-contract"], ["promote"]])
+def test_removed_commands_are_rejected(argv, capsys):
+    from smithtune import cli
+
+    with pytest.raises(SystemExit) as failure:
+        cli.main(argv)
+    assert failure.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

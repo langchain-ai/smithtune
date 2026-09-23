@@ -4,7 +4,7 @@ from functools import wraps
 
 import pytest
 
-from smithtune import data_rights, dataset
+from smithtune import data_rights, dataset, triage
 from smithtune.artifacts import _json_dump
 from smithtune.evaluation import replay as evaluation
 from smithtune.providers import fireworks
@@ -49,3 +49,17 @@ def local_langsmith_defaults(monkeypatch, request):
             return {"comparison_url": "https://smith.langchain.com/test-comparison"}
 
     monkeypatch.setattr(evaluation.reporting, "BackgroundPublisher", LocalPublisher)
+
+
+@pytest.fixture(autouse=True)
+def default_selection_rule(monkeypatch, request):
+    """Council review requires criteria; tests that do not test criteria share one rule."""
+    if request.node.get_closest_marker("no_default_rule"):
+        return
+    load = triage.load_config
+
+    def with_rule(path):
+        config = load(path)
+        return config if path is not None or config["rules"] else {**config, "rules": ["Keep trajectories that complete the request."]}
+
+    monkeypatch.setattr(triage, "load_config", with_rule)
