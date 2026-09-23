@@ -263,8 +263,6 @@ class BudgetGuard:
 class BasetenEnablementDetails:
     """Why a supported Baseten model is unavailable to this workspace."""
 
-    # `reason` is an open enum; unrecognized values mean "not enabled, reason
-    # unknown" and are kept verbatim for programmatic use.
     reason: str | None = None
     reason_detail: str | None = None
     remediation: str | None = None
@@ -273,15 +271,14 @@ class BasetenEnablementDetails:
 @dataclass(frozen=True)
 class BasetenModelCapability:
     model_name: str
-    # `max_context_length` is Baseten's deprecated spelling of `max_seq_len`:
-    # both are the catalog ceiling and neither depends on the workspace.
-    # `max_enabled_seq_len` is what this workspace may actually reach, and is 0
-    # when the workspace cannot run the model at all. The new fields stay None
-    # when the workspace is on an API that does not send them yet.
+    # Deprecated by Baseten in favour of `max_seq_len`; drop once that ships.
     max_context_length: int
     supports_vision_language: bool | None = None
+    # The catalog ceiling, independent of the workspace.
     max_seq_len: int | None = None
+    # What this workspace may actually reach; 0 when it cannot run the model.
     max_enabled_seq_len: int | None = None
+    # None on an API that does not send the enablement fields yet.
     enabled: bool | None = None
     enablement_details: BasetenEnablementDetails | None = None
 
