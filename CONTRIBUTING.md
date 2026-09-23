@@ -64,8 +64,10 @@ conversation messages and have no tools.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
-The default council is read from the packaged `config.example.json`; CLI,
-Python, and exported skill defaults must agree. Terra uses OpenAI Responses
+The default council is `DEFAULT_COUNCIL` in `triage.py`. The judge prompt
+(`triage_judges.JUDGE_PROMPT`) and coordinator prompt
+(`triage_coordinator.COORDINATOR_PROMPT`) are internal; operator guidance
+belongs in `skills/smithtune/SKILL.md`. Terra uses OpenAI Responses
 with `reasoning.effort=none`; Fireworks calls set `reasoning_effort=none`.
 GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the saved plan
 records that exception.
@@ -158,8 +160,7 @@ This builds smithtune's wheel and source distribution, installs dependencies fro
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
 The default wheel is tested first, then the optional Deep Agents extra. Both
-distributions must include the portable skill and support `skill export` outside
-the checkout.
+distributions must include the workflow skill as package data.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves

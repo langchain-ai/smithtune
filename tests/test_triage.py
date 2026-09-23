@@ -1,11 +1,9 @@
 import copy
 import io
 import json
-import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote, urlsplit
 from uuid import UUID
 from urllib.error import HTTPError
 
@@ -493,7 +491,7 @@ def test_standalone_traces_are_labeled(tmp_path):
     result = run(tmp_path, api)
     assert result["kept"] == 1
     assert json.loads((tmp_path / "labels.jsonl").read_text()) == {
-        "trajectory_id": triage_source.load_snapshot(tmp_path)["units"][0]["example"]["id"], "keep": 1, "reason": "3/3 judges voted 1. The answer completes the request.",
+        "trajectory_id": triage_source.load_snapshot(tmp_path)["units"][0]["example"]["id"], "keep": 1, "reason": "2/2 judges voted 1. The answer completes the request.",
     }
 
 
@@ -539,7 +537,8 @@ def test_failed_judge_is_incomplete_then_retried(tmp_path):
 
 def config(tmp_path, count=2):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"judges": [{"name": f"judge-{i}", "provider": "fireworks", "model": "accounts/fireworks/models/example"} for i in range(count)]}))
+    path.write_text(json.dumps({"judges": [{"name": f"judge-{i}", "provider": "fireworks", "model": "accounts/fireworks/models/example"} for i in range(count)],
+                               "rules": ["Keep trajectories that complete the request."]}))
     return path
 
 
@@ -668,23 +667,15 @@ def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeyp
     assert "requires a saved directory" in capsys.readouterr().err
 
 
-def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
-    resource_dir = tmp_path / "resources"
-    skill_path = resource_dir / "skills/sft-trace-triage/SKILL.md"
-    skill_path.parent.mkdir(parents=True)
-    current = triage.files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text()
-    skill_path.write_text(current)
+def test_coordinator_prompt_changes_require_a_new_run(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(triage.load_config(None)))
     run_dir = tmp_path / "run"
-    with monkeypatch.context() as patch:
-        patch.setattr(triage, "files", lambda _: resource_dir)
-        run(run_dir, runner_mode="deepagent", config_path=config_path)
+    run(run_dir, runner_mode="deepagent", config_path=config_path)
     saved_votes = (run_dir / "judgments.jsonl").read_bytes()
     assert run(run_dir, runner_mode="deepagent", config_path=config_path)["status"] == "complete"
     assert (run_dir / "judgments.jsonl").read_bytes() == saved_votes
-    skill_path.write_text(current.replace("strict majority", "unanimous vote"))
-    monkeypatch.setattr(triage, "files", lambda _: resource_dir)
+    monkeypatch.setattr(triage, "COORDINATOR_PROMPT", triage.COORDINATOR_PROMPT.replace("strict majority", "unanimous vote"))
     with pytest.raises(PipelineError, match="different input.*new output directory"):
         run(run_dir, runner_mode="deepagent", config_path=config_path)
 
@@ -762,7 +753,7 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
     result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True,
                               sleeper=lambda _: pytest.fail("context rejection retried"))
     assert result["incomplete"] == 0 and result["filtered_context"] == 1
-    assert len(calls) == 3
+    assert len(calls) == 2
     label = json.loads((tmp_path / "labels.jsonl").read_text())
     assert label["keep"] == 0 and "context window" in label["reason"]
     assert triage.run_triage(source(), tmp_path, confirm=True,
@@ -771,37 +762,27 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
         triage.selected_examples(tmp_path)
 
 
-def test_skill_export_works_outside_checkout(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    result = triage.export_skill(tmp_path)
-    entry = Path(result["skill"])
-    assert entry.read_text().startswith("---\nname: sft-trace-triage")
-    skill_dir = entry.parent.resolve()
-    pending, visited = [entry], set()
-    while pending:
-        document = pending.pop()
-        if document in visited:
-            continue
-        visited.add(document)
-        for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
-            link = urlsplit(target)
-            if link.scheme or link.netloc or not link.path:
-                continue
-            referenced = (document.parent / unquote(link.path)).resolve()
-            assert referenced.is_relative_to(skill_dir), f"Skill reference leaves export: {target}"
-            assert referenced.is_file(), f"Missing exported skill reference: {target}"
-            if referenced.suffix == ".md":
-                pending.append(referenced)
-    assert {"SKILL.md", "judge.md", "discovery.md"} <= {path.name for path in visited}
-    exported = json.loads((tmp_path / "sft-trace-triage/config.example.json").read_text())
-    assert exported == triage.load_config(None) == triage.council_settings(tmp_path / "new")["config"]
-    assert [(j["provider"], j["model"]) for j in exported["judges"]] == [
-        ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
-        ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
-        ("openai", "gpt-5.6-terra"),
+def test_default_council_is_packaged_without_selection_criteria(tmp_path):
+    config = triage.DEFAULT_COUNCIL
+    assert config["rules"] == []
+    assert [(j["provider"], j["model"]) for j in config["judges"]] == [
+        ("baseten", "deepseek-ai/DeepSeek-V4.1-Flash"),
+        ("baseten", "zai-org/GLM-5.3-Flash"),
     ]
-    with pytest.raises(PipelineError, match="already exists"):
-        triage.export_skill(tmp_path)
+
+
+@pytest.mark.no_default_rule
+def test_council_review_requires_selection_criteria(tmp_path):
+    with pytest.raises(PipelineError, match="--rubric FILE or --rule TEXT"):
+        run(tmp_path / "none")
+    assert run(tmp_path / "rule", config={**triage.load_config(None), "rules": ["Keep complete answers."]})["status"] == "complete"
+    assert run(tmp_path / "rubric", selection_rubric="Keep complete answers.")["status"] == "complete"
+
+
+def test_judge_prompt_ships_no_default_quality_criteria():
+    prompt = triage_judges.rubric_text()
+    assert "untrusted data" in prompt and "selection criteria supplied below" in prompt
+    assert "Use 1 when" not in prompt and "Use 0 for" not in prompt
 
 
 def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
@@ -811,10 +792,10 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     cli.main(["dataset", "pull", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101),
               "--start-time", source()["start_time"], "--end-time", source()["end_time"]])
     capsys.readouterr()
-    cli.main(["dataset", "triage", str(tmp_path), "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra",
-              "--rule", "Keep supported answers."])
+    cli.main(["dataset", "triage", str(tmp_path), "--judges",
+              "baseten:deepseek-ai/DeepSeek-V4.1-Flash,baseten:zai-org/GLM-5.3-Flash", "--rule", "Keep supported answers."])
     plan = json.loads(capsys.readouterr().out)["triage"]
-    assert plan["judges"] == 3 and plan["runner"] == "deepagent"
+    assert plan["judges"] == 2 and plan["runner"] == "deepagent"
     assert plan["config"]["rules"] == ["Keep supported answers."]
     assert plan["config"]["judges"] == triage.load_config(None)["judges"]
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
@@ -949,9 +930,8 @@ def test_paid_and_remote_writes_require_confirmation(tmp_path, monkeypatch):
         triage.run_triage(source(), tmp_path, runner=API())
     with pytest.raises(PipelineError, match="requires --confirm"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=False)
-    monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(PipelineError, match="OPENAI_API_KEY"):
+    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+    with pytest.raises(PipelineError, match="BASETEN_API_KEY"):
         triage.run_triage(source(), tmp_path, runner=API(), confirm=True)
     assert not (tmp_path / "triage-config.json").exists()
     assert not (tmp_path / "judgments.jsonl").exists()
@@ -1025,7 +1005,7 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     plan = json.loads((tmp_path / "plan.json").read_text())
     assert plan["selected_traces"] == 3 and plan["source_traces"] == 3
     assert plan["trajectories"] == 2
-    assert plan["judge_tasks"] == len(seen) == (3 if media_turn else 6)
+    assert plan["judge_tasks"] == len(seen) == (2 if media_turn else 4)
     assert summary["filtered_multimodal"] == int(media_turn is not None)
     labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
     assert len(labels) == 2
@@ -1033,7 +1013,7 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     assert {e["id"] for e in examples} == {label["trajectory_id"] for label in labels if label["keep"]}
     for example in examples:
         judged = [e for _, e in seen if e == example["inputs"]["messages"]]
-        assert len(judged) == 3
+        assert len(judged) == 2
         assert all(e == example["inputs"]["messages"] for e in judged)
 
 

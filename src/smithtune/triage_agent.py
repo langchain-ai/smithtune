@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from importlib.resources import files
 
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import CHAT_ENDPOINTS, credential_name, reasoning_effort
@@ -69,14 +68,6 @@ def _model(judge: dict, max_tokens: int):
                        base_url=CHAT_ENDPOINTS[provider],
                        default_headers=headers, max_tokens=max_tokens, timeout=60, max_retries=0,
                        disable_streaming=True, **options)
-
-
-def skill_files() -> dict:
-    from deepagents.backends.utils import create_file_data
-
-    skill = files("smithtune").joinpath("skills/sft-trace-triage")
-    return {f"/skills/sft-trace-triage/{item.name}": create_file_data(item.read_text(encoding="utf-8"))
-            for item in skill.iterdir() if item.is_file()}
 
 
 def allowed_tools(names: set[str]):

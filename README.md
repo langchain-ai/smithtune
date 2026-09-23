@@ -41,12 +41,13 @@ curl -fsSL https://cli.langsmith.com/install.sh | sh
 
 ## Using with a coding agent
 
-Give your agent this prompt, replacing the placeholders:
+The [smithtune skill](src/smithtune/skills/smithtune/SKILL.md) walks a coding
+agent through the whole flow. Give your agent this prompt, replacing the placeholders:
 
 ```text
 Help me <task> with smithtune using <provider>.
 My data: <workspace/project/dataset IDs or prepared-data directory>.
-Follow https://github.com/langchain-ai/smithtune/blob/main/AGENTS.md.
+Follow https://github.com/langchain-ai/smithtune/blob/main/src/smithtune/skills/smithtune/SKILL.md.
 ```
 
 ### Credentials and first-use setup
@@ -60,7 +61,7 @@ Set these environment variables in the shell where you run smithtune:
 | `BASETEN_API_KEY` | The default replay judge, GLM-5.3-Flash on Baseten Model APIs (also the Baseten training key) |
 
 The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
-Agent Council review by default requires a `FIREWORKS_API_KEY` and `OPENAI_API_KEY` with the default models. The model choices are configurable.
+Agent Council review with the default models requires only `BASETEN_API_KEY`. The model choices are configurable.
 
 See [other replay judges](docs/reference.md#replay-options) to change the judge.
 
@@ -86,7 +87,7 @@ Paid model calls and GPU capacity require `--confirm` on the command to run them
 | `dataset resume` | Shows pending work |
 | `train`, `evaluate`, `deploy` | Stops before paid work |
 | `dataset push` | Previews the upload |
-| `promote`, `undeploy` | Stops before changing provider resources |
+| `undeploy` | Stops before changing provider resources |
 
 Use `plan` before training and `eval-plan` before evaluation. Neither starts paid
 compute. Commands without confirmation can still read remote data or write local
@@ -115,39 +116,79 @@ preparation selects its tokenizer and formatting.
 ## Create a dataset from trajectories
 
 Skip this step if you already have a LangSmith trajectory dataset. Otherwise,
-follow the recommended workflow: pull trajectories, review their quality with an
-agent council, and push the selected examples to LangSmith:
+pull trajectories from a tracing project and push them to a LangSmith dataset.
+Reviewing them with an agent council in between is optional.
+
+### 1. Write and test a filter
+
+The filter decides what the model learns from, and `pull` saves it for the
+directory. Filters use [LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax)
+and match **root runs**; each match brings in its whole thread. Look at your
+project's real root names, tags, metadata, and feedback keys, then test the
+filter with the LangSmith CLI over the window you will pull. It uses the same
+syntax and costs nothing:
 
 ```bash
 project_id='<project-id>'
+filter='and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 
+langsmith trace list --workspace "$workspace_id" --project-id "$project_id" \
+  --filter "$filter" --since 2026-09-01T00:00:00Z --before 2026-09-22T00:00:00Z \
+  --limit 50 --full --format json
+```
+
+### 2. Pull, then push
+
+When the filter already selects on a trusted quality signal, such as validated
+feedback scores or human labels, skip council review with `--no-triage`:
+
+```bash
 smithtune dataset pull data/datasets/my-sft \
   --workspace-id "$workspace_id" --project-id "$project_id" \
-  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
+  --start-time 2026-09-01T00:00:00Z --end-time 2026-09-22T00:00:00Z \
+  --filter "$filter" --target-count 100 --no-triage
 
-# Review training examples: preview council review, then confirm to run it.
-smithtune dataset triage data/datasets/my-sft --rubric ./rubric.md
-smithtune dataset triage data/datasets/my-sft --confirm
-
-smithtune dataset push data/datasets/my-sft --name my-sft-dataset
-smithtune dataset push data/datasets/my-sft --confirm
+smithtune dataset push data/datasets/my-sft --name my-sft-dataset   # preview
+smithtune dataset push data/datasets/my-sft --confirm               # upload
 ```
 
 - `pull` downloads without model calls. Inspect its summary for usable trajectories and exclusion reasons.
-- `triage` reviews training-example quality with an agent council. Use `--rule` or `--rubric FILE` to specify your criteria, then inspect the decisions.
-- `push` previews the upload; `--confirm` uploads the eligible trajectories. Council review must finish first unless the directory uses `--no-triage`.
-- Defaults: target 100 council-approved trajectories, collecting up to 1,000 new candidates per round from the last 24 hours. Set `--target-count`, `--max-candidates`, and time bounds on the first `pull`.
-- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. If review exhausts the pool below target, repeat `pull` and `triage` in the same directory. Up to three rounds reuse saved candidates and reviews.
+- `--target-count` is how many trajectories you want (default 100); `--max-candidates` caps new candidates per pull (default 1,000, maximum 2,000).
+- Always set `--start-time` and `--end-time`; the default window is the last 24 hours.
+- `push` previews the upload; `--confirm` uploads and returns the dataset ID for `prepare`.
 
-Use `--no-triage` on the first `pull` when trusted feedback or quality labels already
-establish which trajectories meet your training criteria. The target then counts
-structurally usable trajectories, and you can proceed directly to `push`. The mode
-is saved for subsequent commands. Selecting an agent by
-name or filtering out errors alone does not establish training quality. Council
-review helps assess quality; it does not guarantee good training data.
+Selecting an agent by name or filtering out errors alone does not establish
+training quality. Without a trusted signal, use council review.
 
-Keep the same directory throughout. Use `smithtune dataset resume data/datasets/my-sft`
-to inspect pending work and add `--confirm` to continue it. See
+### Optional: review with an agent council
+
+Omit `--no-triage` from the first `pull`, then run `triage` before `push`. A
+council of models judges each whole trajectory against your rubric and keeps it
+on a strict majority. You need:
+
+- the `deepagents` extra (included in the install above);
+- keys for the judges: `BASETEN_API_KEY` for the default council (DeepSeek
+  V4.1 Flash and GLM-5.3-Flash on Baseten), or pick others with `--judges`;
+- a `rubric.md` describing the task, what to keep, what to drop, and a few
+  concrete examples of each. smithtune ships no default rubric; `triage`
+  requires `--rubric` or `--rule`. The
+  [smithtune skill](src/smithtune/skills/smithtune/SKILL.md) has a template. Write it after reading a varied sample of the
+  pulled trajectories.
+
+```bash
+smithtune dataset triage data/datasets/my-sft --rubric ./rubric.md   # preview, no model calls
+smithtune dataset triage data/datasets/my-sft --confirm              # run the council
+```
+
+Decisions are saved in `labels.jsonl` and summarized in `report.md`; read them
+before pushing. Review stops at the target. If the pool runs out first, run
+`pull` and `triage --confirm` again in the same directory to review unseen
+candidates (up to three rounds). Council review helps assess quality; it does
+not guarantee good training data.
+
+Keep the same directory throughout. The review mode, filter, window, and limits
+are fixed once you pull. Use `smithtune dataset resume data/datasets/my-sft` to
+inspect pending work and add `--confirm` to continue it. See
 [dataset curation](docs/datasets.md) for selection and recovery details.
 
 ## Prepare data
