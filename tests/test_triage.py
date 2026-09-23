@@ -667,23 +667,15 @@ def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeyp
     assert "requires a saved directory" in capsys.readouterr().err
 
 
-def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
-    resource_dir = tmp_path / "resources"
-    skill_path = resource_dir / "triage_prompts/coordinator.md"
-    skill_path.parent.mkdir(parents=True)
-    current = triage.files("smithtune").joinpath("triage_prompts/coordinator.md").read_text()
-    skill_path.write_text(current)
+def test_coordinator_prompt_changes_require_a_new_run(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(triage.load_config(None)))
     run_dir = tmp_path / "run"
-    with monkeypatch.context() as patch:
-        patch.setattr(triage, "files", lambda _: resource_dir)
-        run(run_dir, runner_mode="deepagent", config_path=config_path)
+    run(run_dir, runner_mode="deepagent", config_path=config_path)
     saved_votes = (run_dir / "judgments.jsonl").read_bytes()
     assert run(run_dir, runner_mode="deepagent", config_path=config_path)["status"] == "complete"
     assert (run_dir / "judgments.jsonl").read_bytes() == saved_votes
-    skill_path.write_text(current.replace("strict majority", "unanimous vote"))
-    monkeypatch.setattr(triage, "files", lambda _: resource_dir)
+    monkeypatch.setattr(triage, "COORDINATOR_PROMPT", triage.COORDINATOR_PROMPT.replace("strict majority", "unanimous vote"))
     with pytest.raises(PipelineError, match="different input.*new output directory"):
         run(run_dir, runner_mode="deepagent", config_path=config_path)
 
@@ -771,7 +763,7 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
 
 
 def test_default_council_is_packaged_without_selection_criteria(tmp_path):
-    config = triage.load_config(triage.files("smithtune").joinpath("triage_prompts/default_council.json"))
+    config = triage.DEFAULT_COUNCIL
     assert config["rules"] == []
     assert [(j["provider"], j["model"]) for j in config["judges"]] == [
         ("baseten", "deepseek-ai/DeepSeek-V4.1-Flash"),

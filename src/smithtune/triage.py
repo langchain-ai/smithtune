@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 import shlex
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from importlib.resources import files
 from pathlib import Path
 from threading import Lock
 
@@ -20,6 +18,7 @@ from smithtune.dataset_artifacts import LazySequence, load_conversation, save_co
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
 from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, rubric_text, validate_judgment
+from smithtune.triage_coordinator import COORDINATOR_PROMPT
 from smithtune.triage_source import conversation_trajectories, load_snapshot, multimodal_types, snapshot, training_error
 
 
@@ -30,9 +29,14 @@ JUDGE_ALIASES = {
     "gpt-5.6-terra": ("openai", "gpt-5.6-terra"),
 }
 
+DEFAULT_COUNCIL = {"judges": [
+    {"name": "judge-1", "provider": "baseten", "model": "deepseek-ai/DeepSeek-V4.1-Flash"},
+    {"name": "judge-2", "provider": "baseten", "model": "zai-org/GLM-5.3-Flash"},
+], "rules": []}
+
 
 def load_config(path: Path | None) -> dict:
-    value = _load_json(path) if path else json.loads(files("smithtune").joinpath("triage_prompts/default_council.json").read_text(encoding="utf-8"))
+    value = _load_json(path) if path else copy.deepcopy(DEFAULT_COUNCIL)
     return validate_config(value)
 
 
@@ -203,8 +207,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     if runner_mode == "deepagent":
         # The coordinator prompt changes scheduling decisions and belongs in
         # the resume identity just like the judge instructions.
-        coordinator = files("smithtune").joinpath("triage_prompts/coordinator.md").read_text(encoding="utf-8")
-        identity.update(agent_version=11, skill_sha256=json_sha256(coordinator))
+        identity.update(agent_version=11, skill_sha256=json_sha256(COORDINATOR_PROMPT))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(multimodal_filtered),

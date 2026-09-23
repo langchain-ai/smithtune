@@ -42,7 +42,7 @@ deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==
 override-dependencies = ["transformers==5.10.4"]
 
 [tool.setuptools.package-data]
-smithtune = ["skills/*/*.md", "triage_prompts/*.md", "triage_prompts/*.json"]
+smithtune = ["skills/*/*.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

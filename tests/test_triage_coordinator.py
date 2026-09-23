@@ -77,14 +77,13 @@ def test_batch_enforces_concurrency():
 
 def coordinator_model():
     return JudgeModel(answers=[
-        AIMessage(content="", tool_calls=[{"id": "skill", "name": "read_file", "args": {"file_path": "/skills/trajectory-coordinator/SKILL.md"}}]),
         AIMessage(content="", tool_calls=[{"id": "code", "name": "code_mode", "args": {"code": "judge_batch(pending_tasks())"}}]),
         AIMessage(content="Finished."),
     ])
 
 
 @pytest.mark.parametrize("status", ["complete", "context_exceeded", "error"])
-def test_real_coordinator_loads_skill_and_delegates_with_code(tmp_path, monkeypatch, status):
+def test_real_coordinator_delegates_with_code(tmp_path, monkeypatch, status):
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
     pending, tasks, saved = task_set(run=lambda trajectory, judge: {"status": status})
@@ -93,7 +92,7 @@ def test_real_coordinator_loads_skill_and_delegates_with_code(tmp_path, monkeypa
     state = json.loads((tmp_path / "agent-state.json").read_text())
     assert state["status"] == ("incomplete" if status == "error" else "complete"), state
     assert state["code_calls"] == 1 and state["finished"] == 2
-    assert all(set(names) == {"code_mode", "read_file", "task"} for names in model.exposed)
+    assert all(set(names) == {"code_mode", "task"} for names in model.exposed)
     assert len(saved) == 2
 
 

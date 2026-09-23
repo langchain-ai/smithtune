@@ -51,8 +51,7 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     targets = ["tests"] if full_tests else ["tests/test_cli_installation.py", "tests/test_training_dependency.py"]
     run(python, "-I", "-m", "pytest", *targets, cwd=work, env=env)
     run(python, "-I", "-c", "from importlib.resources import files; root = files('smithtune'); "
-        "assert all(root.joinpath(p).is_file() for p in ('skills/smithtune/SKILL.md', 'triage_prompts/coordinator.md', "
-        "'triage_prompts/judge.md', 'triage_prompts/default_council.json'))", cwd=work, env=env)
+        "assert root.joinpath('skills/smithtune/SKILL.md').is_file()", cwd=work, env=env)
     if full_tests:
         # Verify the opt-in runtime from the installed wheel, with real graphs
         # and deterministic local models. The default install is tested first.

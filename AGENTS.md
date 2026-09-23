@@ -9,8 +9,8 @@ Smithtune prepares LangSmith trajectories for SFT with Fireworks or Baseten.
   operating guidance for agents; keep it aligned with CLI behavior.
 - To change the implementation, read [CONTRIBUTING.md](CONTRIBUTING.md) for development,
   dependency compatibility, and checks, and preserve the behavior below.
-- `src/smithtune/triage_prompts/` holds internal prompts for the council inside
-  `dataset triage`. They are not operator guidance; smithtune ships no default rubric.
+- The council's fixed judge and coordinator prompts live in `triage_judges.py` and
+  `triage_coordinator.py`. They are not operator guidance; smithtune ships no default rubric.
 
 ## Preserve the data behavior
 

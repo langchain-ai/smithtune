@@ -29,7 +29,7 @@ coordinator tests run the real Deep Agents graph with a local model.
 
 Provider transport checks cover the official Fireworks endpoint and OpenAI
 Responses for Terra. The Fireworks adapter retains reasoning fields for the
-coordinator's tool calls. Package checks verify the packaged skill and triage prompts, and the optional
+coordinator's tool calls. Package checks verify the packaged skill and the optional
 agent dependency outside the checkout.
 
 The full saved batch contains 100 selected roots in 95 conversations. Three
