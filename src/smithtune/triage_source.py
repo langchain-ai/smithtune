@@ -224,14 +224,17 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
             raise PipelineError("selected root was not found in its conversation")
         trajectory = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid},
                                        runner=runner, retain_empty=True)
-        all_messages = trajectory["messages"]
         unit_records = [{"trace_id": trace_id, "thread_id": thread, "project_id": project} for trace_id in unit_traces]
         if thread:
             # The trajectory is live; verify membership again without cached reads.
             current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
                                              end_time=_utc_now(), runner=live_runner)
             if set(current_traces) != set(unit_traces):
-                raise PipelineError(f"conversation {thread} changed during download; start a new triage run in a new output directory")
+                # Keep the frozen selection, but discard all payload from the unstable read.
+                trajectory = {"messages": [], "source": None, "trace_ids": [],
+                              "training_error": f"thread {thread} changed during download; whole trajectory excluded. "
+                                                "Use a new output directory to reconsider it in a fresh snapshot."}
+        all_messages = trajectory["messages"]
         example_id = str(uuid5(NAMESPACE_URL, json_sha256({"workspace": workspace, "project": project, "key": key, "messages": all_messages})))
         if not set(trajectory["trace_ids"]) <= set(unit_traces):
             raise PipelineError("trajectory evidence belongs to another trace")
