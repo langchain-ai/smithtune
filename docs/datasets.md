@@ -1,13 +1,14 @@
 # Dataset curation
 
 Use one directory throughout curation. Each trajectory becomes one LangSmith
-dataset example. Download with `pull`, optionally review with `triage`, and upload
-with `push`. Inspect each stage’s result before continuing.
+dataset example. The recommended workflow is to download with `pull`, review
+training-example quality with `triage`, and upload with `push`. Inspect each
+stage’s result before continuing.
 
 | Command | Behavior |
 | --- | --- |
 | `dataset pull DIR` | Download trajectories and per-assistant tool lists |
-| `dataset triage DIR` | Preview council judging; `--confirm` runs it |
+| `dataset triage DIR` | Review trajectory quality with an agent council; preview before confirming |
 | `dataset push DIR` | Preview upload; `--confirm` uploads |
 | `dataset resume DIR` | Show pending work; `--confirm` continues it |
 
@@ -16,41 +17,44 @@ with `push`. Inspect each stage’s result before continuing.
 generated if omitted from a new `pull`; keep the returned `run_dir` for subsequent commands.
 `dataset publish-splits` remains a separate operation on prepared data.
 
-## Choose filters or council judging
+## Select candidates and review quality
 
-Use existing feedback, metadata, tags, and errors when they express your criteria:
+Use source filters to select relevant candidates, then review their quality with
+an agent council before uploading:
 
 ```bash
 smithtune dataset pull data/datasets/my-sft \
   --workspace-id '<workspace-id>' --project-id '<project-id>' \
-  --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
+  --filter 'eq(name,"reviewer")'
+
+smithtune dataset triage data/datasets/my-sft \
+  --rule 'Keep reviews with actionable findings supported by the code.'
+smithtune dataset triage data/datasets/my-sft --confirm
 
 smithtune dataset push data/datasets/my-sft --name my-sft-dataset
 smithtune dataset push data/datasets/my-sft --confirm
 ```
 
-Going directly from `pull` to `push` makes **no model calls**. The CLI uses the expression you or your coding agent supply; it does not
-translate natural language or guess whether a score means success. Use your
-project's actual fields and [LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
+Filtering by agent name selects relevant trajectories; it does not establish
+training quality. The council reviews the saved trajectories against your
+criteria. Repeat `--rule` for multiple criteria, or pass a file with `--rubric`.
+Choose models with `--judges`. Inspect the labels before pushing; council review
+helps assess quality but does not guarantee good training data.
 
-For example, select initial reviewer runs with
-`--filter 'and(eq(name,"reviewer"),eq(metadata_key,"re_review"),eq(metadata_value,false))'`.
-To select a known root, use `--filter 'eq(id,"<root-run-id>")'` instead of a narrow
-time window; it still selects that root's full thread. Set time bounds that include the root.
+You can skip council review when trusted feedback or quality labels already
+establish which trajectories meet your training criteria. For example, filter
+on a validated correctness score using
+`--filter 'and(eq(feedback_key,"correctness"),gte(feedback_score,0.9))'`, then
+proceed directly from `pull` to `push` without model calls. Use thresholds suited
+to your project; ordinary metadata or the absence of errors alone is not evidence
+of quality. An attached council plan must finish before upload.
 
-For criteria requiring trajectory content, run `triage` after downloading and
-**before either push command** above:
-
-```bash
-smithtune dataset triage data/datasets/my-sft \
-  --rule 'Keep answers supported by the retrieved documentation.'
-smithtune dataset triage data/datasets/my-sft --confirm
-```
-
-The filter narrows the source query during `pull`; the council judges the saved
-trajectories against the rule. Repeat `--rule` for multiple criteria, or pass a
-file with `--rubric`. Choose council models with `--judges`. Review the labels
-before proceeding to `push`; an attached council plan must finish before upload.
+Use your project's actual fields and
+[LangSmith filter syntax](https://docs.langchain.com/langsmith/trace-query-syntax).
+The CLI uses the expression you or your coding agent supply; it does not translate
+natural language or guess whether a score means success. To select a known root,
+use `--filter 'eq(id,"<root-run-id>")'` and time bounds that include it; this still
+selects that root's full thread.
 
 Previews report pending stages and the next command. Flagless reruns use the saved settings.
 
@@ -89,7 +93,7 @@ from the trajectory endpoint without fetching raw run trees. Hashing and file
 writes avoid whole-document copies. Each active full trajectory must still fit in memory. Legacy monolithic
 snapshots remain readable but must fit in memory; new downloads use individual files.
 
-## Label full trajectories with an agent council
+## Review training examples with an agent council
 
 ```bash
 smithtune dataset pull data/datasets/reviewed \

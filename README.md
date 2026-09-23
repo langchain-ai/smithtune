@@ -8,7 +8,7 @@ smithtune is an early beta project. If you run into issues, please report them
 in the [repository](https://github.com/langchain-ai/smithtune/issues).
 
 ```text
-dataset pull → dataset triage (optional) → dataset push
+dataset pull → dataset triage → dataset push
 prepare → plan → train --evaluate → deploy (optional)
 ```
 
@@ -115,7 +115,8 @@ preparation selects its tokenizer and formatting.
 ## Create a dataset from trajectories
 
 Skip this step if you already have a LangSmith trajectory dataset. Otherwise,
-download from a tracing project, optionally judge the trajectories, then upload:
+follow the recommended workflow: pull trajectories, review their quality with an
+agent council, and push the selected examples to LangSmith:
 
 ```bash
 project_id='<project-id>'
@@ -124,7 +125,7 @@ smithtune dataset pull data/datasets/my-sft \
   --workspace-id "$workspace_id" --project-id "$project_id" \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 
-# Optional: preview council review, then confirm to run it.
+# Review training examples: preview council review, then confirm to run it.
 smithtune dataset triage data/datasets/my-sft --rubric ./rubric.md
 smithtune dataset triage data/datasets/my-sft --confirm
 
@@ -133,10 +134,15 @@ smithtune dataset push data/datasets/my-sft --confirm
 ```
 
 - `pull` downloads without model calls. Inspect its summary for usable trajectories and exclusion reasons.
-- Skip `triage` when source filters fully express your selection criteria. Otherwise, use `--rule` or `--rubric FILE` to specify council criteria.
+- `triage` reviews training-example quality with an agent council. Use `--rule` or `--rubric FILE` to specify your criteria, then inspect the decisions.
 - `push` previews the upload; `--confirm` uploads the eligible trajectories. If council review was started, it must finish first.
 - Defaults: up to 100 candidate trajectories from the last 24 hours. Set `--limit`, `--start-time`, and `--end-time` on `pull` to change them.
 - Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. Excluded candidates are not replaced.
+
+You can skip council review when trusted feedback or quality labels already
+establish which trajectories meet your training criteria. Selecting an agent by
+name or filtering out errors alone does not establish training quality. Council
+review helps assess quality; it does not guarantee good training data.
 
 Keep the same directory throughout. Use `smithtune dataset resume data/datasets/my-sft`
 to inspect pending work and add `--confirm` to continue it. See

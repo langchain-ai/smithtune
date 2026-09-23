@@ -88,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
     curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
     for name, help_text in {
         "pull": "download trajectories and tool contracts to a saved directory",
-        "triage": "preview local council judging; --confirm runs it",
+        "triage": "review trajectory quality with an agent council; preview before --confirm",
         "push": "preview a dataset upload; --confirm uploads",
         "resume": "show pending stages; --confirm continues saved work",
     }.items():

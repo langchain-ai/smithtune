@@ -58,20 +58,24 @@ saved directory across `pull`, `triage`, `push`, and `resume`.
 First map the user's selection criteria to the project's actual feedback,
 metadata, tags, and error fields. Use `--filter` for criteria those fields express.
 Do not invent feedback keys, thresholds, or the meaning of missing values.
-When filters are insufficient, write `rubric.md` with the task, keep/drop criteria, and concrete examples.
+Recommend council review of training-example quality. Write `rubric.md` with the
+task, keep/drop criteria, and concrete examples.
 Review it with the user, then pass `--rubric ./rubric.md` for council judging.
 Use `--rule` as a shortcut for short additional criteria.
 
 - Use `dataset pull DIR` with source IDs, time window, and optional `--filter` / `--limit`.
   Inspect its download summary, exclusion reasons, and representative saved trajectories.
-  Pull makes no model calls. If the source filters fully express the selection criteria,
-  proceed to push without a council.
-- When content needs judging, agree on the rubric and run
+  Pull makes no model calls. Selecting an agent by name or filtering out errors
+  alone does not establish training quality.
+- Agree on the review rubric and run
   `dataset triage DIR --rubric ./rubric.md` to preview. Check the saved text in
   `plan.json`, then use `dataset triage DIR --confirm` when judging is authorized.
   Inspect a small batch's decisions before scoring the larger pool.
   Read `labels.jsonl`, individual votes in `judgments.jsonl`, and `report.md`
   and explain the counts and reasons. Failed judge requests remain incomplete.
+- Skip council review only when trusted feedback or quality labels already establish
+  which trajectories meet the training criteria. Explain the evidence and decision
+  to the user. Council review helps assess quality; it does not guarantee it.
 - Preview upload with `dataset push DIR --name NAME` (or `--dataset-id ID`).
   Add `--confirm` when upload is authorized. Push respects any council plan
   already attached to the directory. Pull followed directly by push uses the
