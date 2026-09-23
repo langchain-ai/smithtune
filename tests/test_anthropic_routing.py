@@ -153,3 +153,14 @@ def test_baseten_judge_rejects_inference_contracts(monkeypatch):
 ])
 def test_judge_endpoint_is_fixed_per_route(route, endpoint):
     assert inference.judge_endpoint(route) == endpoint
+
+
+def test_default_replay_judge_needs_only_the_baseten_key(monkeypatch):
+    assert evaluation.DEFAULT_JUDGE_MODEL == "baseten/zai-org/GLM-5.3-Flash"
+    for name in ("ANTHROPIC_API_KEY", "LANGSMITH_GATEWAY_API_KEY", "FIREWORKS_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BASETEN_API_KEY", "baseten-test-key")
+    evaluation.validate_judge_credentials(evaluation.DEFAULT_JUDGE_MODEL)
+    monkeypatch.delenv("BASETEN_API_KEY")
+    with pytest.raises(PipelineError, match="BASETEN_API_KEY is not set for the judge"):
+        evaluation.validate_judge_credentials(evaluation.DEFAULT_JUDGE_MODEL)

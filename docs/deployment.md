@@ -24,8 +24,8 @@ uv tool install --upgrade --python 3.12 \
   'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
 ```
 
-Set `BASETEN_API_KEY`. Evaluation also requires `LANGSMITH_API_KEY` for dataset
-access and experiment publication, plus `ANTHROPIC_API_KEY` for the default judge.
+Set `BASETEN_API_KEY`; the default judge also uses it. Evaluation also requires
+`LANGSMITH_API_KEY` for dataset access and experiment publication.
 Supported Baseten models are public and do not require a Hugging Face token.
 Choose GPUs explicitly: `H200:1`
 below is an example, not a verified allocation for every model.
@@ -69,8 +69,8 @@ outcome without saved IDs, inspect Baseten before retrying. Keep the receipt.
 ### Evaluate an existing Baseten endpoint
 
 After [deploying your Loops checkpoint](https://docs.baseten.co/loops/deploy-checkpoints),
-evaluate its dedicated chat endpoint using `BASETEN_API_KEY`, `LANGSMITH_API_KEY`,
-and, for the default judge, `ANTHROPIC_API_KEY`:
+evaluate its dedicated chat endpoint using `BASETEN_API_KEY` (also used by the
+default judge) and `LANGSMITH_API_KEY`:
 
 ```bash
 smithtune evaluate \
@@ -93,7 +93,7 @@ lower of that limit and the preparation limit, including the output budget.
 Use `eval-plan` with the same data and endpoint options, without `--confirm`, to
 preview cases. Add `--base-model '<served-base-model-name>'` to compare a base
 route available on the **same endpoint**. Open the printed LangSmith comparison link to review results; rerun the same
-command to resume. No Fireworks key is needed with an Anthropic judge.
+command to resume. No Fireworks key is needed with the default Baseten judge or an Anthropic judge.
 This path uses an existing deployment and leaves it running; manage externally
 created deployments in Baseten. Training support alone does not verify a model's
 serving configuration.

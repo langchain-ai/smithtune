@@ -57,7 +57,7 @@ Set these environment variables in the shell where you run smithtune:
 | --- | --- |
 | `LANGSMITH_API_KEY` | Dataset access, split publication, and LangSmith experiments |
 | `FIREWORKS_API_KEY` **or** `BASETEN_API_KEY` | Your chosen provider's preparation, training, and evaluation |
-| `ANTHROPIC_API_KEY` | The default replay judge, Claude Sonnet 5 |
+| `BASETEN_API_KEY` | The default replay judge, GLM-5.3-Flash on Baseten Model APIs (also the Baseten training key) |
 
 The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
 Agent Council review by default requires a `FIREWORKS_API_KEY` and `OPENAI_API_KEY` with the default models. The model choices are configurable.
@@ -104,7 +104,7 @@ model=qwen3p8-27b
 workspace_id='<workspace-id>'
 data_dir='./data/my-sft'
 run_dir='./runs/my-sft'
-judge_model='anthropic/claude-sonnet-5'
+judge_model='baseten/zai-org/GLM-5.3-Flash'
 
 smithtune models list --provider "$provider"
 ```

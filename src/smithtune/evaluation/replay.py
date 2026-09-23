@@ -59,7 +59,7 @@ DETERMINISTIC_METRIC_KEYS = (
 )
 
 
-DEFAULT_JUDGE_MODEL = "anthropic/claude-sonnet-5"
+DEFAULT_JUDGE_MODEL = "baseten/zai-org/GLM-5.3-Flash"
 
 
 def validate_judge_credentials(judge_model: str) -> None:

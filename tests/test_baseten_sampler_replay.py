@@ -85,7 +85,7 @@ def test_standalone_preflight_never_constructs_sampler_on_failure(tmp_path, monk
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     args = ["evaluate", "--provider", "baseten", "--run-dir", str(run), "--data-dir", str(data)]
     if failure == "missing_judge":
-        args.append("--confirm")
+        args += ["--confirm", "--judge-model", "anthropic/claude-sonnet-5"]
     with pytest.raises(SystemExit):
         cli.main(args)
     constructor.assert_not_called()

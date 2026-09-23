@@ -313,7 +313,7 @@ def _parser() -> argparse.ArgumentParser:
             serving.add_argument("--base-model", help="optional base-model route served by the same endpoint")
     evaluation.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
     evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
-                            help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway, baseten/<model-id> for Baseten Model APIs, or a Fireworks model ID")
+                            help="judge route (default: baseten/zai-org/GLM-5.3-Flash); also anthropic/<model-id>, anthropic-gateway/<model-id> for the LangSmith gateway, or a Fireworks model ID")
     evaluation.add_argument("--confirm", action="store_true")
 
     remove = sub.add_parser("undeploy", help="stop serving capacity for a deployment")

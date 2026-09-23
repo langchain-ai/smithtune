@@ -194,7 +194,8 @@ def test_cli_plans_evaluates_and_resumes_existing_baseten_endpoint(tmp_path, mon
     cli.main(arguments("eval-plan", data, output))
     assert json.loads(capsys.readouterr().out)["baseten_endpoint"] == identity
     assert requests == []
-    argv = [*arguments("evaluate", data, output), "--base-model", "base-checkpoint", "--confirm", "--concurrency", "1"]
+    argv = [*arguments("evaluate", data, output), "--base-model", "base-checkpoint", "--confirm", "--concurrency", "1",
+            "--judge-model", "anthropic/claude-sonnet-5"]
     cli.main(argv)
     summary = json.loads(capsys.readouterr().out)
     assert summary["baseten_endpoint"] == identity
