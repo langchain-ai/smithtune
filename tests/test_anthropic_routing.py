@@ -11,12 +11,10 @@ from smithtune.providers.base import PipelineError
 
 @pytest.mark.parametrize("provider,origin,key", [
     ("anthropic", "https://api.anthropic.com", "direct-test-key"),
-    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic", "gateway-test-key"),
 ])
 @pytest.mark.parametrize("caller", ["replay", "triage"])
 def test_judging_keeps_provider_credentials_separate(monkeypatch, provider, origin, key, caller):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-test-key")
-    monkeypatch.setenv("LANGSMITH_GATEWAY_API_KEY", "gateway-test-key")
     monkeypatch.setenv("SMITHTUNE_ANTHROPIC_API_KEY", "obsolete-test-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"obsolete-header"}')
     captured = []
@@ -41,10 +39,9 @@ def test_judging_keeps_provider_credentials_separate(monkeypatch, provider, orig
 
 @pytest.mark.parametrize("provider,missing", [
     ("anthropic", "ANTHROPIC_API_KEY"),
-    ("anthropic-gateway", "LANGSMITH_GATEWAY_API_KEY"),
 ])
 def test_missing_key_never_falls_back_to_other_credentials(monkeypatch, provider, missing):
-    for name in ("ANTHROPIC_API_KEY", "LANGSMITH_GATEWAY_API_KEY", "SMITHTUNE_ANTHROPIC_API_KEY"):
+    for name in ("ANTHROPIC_API_KEY", "SMITHTUNE_ANTHROPIC_API_KEY"):
         monkeypatch.setenv(name, "test-other-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"x-api-key":"test-other-key"}')
     monkeypatch.delenv(missing)
@@ -57,17 +54,15 @@ def test_missing_key_never_falls_back_to_other_credentials(monkeypatch, provider
 
 def test_doctor_reports_only_credential_presence(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-test-key")
-    monkeypatch.setenv("LANGSMITH_GATEWAY_API_KEY", "gateway-test-key")
     result = doctor.diagnose()
     assert result["credentials"]["ANTHROPIC_API_KEY"] == "set"
-    assert "LANGSMITH_GATEWAY_API_KEY" not in result["credentials"]
     assert set(result["credentials"]) == set(result["credentials_required_for"])
     assert "test-key" not in json.dumps(result)
     assert "SMITHTUNE_ANTHROPIC_API_KEY" not in result["credentials"]
     assert "ANTHROPIC_CUSTOM_HEADERS" not in result["credentials"]
 
 
-@pytest.mark.parametrize("previous", ["missing_endpoint", "gateway_endpoint", "missing_config"])
+@pytest.mark.parametrize("previous", ["missing_endpoint", "changed_endpoint", "missing_config"])
 def test_replay_rejects_results_with_unverified_or_changed_judge_endpoint(tmp_path, monkeypatch, previous):
     from test_pipeline import write_manifest
 
@@ -100,7 +95,7 @@ def test_replay_rejects_results_with_unverified_or_changed_judge_endpoint(tmp_pa
         if previous == "missing_endpoint":
             config.pop("judge_endpoint")
         else:
-            config["judge_endpoint"] = "https://gateway.smith.langchain.com/anthropic"
+            config["judge_endpoint"] = "https://example.invalid/anthropic"
         config_path.write_text(json.dumps(config))
     with pytest.raises(PipelineError, match="evaluation settings|judge endpoint"):
         evaluation.run_replay_evaluation(**options)
@@ -148,7 +143,6 @@ def test_baseten_judge_rejects_inference_contracts(monkeypatch):
 
 @pytest.mark.parametrize("route,endpoint", [
     ("anthropic/claude-sonnet-5", "https://api.anthropic.com"),
-    ("anthropic-gateway/claude-sonnet-5", "https://gateway.smith.langchain.com/anthropic"),
     ("baseten/deepseek-ai/DeepSeek-V4.1-Flash", "https://inference.baseten.co/v1"),
     ("accounts/fireworks/models/deepseek-v4p1-flash", None),
 ])
@@ -158,7 +152,7 @@ def test_judge_endpoint_is_fixed_per_route(route, endpoint):
 
 def test_default_replay_judge_needs_only_the_baseten_key(monkeypatch):
     assert evaluation.DEFAULT_JUDGE_MODEL == "baseten/zai-org/GLM-5.3-Flash"
-    for name in ("ANTHROPIC_API_KEY", "LANGSMITH_GATEWAY_API_KEY", "FIREWORKS_API_KEY"):
+    for name in ("ANTHROPIC_API_KEY", "FIREWORKS_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("BASETEN_API_KEY", "baseten-test-key")
     evaluation.validate_judge_credentials(evaluation.DEFAULT_JUDGE_MODEL)

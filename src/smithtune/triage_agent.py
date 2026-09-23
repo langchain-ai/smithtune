@@ -25,7 +25,7 @@ def _model(judge: dict, max_tokens: int):
     from smithtune.providers.fireworks import CLIENT_SOURCE, _set_skill_session
 
     provider = judge["provider"]
-    if provider in {"anthropic", "anthropic-gateway"}:
+    if provider == "anthropic":
         base_url, key = anthropic_connection(provider)
         return ChatAnthropic(model=judge["model"], api_key=key, max_tokens=max_tokens, timeout=60, max_retries=0,
                              base_url=base_url)
