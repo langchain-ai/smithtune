@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
-import sys
 from types import SimpleNamespace
 
 import pytest
 
 from smithtune import dataset
 from smithtune import inference_contract
-from smithtune import cli as pipeline
 from smithtune.providers.base import PipelineError
 
 
@@ -42,108 +40,6 @@ def page(runs, cursor=None):
     return {"items": items, "next_cursor": cursor}
 
 
-def capture_runner(source, pages, *, thread_key="thread_id", thread_id="thread-1"):
-    commands = []
-    trace_ids = {source["trace_id"]}
-    for response in pages:
-        for run in response.get("items") or []:
-            if isinstance(run, dict) and run.get("trace_id"):
-                trace_ids.add(run["trace_id"])
-    pages = iter(pages)
-
-    def runner(command, capture=False):
-        assert capture is True
-        assert command[command.index("--workspace") + 1] == "workspace-1"
-        if command[2] == f"/api/v1/runs/{source['id']}":
-            assert command[command.index("--method") + 1] == "GET"
-            commands.append({"lookup": source["id"]})
-            return SimpleNamespace(stdout=json.dumps(source))
-        if command[2].startswith("/api/v1/sessions/"):
-            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
-                                                      "start_time": "2026-09-01T00:00:00Z"}))
-        assert command[:3] == ["langsmith", "api", "/api/v2/runs/query"]
-        body = json.loads(command[command.index("--body") + 1])
-        assert "INPUTS" not in body["selects"] and "OUTPUTS" not in body["selects"]
-        commands.append(body)
-        if body.get("ids") == [source["id"]]:
-            response = page([source])
-        elif body.get("ids") == [source["trace_id"]]:
-            response = page([{"id": source["trace_id"], "session_id": "project-1",
-                              "extra": {"metadata": {thread_key: thread_id}}}])
-        elif body.get("is_root"):
-            assert "trace_filter" not in body
-            roots = [{"id": tid, "session_id": "project-1"} for tid in sorted(trace_ids)]
-            response = page(roots if json.dumps(thread_key) in body["filter"] else [])
-        else:
-            assert body["project_ids"] == ["project-1"]
-            assert body["run_type"] == "LLM"
-            assert body["filter"] == f"in(trace_id, {json.dumps(sorted(trace_ids))})"
-            assert "trace_filter" not in body
-            response = next(pages, page([]))
-        return SimpleNamespace(stdout=json.dumps(response))
-
-    return runner, commands
-
-
-def test_capture_combines_tools_from_all_pages_and_traces(tmp_path):
-    first = llm("run-1", [tool("weather")])
-    late = llm("run-2", [tool("weather"), tool("swell")], trace_id="trace-2")
-    helper = llm("run-3", [])
-    runner, commands = capture_runner(first, [page([late], "page-2"), page([first, helper])])
-    path = tmp_path / "contract.json"
-    summary = dataset.capture_inference_contract("workspace-1", "run-1", path, runner=runner)
-    contract = inference_contract.load_inference_contract(path)
-
-    assert [t["function"]["name"] for t in contract.tools] == ["swell", "weather"]
-    assert contract.inference_settings == {"temperature": 0.2}
-    assert contract.provenance["source_thread_id"] == "thread-1"
-    assert contract.provenance["source_run_ids"] == ["run-1", "run-2", "run-3"]
-    assert contract.provenance["source_trace_ids"] == ["trace-1", "trace-2"]
-    assert summary["llm_run_count"] == 3 and summary["trace_count"] == 2
-    assert summary["tool_count"] == 2
-    assert [body for body in commands if body.get("run_type") == "LLM"][1]["cursor"] == "page-2"
-
-    # Preparation already shares the captured union with every example.
-    examples = [{"id": str(i), "inputs": {"messages": [
-        {"role": "human", "content": "Hi"}, {"role": "ai", "content": "Hello"},
-    ]}, "metadata": {"source_scope": "thread", "source_scope_id": f"thread-{i}"}} for i in range(2)]
-    rows = dataset.prepare_sft_rows(examples, contract=contract)
-    assert all(row["tools"] == list(contract.tools) for row in rows)
-
-
-@pytest.mark.parametrize("builtin", [
-    {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"},
-    {"type": "web_search_preview"},
-    {"type": "file_search", "vector_store_ids": ["store-1"]},
-    {"type": "computer_20250124", "name": "computer", "input_schema": {"type": "object"}},
-    {"google_search": {}},
-    {"google_maps": {}},
-    {"file_search": {}},
-    {"function_declarations": [{"name": "weather", "parameters": {"type": "object"}}], "enterprise_web_search": {}},
-    {"functionDeclarations": [{"name": "weather", "parameters": {"type": "object"}}], "googleMaps": {}},
-    {"function_declarations": [{"name": "weather", "parameters": {"type": "object"}}], "code_execution": {}},
-])
-@pytest.mark.parametrize("existing", [False, True])
-def test_capture_rejects_uncalled_builtins_on_later_pages_without_writing(tmp_path, builtin, existing):
-    first = llm("run-1", [tool("weather")])
-    later = llm("run-2", [tool("weather"), builtin], trace_id="trace-2")
-    runner, _ = capture_runner(first, [page([first], "page-2"), page([later])])
-    path = tmp_path / "contract.json"
-    if existing:
-        path.write_text("existing contract")
-    with pytest.raises(PipelineError, match="run run-2: provider built-in tool"):
-        dataset.capture_inference_contract("workspace-1", "run-1", path, runner=runner)
-    assert path.read_text() == "existing contract" if existing else not path.exists()
-
-
-def test_frontier_model_and_user_function_named_like_builtin_are_allowed(tmp_path):
-    source = llm("run-1", [{"name": "tool_search_tool_bm25", "input_schema": {"type": "object"}}])
-    source["extra"]["invocation_params"]["model"] = "claude-opus-4-6"
-    runner, _ = capture_runner(source, [page([source])])
-    summary = dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
-    assert summary["tool_count"] == 1
-
-
 def test_equivalent_provider_shapes_deduplicate_without_mutating_source():
     a = llm("run-1", [tool("weather")])
     b = llm("run-2", [{"name": "weather", "description": "Call weather.",
@@ -157,69 +53,6 @@ def test_equivalent_provider_shapes_deduplicate_without_mutating_source():
     assert inference_contract.contract_from_runs([c, b, a], **kwargs) == contract
 
 
-def test_conflicting_schemas_identify_both_source_runs(tmp_path):
-    first = llm("run-1", [tool("weather")])
-    later = copy.deepcopy(first)
-    later["id"] = "run-2"
-    later["extra"]["invocation_params"]["tools"][0]["function"]["parameters"]["required"] = ["query"]
-    runner, _ = capture_runner(first, [page([first, later])])
-    with pytest.raises(PipelineError, match="weather.*conflicting definitions.*run-1.*run-2"):
-        dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
-    assert not (tmp_path / "contract.json").exists()
-
-
-@pytest.mark.parametrize("key", ["thread_id", "conversation_id", "session_id"])
-def test_thread_lookup_uses_root_metadata_aliases_and_escapes_values(tmp_path, key):
-    source = llm("run-1", [tool("weather")])
-    thread_id = 'thread-"quoted"'
-    runner, commands = capture_runner(source, [page([source])], thread_key=key, thread_id=thread_id)
-    result = dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
-    assert result["source_thread_id"] == thread_id
-    assert [body["filter"] for body in commands if body.get("is_root")] == [
-        f"and(eq(metadata_key,{json.dumps(alias)}),eq(metadata_value,{json.dumps(thread_id)}))"
-        for alias in ("thread_id", "conversation_id", "session_id")
-    ]
-
-
-@pytest.mark.parametrize("bad_page,error", [
-    ({"items": None}, "invalid run query page"),
-    (page([None]), "invalid run"),
-    (page([dict(llm("run-2", []), session_id="other-project")]), "different project"),
-    (page([]), "source LLM run run-1 was not returned"),
-])
-def test_incomplete_or_invalid_scan_does_not_write_contract(tmp_path, bad_page, error):
-    source = llm("run-1", [tool("weather")])
-    runner, _ = capture_runner(source, [bad_page])
-    with pytest.raises(PipelineError, match=error):
-        dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
-    assert not (tmp_path / "contract.json").exists()
-
-
-def test_repeated_pagination_cursor_does_not_write_contract(tmp_path):
-    source = llm("run-1", [tool("weather")])
-    runner, _ = capture_runner(source, [page([source], "same"), page([source], "same")])
-    with pytest.raises(PipelineError, match="repeated query cursor"):
-        dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
-    assert not (tmp_path / "contract.json").exists()
-
-
-def test_missing_thread_does_not_fall_back_to_one_trace(tmp_path):
-    source = llm("run-1", [tool("weather")])
-    runner, _ = capture_runner(source, [], thread_id=None)
-    with pytest.raises(PipelineError, match="no thread ID"):
-        dataset.capture_inference_contract("workspace-1", "run-1", tmp_path / "contract.json", runner=runner)
-
-
-def test_cli_returns_failure_for_builtin_capture(tmp_path, monkeypatch):
-    def fail(*args, **kwargs):
-        raise PipelineError("run run-2: provider built-in tool 'web_search' is not supported")
-    monkeypatch.setattr(dataset, "capture_inference_contract", fail)
-    with pytest.raises(SystemExit) as error:
-        monkeypatch.setattr(sys, "argv", ["pipeline.py", "capture-contract", "--workspace-id", "workspace-1", "--run-id", "run-1", "--output", str(tmp_path / "contract.json")])
-        pipeline.main()
-    assert error.value.code != 0
-
-
 @pytest.mark.parametrize("definition", [
     {"type": "custom", "name": "weather", "input_schema": {"type": "object"}},
     {"function_declarations": [{"name": "weather", "parameters": {"type": "object"}}], "google_search": None, "google_maps": None},
@@ -229,16 +62,6 @@ def test_provider_function_formats_are_not_mistaken_for_builtins(definition):
     source = llm("run-1", [definition])
     contract = inference_contract.contract_from_runs([source], workspace_id="workspace-1", source_run_id="run-1", thread_id="thread-1")
     assert contract["tools"][0]["function"]["name"] == "weather"
-
-
-def test_runs_across_root_thread_aliases_are_combined_and_deduplicated(tmp_path):
-    source = llm("run-1", [tool("weather")])
-    later = llm("run-2", [tool("swell")], trace_id="trace-2")
-    runner, _ = capture_runner(source, [page([source], "page-2"), page([source, later])])
-    path = tmp_path / "contract.json"
-    result = dataset.capture_inference_contract("workspace-1", "run-1", path, runner=runner)
-    assert result["llm_run_count"] == 2
-    assert result["tool_count"] == 2
 
 
 def catalog_tool(entries, *, suffix=""):
@@ -437,71 +260,3 @@ def test_project_lookup_rejects_missing_or_ambiguous_history_start(start):
         dataset._project_start_time("workspace-1", "project-1", runner=runner)
 
 
-def test_direct_run_lookup_checks_identity_and_escapes_path():
-    def runner(command, capture=False):
-        assert command[2] == "/api/v1/runs/run%2Fother%3Fquery"
-        return SimpleNamespace(stdout=json.dumps({"id": "other"}))
-
-    with pytest.raises(PipelineError, match="did not return the requested run"):
-        dataset._read_contract_run("workspace-1", "run/other?query", runner=runner)
-
-
-def test_thread_capture_unions_paginated_roots_and_batches_llm_queries(monkeypatch):
-    monkeypatch.setattr(dataset, "_utc_now", lambda: "2026-09-15T00:00:00Z")
-    traces = [f"trace-{i:03}" for i in range(102)]
-    root_calls, llm_calls = [], []
-
-    def runner(command, capture=False):
-        body = json.loads(command[command.index("--body") + 1])
-        assert "trace_filter" not in body
-        if body.get("is_root"):
-            root_calls.append(body)
-            assert body["selects"] == ["ID", "PROJECT_ID"]
-            if '"thread_id"' in body["filter"]:
-                ids, cursor = (traces[:60], "roots-next") if not body.get("cursor") else (traces[60:100], None)
-            elif '"conversation_id"' in body["filter"]:
-                ids, cursor = traces[99:], None
-            else:
-                ids, cursor = [], None
-            response = page([{"id": tid, "session_id": "project-1"} for tid in ids], cursor)
-        else:
-            llm_calls.append(body)
-            assert body["run_type"] == "LLM"
-            batch = json.loads(body["filter"][len("in(trace_id, "):-1])
-            assert len(batch) <= 100
-            if len(batch) == 100:
-                ids, cursor = (batch[:50], "llms-next") if not body.get("cursor") else (batch[50:], None)
-            else:
-                ids, cursor = batch, None
-            response = page([llm(f"run-{tid}", [], trace_id=tid) for tid in ids], cursor)
-        return SimpleNamespace(stdout=json.dumps(response))
-
-    runs = dataset._query_thread_llm_runs("workspace-1", "project-1", "thread-1",
-                                        start_time="2026-09-01T00:00:00Z", runner=runner)
-    assert len(runs) == 102
-    assert {run["trace_id"] for run in runs} == set(traces)
-    assert len(root_calls) == 4
-    assert len(llm_calls) == 3
-    assert "cursor" not in llm_calls[-1]
-
-
-def test_thread_capture_with_no_roots_does_not_query_llm_runs():
-    def runner(command, capture=False):
-        body = json.loads(command[command.index("--body") + 1])
-        assert body["is_root"] is True
-        return SimpleNamespace(stdout=json.dumps(page([])))
-
-    assert dataset._query_thread_llm_runs("workspace-1", "project-1", "thread-1",
-                                         start_time="2026-09-01T00:00:00Z", runner=runner) == []
-
-
-def test_thread_capture_rejects_llm_from_unrequested_trace():
-    def runner(command, capture=False):
-        body = json.loads(command[command.index("--body") + 1])
-        runs = ([{"id": "trace-1", "session_id": "project-1"}] if body.get("is_root")
-                else [llm("wrong", [], trace_id="other-trace")])
-        return SimpleNamespace(stdout=json.dumps(page(runs)))
-
-    with pytest.raises(PipelineError, match="different trace"):
-        dataset._query_thread_llm_runs("workspace-1", "project-1", "thread-1",
-                                      start_time="2026-09-01T00:00:00Z", runner=runner)

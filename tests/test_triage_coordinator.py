@@ -77,7 +77,7 @@ def test_batch_enforces_concurrency():
 
 def coordinator_model():
     return JudgeModel(answers=[
-        AIMessage(content="", tool_calls=[{"id": "skill", "name": "read_file", "args": {"file_path": "/skills/sft-trace-triage/SKILL.md"}}]),
+        AIMessage(content="", tool_calls=[{"id": "skill", "name": "read_file", "args": {"file_path": "/skills/trajectory-coordinator/SKILL.md"}}]),
         AIMessage(content="", tool_calls=[{"id": "code", "name": "code_mode", "args": {"code": "judge_batch(pending_tasks())"}}]),
         AIMessage(content="Finished."),
     ])

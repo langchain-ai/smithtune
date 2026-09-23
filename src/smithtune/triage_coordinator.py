@@ -119,7 +119,7 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
                 "runnable": RunnableLambda(tasks.invoke)}
     agent = create_deep_agent(
         model=chat_model, backend=backend, skills=["/skills/"], tools=[code_mode],
-        system_prompt="You coordinate SFT trajectory selection. Read /skills/sft-trace-triage/SKILL.md and follow coordinator mode. "
+        system_prompt="You coordinate SFT trajectory selection. Read /skills/trajectory-coordinator/SKILL.md and follow it. "
         "Use code_mode to inspect pending work and batch-dispatch trajectory-judge subagents. "
         "Do not judge trajectories yourself. CLI validation and saved votes determine labels, never your final text. "
         "The task tool also accepts individual planned pairs. Stop when pending_tasks() is empty. "

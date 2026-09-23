@@ -209,7 +209,7 @@ def test_cli_rubric_is_frozen_for_partial_resume_and_upload(tmp_path, monkeypatc
         cli.main(["dataset", command, str(directory), "--confirm"])
     assert incomplete.value.code == 1
     assert json.loads(capsys.readouterr().out)["triage"]["incomplete"] == 1
-    assert len(seen) == 3 and not api.calls and not api.imported
+    assert len(seen) == 2 and not api.calls and not api.imported
     saved = {name: (directory / name).read_bytes() for name in
              ("checkpoint.json", "plan.json", "snapshot.json", "triage-config.json", "judgments.jsonl")}
     completed = {vote["judge"]: vote for vote in map(json.loads, saved["judgments.jsonl"].splitlines()) if vote["status"] == "complete"}
@@ -219,12 +219,12 @@ def test_cli_rubric_is_frozen_for_partial_resume_and_upload(tmp_path, monkeypatc
                 cli.main(["dataset", command, str(directory), *override, *confirm])
             assert changed.value.code == 2
             assert "conflict" in capsys.readouterr().err
-            assert len(seen) == 3 and not api.calls
+            assert len(seen) == 2 and not api.calls
             assert all((directory / name).read_bytes() == content for name, content in saved.items())
     rubric_path.unlink()
     cli.main(["dataset", "resume", str(directory), "--confirm"])
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
-    assert len(seen) == 4 and seen[-1][0] == "judge-2"
+    assert len(seen) == 3 and seen[-1][0] == "judge-2"
     assert all(prompt == expected for _, prompt in seen)
     votes = {vote["judge"]: vote for vote in map(json.loads, (directory / "judgments.jsonl").read_text().splitlines())}
     assert all(votes[name] == vote for name, vote in completed.items())
@@ -234,7 +234,7 @@ def test_cli_rubric_is_frozen_for_partial_resume_and_upload(tmp_path, monkeypatc
     api.calls.clear()
     cli.main(["dataset", "resume", str(directory), "--confirm"])
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
-    assert len(seen) == 4 and not api.calls
+    assert len(seen) == 3 and not api.calls
 
 
 @pytest.mark.parametrize("content", [None, b"\xff", b"", b" \n\t", "directory"])
@@ -435,36 +435,6 @@ def test_pre_workflow_interrupted_triage_upload_is_resumed(tmp_path):
     result = run(tmp_path, api, "resume", confirm=True, judge=no_judge)
     assert result["created"] == 1 and result["pending_stages"] == []
     assert len(api.datasets) == len(api.imported) == 1
-
-
-def test_operator_skill_update_preserves_partial_council_votes(tmp_path):
-    from smithtune.inference_contract import json_sha256
-
-    api = API()
-    def fail_one(judge, *args):
-        return {} if judge["name"] == "judge-2" else judge_call(judge, *args)
-    run(tmp_path, api, "pull")
-    run(tmp_path, api, "triage", confirm=True, judge=fail_one, attempts=1)
-    # Reproduce the previous release's identity, which hashed the whole skill.
-    path = tmp_path / "triage-config.json"
-    identity = json.loads(path.read_text())
-    identity["skill_sha256"] = next(iter(triage.LEGACY_COORDINATOR_SKILLS))
-    path.write_text(json.dumps(identity))
-    digest = json_sha256(identity)
-    records = [json.loads(line) for line in (tmp_path / "judgments.jsonl").read_text().splitlines()]
-    for record in records:
-        record["identity_sha256"] = digest
-    (tmp_path / "judgments.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    summary = json.loads((tmp_path / "summary.json").read_text())
-    summary["identity_sha256"] = digest
-    (tmp_path / "summary.json").write_text(json.dumps(summary))
-    calls = []
-    def fixed(judge, *args):
-        calls.append(judge["name"])
-        return judge_call(judge, *args)
-    result = run(tmp_path, api, "resume", confirm=True, judge=fixed)
-    assert result["status"] == "complete" and calls == ["judge-2"]
-    assert json.loads(path.read_text()) == identity
 
 
 def test_parallel_pull_preserves_inflight_downloads_and_order_on_resume(tmp_path, monkeypatch):

@@ -31,7 +31,7 @@ RESULT_SCHEMA = {
 
 
 def rubric_text() -> str:
-    return files("smithtune").joinpath("skills/sft-trace-triage/judge.md").read_text(encoding="utf-8")
+    return files("smithtune").joinpath("triage_prompts/judge.md").read_text(encoding="utf-8")
 
 
 def validate_judgment(value: dict) -> dict:

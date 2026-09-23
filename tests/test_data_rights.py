@@ -97,10 +97,8 @@ def test_storage_failure_stops_workflow(monkeypatch):
     ["dataset", "push", "example", "--confirm"],
     ["dataset", "publish-splits", "--data-dir", "example"],
     ["prepare", "--workspace-id", "w", "--dataset-id", "d", "--model", "m"],
-    ["capture-contract", "--workspace-id", "w", "--run-id", "r", "--output", "example"],
     ["plan"], ["train", "--confirm"], ["evaluate", "--confirm"],
     ["eval-plan"], ["deploy", "--run-dir", "example", "--confirm"],
-    ["promote", "--run-dir", "example", "--output-model-id", "m", "--confirm"],
     ["undeploy", "--account-id", "a", "--deployment-id", "d", "--confirm"],
 ])
 def test_gate_runs_before_any_workflow_activity(monkeypatch, capsys, argv):

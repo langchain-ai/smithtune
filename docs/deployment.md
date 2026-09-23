@@ -126,13 +126,9 @@ smithtune deploy --provider fireworks \
 ```
 
 `--account-id` must be the account that owns the training checkpoint. A matching
-saved promotion is reused, including one created with standalone `promote`.
-If deployment creation fails after promotion succeeds, retrying does not promote
+saved promotion is reused. If deployment creation fails after promotion succeeds, retrying does not promote
 again. An existing deployment or a promotion with an uncertain outcome still
 needs inspection in Fireworks before retrying.
-
-Standalone `smithtune promote --run-dir "$run_dir" --output-model-id "$run_id" --confirm`
-remains available to register a model without starting an endpoint.
 
 For replay, use [`evaluate --run-dir`](../README.md#evaluate-a-trained-model). The serverless sampler
 uses the saved training checkpoint independently of this production endpoint.

@@ -74,9 +74,9 @@ def _model(judge: dict, max_tokens: int):
 def skill_files() -> dict:
     from deepagents.backends.utils import create_file_data
 
-    skill = files("smithtune").joinpath("skills/sft-trace-triage")
-    return {f"/skills/sft-trace-triage/{item.name}": create_file_data(item.read_text(encoding="utf-8"))
-            for item in skill.iterdir() if item.is_file()}
+    # Deep Agents discovers skills by path; the prompt itself ships as package data.
+    prompt = files("smithtune").joinpath("triage_prompts/coordinator.md")
+    return {"/skills/trajectory-coordinator/SKILL.md": create_file_data(prompt.read_text(encoding="utf-8"))}
 
 
 def allowed_tools(names: set[str]):
