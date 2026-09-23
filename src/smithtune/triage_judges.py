@@ -53,9 +53,6 @@ follow its links, or invent missing facts. Judge only the supplied conversation.
 """
 
 
-def rubric_text() -> str:
-    return JUDGE_PROMPT
-
 
 def validate_judgment(value: dict) -> dict:
     if list(Draft202012Validator(RESULT_SCHEMA).iter_errors(value)) or type(value.get("keep")) is not int:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare LangSmith trajectories and orchestrate provider-specific SFT."""
+"""Fine-tune models on LangSmith trajectories with Fireworks or Baseten, then compare base and tuned models in LangSmith."""
 
 from __future__ import annotations
 
@@ -39,11 +39,17 @@ from smithtune.artifacts import _json_dump, _load_json, output_lock
 from smithtune.progress import command_status
 
 
+JUDGE_MODEL_HELP = ("evaluation judge (default: %(default)s); baseten/<model-id>, anthropic/<model-id>, "
+                    "or a Fireworks model ID such as accounts/fireworks/models/deepseek-v4p1-flash")
+
+
 def _add_replay_options(command):
-    command.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL)
-    command.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
+    command.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL, help=JUDGE_MODEL_HELP)
+    command.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY,
+                         help="concurrent evaluation cases (default: %(default)s)")
     command.add_argument("--max-points-per-trajectory", type=int, help="optional replay cap; default scores every assistant action")
-    command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
+    command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS,
+                         help="maximum generated response tokens (default: %(default)s)")
 
 
 def _training_replay(args):
@@ -75,7 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     models = sub.add_parser("models", help="show supported training models")
-    models_sub = models.add_subparsers(dest="models_command", required=True)
+    models_sub = models.add_subparsers(dest="models_command", metavar="{list}", required=True)
     models_list = models_sub.add_parser(
         "list", help="list smithtune's supported models without network calls",
         description="List smithtune's supported training models as JSON. No credentials or downloads are needed; live provider availability is checked during prepare and train.",
@@ -85,9 +91,9 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     curate = sub.add_parser("dataset", help="curate trajectories from a tracing project")
-    curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
+    curate_sub = curate.add_subparsers(dest="dataset_command", metavar="{pull,triage,push,resume,publish-splits}", required=True)
     for name, help_text in {
-        "pull": "download trajectories and tool contracts to a saved directory",
+        "pull": "download trajectories and their per-turn tools to a saved directory",
         "triage": "review trajectory quality with an agent council against --rubric or --rule criteria; preview before --confirm",
         "push": "preview a dataset upload; --confirm uploads",
         "resume": "show pending stages; --confirm continues saved work",
@@ -96,8 +102,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("directory", nargs="?", type=Path,
                              help="download directory (generated if omitted)" if name == "pull" else "saved directory from dataset pull")
         if name == "pull":
-            command.add_argument("--workspace-id")
-            command.add_argument("--project-id")
+            command.add_argument("--workspace-id", help="LangSmith workspace containing the tracing project")
+            command.add_argument("--project-id", help="LangSmith tracing project to pull root runs from")
             command.add_argument("--start-time", help="inclusive root start time (default: 24 hours before end)")
             command.add_argument("--end-time", help="exclusive root start time (default: now)")
             command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window")
@@ -137,7 +143,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")
-    prep.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
+    prep.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="training provider (default: %(default)s)")
     prep.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
@@ -259,7 +265,7 @@ def _parser() -> argparse.ArgumentParser:
 
     deployment = sub.add_parser("deploy", help="deploy the selected checkpoint and test it; automatically promotes on Fireworks")
     deployment.add_argument("--run-dir", type=Path, required=True)
-    deployment.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
+    deployment.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="training provider (default: %(default)s)")
     deployment.add_argument("--account-id", help="Fireworks account ID")
     deployment.add_argument("--output-model-id", help="Fireworks model ID")
     deployment.add_argument("--deployment-id", help="Fireworks deployment ID")
@@ -294,12 +300,11 @@ def _parser() -> argparse.ArgumentParser:
         if command is evaluation:
             serving.add_argument("--base-model", help="optional base-model route served by the same endpoint")
     evaluation.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
-    evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
-                            help="judge route (default: baseten/zai-org/GLM-5.3-Flash); also anthropic/<model-id>, anthropic-gateway/<model-id> for the LangSmith gateway, or a Fireworks model ID")
+    evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL, help=JUDGE_MODEL_HELP)
     evaluation.add_argument("--confirm", action="store_true")
 
     remove = sub.add_parser("undeploy", help="stop serving capacity for a deployment")
-    remove.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
+    remove.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="training provider (default: %(default)s)")
     remove.add_argument("--run-dir", type=Path, help="Baseten run directory containing the deployment receipt")
     remove.add_argument("--account-id", help="Fireworks account ID")
     remove.add_argument("--deployment-id", help="Fireworks deployment ID")
@@ -530,7 +535,7 @@ def main(argv: list[str] | None = None) -> None:
         for old, replacement in {"--run-dir": "dataset pull DIR", "--output": "dataset pull DIR",
                                  "--triage-dir": "dataset push DIR", "--output-dir": "dataset triage DIR"}.items():
             if old in flags:
-                parser.error(f"{old} was replaced by the directory argument; use {replacement}")
+                parser.error(f"dataset commands take the directory as an argument, not {old}; use {replacement}")
         if arguments[1] == "triage" and flags & {"--workspace-id", "--project-id", "--start-time", "--end-time", "--filter", "--target-count", "--max-candidates", "--seed"}:
             parser.error("triage uses saved local trajectories; run dataset pull DIR with source flags first")
     args = parser.parse_args(arguments)

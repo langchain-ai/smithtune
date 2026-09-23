@@ -1,4 +1,4 @@
-"""Optional Deep Agents runner with a virtual, read-only skill filesystem."""
+"""Optional Deep Agents runner for the triage council coordinator."""
 
 from __future__ import annotations
 

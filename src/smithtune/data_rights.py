@@ -22,11 +22,10 @@ def _receipt_path() -> Path:
     return root / "smithtune" / "data-rights.json"
 
 
-def require_acknowledgment() -> dict:
-    """Fail before workflow dispatch unless the user explicitly acknowledges reading."""
-    path = _receipt_path()
+def saved_acknowledgment() -> dict | None:
+    """Return the saved receipt for the current document, without prompting."""
     try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt = json.loads(_receipt_path().read_text(encoding="utf-8"))
         if (isinstance(receipt, dict)
                 and receipt.get("document_version") == DOCUMENT_VERSION
                 and receipt.get("document_url") == DOCUMENT_URL
@@ -35,6 +34,15 @@ def require_acknowledgment() -> dict:
                 return receipt
     except (OSError, ValueError):
         pass
+    return None
+
+
+def require_acknowledgment() -> dict:
+    """Fail before workflow dispatch unless the user explicitly acknowledges reading."""
+    receipt = saved_acknowledgment()
+    if receipt is not None:
+        return receipt
+    path = _receipt_path()
 
     if not sys.stdin.isatty():
         raise PipelineError(

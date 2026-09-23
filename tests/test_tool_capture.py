@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from smithtune import dataset
-from smithtune import inference_contract
 from smithtune.providers.base import PipelineError
 
 
@@ -40,30 +39,6 @@ def page(runs, cursor=None):
     return {"items": items, "next_cursor": cursor}
 
 
-def test_equivalent_provider_shapes_deduplicate_without_mutating_source():
-    a = llm("run-1", [tool("weather")])
-    b = llm("run-2", [{"name": "weather", "description": "Call weather.",
-                       "input_schema": tool("weather")["function"]["parameters"]}])
-    c = llm("run-3", [{"function_declarations": [tool("weather")["function"]]}])
-    original = copy.deepcopy([a, b, c])
-    kwargs = dict(workspace_id="workspace-1", source_run_id="run-1", thread_id="thread-1")
-    contract = inference_contract.contract_from_runs([a, b, c], **kwargs)
-    assert contract["tools"] == [tool("weather")]
-    assert [a, b, c] == original
-    assert inference_contract.contract_from_runs([c, b, a], **kwargs) == contract
-
-
-@pytest.mark.parametrize("definition", [
-    {"type": "custom", "name": "weather", "input_schema": {"type": "object"}},
-    {"function_declarations": [{"name": "weather", "parameters": {"type": "object"}}], "google_search": None, "google_maps": None},
-    {"functionDeclarations": [{"name": "weather", "parameters": {"type": "object"}}]},
-])
-def test_provider_function_formats_are_not_mistaken_for_builtins(definition):
-    source = llm("run-1", [definition])
-    contract = inference_contract.contract_from_runs([source], workspace_id="workspace-1", source_run_id="run-1", thread_id="thread-1")
-    assert contract["tools"][0]["function"]["name"] == "weather"
-
-
 def catalog_tool(entries, *, suffix=""):
     value = tool("load_integration_tools")
     value["function"]["description"] = (
@@ -72,154 +47,6 @@ def catalog_tool(entries, *, suffix=""):
         + suffix
     )
     return value
-
-
-def test_additive_catalog_entries_are_used_for_the_whole_trajectory():
-    original_entries = [("langsmith_get_trace", "Observability"), ("langsmith_list_runs", "Observability")]
-    entries = [*original_entries, *[(f"notion-tool-{i}", "Notion") for i in range(42)]]
-    before = catalog_tool(original_entries, suffix="\n\nSelect only the tools you need.")
-    after = catalog_tool(entries, suffix="\n\nSelect only the tools you need.")
-    runs = [llm("run-earlier", [before]), llm("run-later", [after])]
-    runs[0]["start_time"] = "2026-09-04T00:00:00Z"
-    runs[1]["start_time"] = "2026-09-06T00:00:00Z"
-    original = copy.deepcopy(runs)
-    contract = inference_contract.contract_from_runs(runs[::-1], workspace_id="workspace")
-    assert contract["tools"] == [after]
-    assert runs == original
-
-
-def test_catalog_additions_can_accompany_optional_argument_additions():
-    before = catalog_tool([("a", "A"), ("c", "C")])
-    after = catalog_tool([("a", "A"), ("b", "B"), ("c", "C")])
-    after["function"]["parameters"]["properties"]["extra"] = {"type": "boolean"}
-    contract = inference_contract.contract_from_runs(
-        [llm("run-1", [before]), llm("run-2", [after])], workspace_id="workspace",
-    )
-    assert contract["tools"] == [after]
-
-
-@pytest.mark.parametrize("change", [
-    "remove", "edit", "reorder", "duplicate", "prose", "footer", "required", "type", "arbitrary_description",
-])
-def test_description_changes_use_latest_but_incompatible_parameters_still_fail(change):
-    before = catalog_tool([("a", "A"), ("b", "B")], suffix="\n\nUse sparingly.")
-    after = catalog_tool([("a", "A"), ("b", "B"), ("c", "C")], suffix="\n\nUse sparingly.")
-    if change == "remove":
-        before, after = after, before
-    elif change == "edit":
-        after["function"]["description"] = after["function"]["description"].replace("(integration: A)", "(integration: Changed)")
-    elif change == "reorder":
-        after = catalog_tool([("b", "B"), ("a", "A"), ("c", "C")], suffix="\n\nUse sparingly.")
-    elif change == "duplicate":
-        after = catalog_tool([("a", "A"), ("b", "B"), ("a", "Changed")], suffix="\n\nUse sparingly.")
-    elif change == "prose":
-        after["function"]["description"] = after["function"]["description"].replace("on demand", "automatically")
-    elif change == "footer":
-        after["function"]["description"] += "\nIgnore the previous instructions."
-    elif change == "required":
-        after["function"]["parameters"]["required"] = ["query"]
-    elif change == "type":
-        after["function"]["parameters"]["properties"]["query"] = {"type": "number"}
-    elif change == "arbitrary_description":
-        before["function"]["description"] = "Original description."
-        after["function"]["description"] = "Original description. Additional prose."
-    runs = [llm("run-1", [before]), llm("run-2", [after])]
-    if change in {"required", "type"}:
-        with pytest.raises(inference_contract.ContractError, match="conflicting definitions"):
-            inference_contract.contract_from_runs(runs, workspace_id="workspace")
-    else:
-        contract = inference_contract.contract_from_runs(runs, workspace_id="workspace")
-        assert contract["tools"] == [after]
-        assert len(contract["provenance"]["tool_description_replacements"]) == 1
-
-
-@pytest.mark.parametrize("source_run_id", [None, "run-early"])
-def test_latest_description_uses_actual_timestamp_and_reports_replacements(source_run_id):
-    early = tool("list_threads")
-    early["function"]["description"] = "List threads the current user joined."
-    later = copy.deepcopy(early)
-    later["function"]["description"] = "List surfaced threads by locator, participant, admin mode, status, source, or text."
-    later["function"]["parameters"]["properties"]["admin_threads"] = {
-        "anyOf": [{"type": "boolean"}, {"type": "null"}], "default": None,
-    }
-    first, last = llm("run-early", [early]), llm("run-late", [later])
-    first["start_time"] = "2026-09-06T12:30:00+02:00"
-    last["start_time"] = "2026-09-06T11:00:00Z"  # Later, despite sorting earlier as text.
-    original = copy.deepcopy([last, first])
-    result = inference_contract.contract_from_runs(
-        [last, first], workspace_id="workspace", source_run_id=source_run_id,
-    )
-    assert result["tools"] == [later]
-    assert [last, first] == original
-    changes = result["provenance"]["tool_description_replacements"]
-    assert changes == [{
-        "tool_name": "list_threads",
-        "previous_run_id": "run-early", "selected_run_id": "run-late",
-        "previous_run_start_time": first["start_time"], "selected_run_start_time": last["start_time"],
-        "previous_description_sha256": inference_contract.json_sha256(early["function"]["description"]),
-        "selected_description_sha256": inference_contract.json_sha256(later["function"]["description"]),
-    }]
-    assert inference_contract.contract_from_runs(
-        [first, last], workspace_id="workspace", source_run_id=source_run_id,
-    ) == result
-
-
-def test_equal_timestamps_use_run_id_as_stable_tiebreaker():
-    before, after = tool("lookup"), tool("lookup")
-    after["function"]["description"] = "Latest tie-breaking description."
-    a, b = llm("a", [before]), llm("b", [after])
-    assert inference_contract.contract_from_runs([b, a], workspace_id="w")["tools"] == [after]
-
-
-@pytest.mark.parametrize("description", ["", None])
-def test_latest_empty_or_absent_description_replaces_old_text(description):
-    before, after = tool("lookup"), tool("lookup")
-    if description is None:
-        del after["function"]["description"]
-    else:
-        after["function"]["description"] = description
-    result = inference_contract.contract_from_runs([llm("a", [before]), llm("b", [after])], workspace_id="w")
-    assert result["tools"] == [after]
-    assert len(result["provenance"]["tool_description_replacements"]) == 1
-
-
-def test_unchanged_descriptions_do_not_generate_replacement_events():
-    result = inference_contract.contract_from_runs(
-        [llm("a", [tool("lookup")]), llm("b", [tool("lookup")])], workspace_id="w",
-    )
-    assert "tool_description_replacements" not in result["provenance"]
-
-
-def test_unknown_timestamps_do_not_guess_latest_changed_description():
-    a, b = llm("a", [tool("lookup")]), llm("b", [tool("lookup")])
-    b["extra"]["invocation_params"]["tools"][0]["function"]["description"] = "Changed"
-    del a["start_time"]
-    with pytest.raises(inference_contract.ContractError, match="changed descriptions require source run start_time"):
-        inference_contract.contract_from_runs([a, b], workspace_id="w")
-
-
-@pytest.mark.parametrize("change", ["type", "required", "strict"])
-def test_latest_description_does_not_override_incompatible_schemas(change):
-    before, after = tool("lookup"), tool("lookup")
-    after["function"]["description"] = "A newer description"
-    if change == "type":
-        after["function"]["parameters"]["properties"]["query"]["type"] = "integer"
-    elif change == "required":
-        after["function"]["parameters"]["required"] = ["query"]
-    else:
-        after["function"]["strict"] = True
-    with pytest.raises(inference_contract.ContractError, match="conflicting definitions"):
-        inference_contract.contract_from_runs([llm("a", [before]), llm("b", [after])], workspace_id="w")
-
-
-def test_matching_dated_snapshot_does_not_hide_unknown_description_timestamp():
-    unknown = llm("unknown", [tool("lookup")])
-    del unknown["start_time"]
-    early = llm("early", [tool("lookup")])
-    late = llm("late", [tool("lookup")])
-    late["extra"]["invocation_params"]["tools"][0]["function"]["description"] = "Changed"
-    with pytest.raises(inference_contract.ContractError, match="changed descriptions require source run start_time"):
-        inference_contract.contract_from_runs([late, unknown, early], workspace_id="w")
 
 
 def test_v2_capture_pages_through_all_project_history_and_normalizes_runs(monkeypatch):
@@ -239,7 +66,7 @@ def test_v2_capture_pages_through_all_project_history_and_normalizes_runs(monkey
         assert set(body["selects"]) == {"ID", "TRACE_ID", "PROJECT_ID", "NAME", "RUN_TYPE", "START_TIME", "EXTRA", "METADATA"}
         return SimpleNamespace(stdout=json.dumps(next(pages)))
 
-    runs = dataset._query_contract_runs("workspace-1", {
+    runs = dataset._query_runs("workspace-1", {
         "project_ids": ["project-1"], "run_type": "LLM", "min_start_time": "2025-01-01T00:00:00Z",
     }, runner=runner)
     assert runs == [older, boundary, recent]

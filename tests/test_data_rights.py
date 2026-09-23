@@ -136,3 +136,15 @@ def test_relative_config_directory_uses_home(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", "relative")
     monkeypatch.setattr(data_rights.Path, "home", lambda: tmp_path)
     assert data_rights._receipt_path() == tmp_path / ".config/smithtune/data-rights.json"
+
+
+def test_doctor_reports_acknowledgment_without_prompting(monkeypatch):
+    from smithtune import doctor
+    from smithtune.artifacts import _json_dump
+
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("doctor must not prompt"))
+    assert doctor.diagnose()["data_rights_acknowledged"] is False
+    _json_dump(data_rights._receipt_path(), {"document_version": data_rights.DOCUMENT_VERSION,
+                                             "document_url": data_rights.DOCUMENT_URL,
+                                             "read_at": "2026-09-20T00:00:00+00:00"})
+    assert doctor.diagnose()["data_rights_acknowledged"] is True

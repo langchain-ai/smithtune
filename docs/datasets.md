@@ -14,7 +14,7 @@ stage’s result before continuing.
 
 `pull` downloads without model calls. `triage` and `push` preview without
 `--confirm`; `resume` without `--confirm` reads only local state. A directory is
-generated if omitted from a new `pull`; keep the returned `run_dir` for subsequent commands.
+generated if omitted from a new `pull`; the result's `run_dir` field is that dataset directory, so reuse it for subsequent commands.
 `dataset publish-splits` remains a separate operation on prepared data.
 
 ## Select candidates and review quality
@@ -75,7 +75,7 @@ Previews report pending stages and the next command. Flagless reruns use the sav
 - `--target-count` is the cumulative goal (default 100): council-approved
   trajectories by default, or structurally usable trajectories with `--no-triage`.
   `--max-candidates` caps **new** candidates per round (default 1000, maximum 2000).
-  These replace `--limit`. A round can collect fewer candidates if the source is
+  A round can collect fewer candidates if the source is
   exhausted, or if a `--no-triage` pull reaches its target.
 - Council mode downloads the candidate pool before review; the council stops at
   the approved target. When a fully reviewed pool falls short, another explicit
@@ -153,11 +153,23 @@ files; the CLI saves the rubric but does not verify human agreement.
 `triage` reads only downloaded trajectories. Its default council is DeepSeek
 V4.1 Flash and GLM-5.3-Flash on Baseten (so only `BASETEN_API_KEY` is needed); with two
 judges a trajectory is kept only when both vote keep. The council is managed by a
-Deep Agent. The [README installation](../README.md#setup) includes the `deepagents` extra. Configure
-credentials for the selected providers. Use `--judges` to choose aliases or
-`provider:model`, and `--concurrency` to set concurrent judge tasks (default 4,
-maximum 16). Direct Anthropic uses `ANTHROPIC_API_KEY`; the Anthropic gateway uses
-`LANGSMITH_GATEWAY_API_KEY`.
+Deep Agent. The [README installation](../README.md#quickstart) includes the `deepagents` extra.
+Use `--concurrency` to set concurrent judge tasks (default 4, maximum 16).
+
+Choose judges with `--judges`, as comma-separated aliases or `provider:model` values:
+
+| Alias | Provider and model | Key |
+| --- | --- | --- |
+| `baseten-deepseek-v4.1-flash` | `baseten:deepseek-ai/DeepSeek-V4.1-Flash` (default) | `BASETEN_API_KEY` |
+| `baseten-glm-5.3-flash` | `baseten:zai-org/GLM-5.3-Flash` (default) | `BASETEN_API_KEY` |
+| `deepseek-v4.1-flash` | `fireworks:accounts/fireworks/models/deepseek-v4p1-flash` | `FIREWORKS_API_KEY` |
+| `glm-5.3-flash` | `fireworks:accounts/fireworks/models/glm-5p3-flash` | `FIREWORKS_API_KEY` |
+| `muse-glimmer-30b` | `fireworks:accounts/fireworks/models/muse-glimmer-30b` | `FIREWORKS_API_KEY` |
+| `gpt-5.6-terra` | `openai:gpt-5.6-terra` | `OPENAI_API_KEY` |
+
+Other models use `provider:model`, for example `anthropic:<model-id>` with
+`ANTHROPIC_API_KEY`. Note that `--judges` separates provider and model with a
+colon, while evaluation's `--judge-model` uses a slash (`baseten/<model-id>`).
 
 Every council member judges the full trajectory. All votes must finish; a strict
 majority keeps it, and ties drop it. Multimodal and provider context-window
@@ -198,10 +210,6 @@ Threads can gain traces while downloading. Pull saves the returned trajectory
 and its source evidence; growth alone does not exclude it. Structural and tool
 validation still apply. Saved trace IDs describe the downloaded content, and
 resume reuses that local snapshot without incorporating later thread activity.
-
-The positional directory replaces `--run-dir`, `--output`, and `--triage-dir`.
-Saved triage snapshots can use `triage`, `push`, and `resume`. Receipts predating the
-recovery format still require inspection and a new directory with `--dataset-id`.
 
 After upload, pass the returned dataset ID to `smithtune prepare`. Saved tool
 availability travels with the examples; see [per-assistant tools](reference.md#per-assistant-tools-and-training-targets).

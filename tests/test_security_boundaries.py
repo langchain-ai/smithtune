@@ -84,7 +84,7 @@ def test_subprocess_output_is_captured_before_sanitizing(capture, stream, capfd)
 
 
 @pytest.mark.parametrize("capture", [False, True])
-def test_successful_subprocess_capture_contract(capture, capfd):
+def test_successful_subprocess_stdout_capture(capture, capfd):
     command = [sys.executable, "-c", f"print({PRIVATE!r})"]
     result = dataset._run_langsmith(command, capture=capture)
     assert isinstance(result, subprocess.CompletedProcess)

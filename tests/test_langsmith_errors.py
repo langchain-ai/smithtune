@@ -83,7 +83,7 @@ def test_transient_error_retries_only_current_page(monkeypatch, retry_sleeps, ca
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(response))
 
     monkeypatch.setattr(artifacts.subprocess, "run", run)
-    runs = dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
+    runs = dataset._query_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
     assert [run["id"] for run in runs] == ["first", "second"]
     assert cursors == [None, "page-2", "page-2", "page-2"]
     assert retry_sleeps == [5.5, 10.5]
@@ -109,7 +109,7 @@ def test_query_retry_limit_preserves_safe_error(monkeypatch, retry_sleeps, diagn
 
     monkeypatch.setattr(artifacts.subprocess, "run", fail)
     with pytest.raises(PipelineError) as error:
-        dataset._query_contract_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
+        dataset._query_runs("workspace-123", {"project_ids": ["project-1"], "min_start_time": "2026-09-01T00:00:00Z"}, runner=dataset._run_langsmith)
     assert str(error.value) == f"langsmith failed: {expected}"
     assert len(calls) == attempts
     assert retry_sleeps == ([5.5, 10.5, 20.5, 40.5, 60] if attempts == 6 else [])

@@ -435,6 +435,11 @@ class FireworksProvider:
         plan = self.plan(data_dir, run_id, settings, replay=replay)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
+        if replay is not None:
+            from smithtune.evaluation.replay import validate_judge_credentials
+
+            # Check before writing the run directory so a missing key can be fixed and retried.
+            validate_judge_credentials(replay["judge_model"])
         model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
         preflight_model(model)
         load_training_renderer(model)
@@ -447,10 +452,9 @@ class FireworksProvider:
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
         _json_dump(run_dir / "plan.json", plan)
         if replay is not None:
-            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials, preflight_langsmith
+            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
             from smithtune.inference import _chat_completion
 
-            validate_judge_credentials(replay["judge_model"])
             preflight_langsmith(data_dir)
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],

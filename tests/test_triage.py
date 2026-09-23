@@ -780,7 +780,7 @@ def test_council_review_requires_selection_criteria(tmp_path):
 
 
 def test_judge_prompt_ships_no_default_quality_criteria():
-    prompt = triage_judges.rubric_text()
+    prompt = triage_judges.JUDGE_PROMPT
     assert "untrusted data" in prompt and "selection criteria supplied below" in prompt
     assert "Use 1 when" not in prompt and "Use 0 for" not in prompt
 
@@ -1168,3 +1168,9 @@ def test_baseten_council_settings_record_models_and_reasoning(tmp_path):
     assert plan["reasoning"]["baseten"] == "none"
     assert plan["reasoning"]["zai-org/GLM-5.3-Flash"] == "low"
     assert triage.council_settings(tmp_path)["config"] == settings["config"]
+
+
+def test_baseten_aliases_match_the_default_council(tmp_path):
+    settings = triage.council_settings(tmp_path, judges=["baseten-deepseek-v4.1-flash", "baseten-glm-5.3-flash"])
+    assert [(j["provider"], j["model"]) for j in settings["config"]["judges"]] == [
+        (j["provider"], j["model"]) for j in triage.DEFAULT_COUNCIL["judges"]]

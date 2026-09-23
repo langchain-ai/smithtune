@@ -4,11 +4,45 @@ Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observab
 recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
 in LangSmith, then optionally deploy an endpoint for your application.
 
-smithtune is an early beta project. If you run into issues, please report them
-in the [repository](https://github.com/langchain-ai/smithtune/issues).
+smithtune is an early beta project; commands and saved-directory formats may change
+between releases. If you run into issues, please report them in the
+[repository](https://github.com/langchain-ai/smithtune/issues).
+
+## Quickstart
+
+Install the CLI with [uv](https://docs.astral.sh/uv/getting-started/installation/):
+
+```bash
+uv tool install --python 3.12 \
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+```
+
+Install the smithtune skill so your coding agent (Claude Code, Codex, Cursor, and
+others) can run the whole flow:
+
+```bash
+npx skills add langchain-ai/smithtune
+```
+
+Set `LANGSMITH_API_KEY` and `BASETEN_API_KEY` (or `FIREWORKS_API_KEY`; see
+[credentials](#credentials-and-first-use-setup)), then check your setup:
+
+```bash
+smithtune acknowledge-data-rights
+smithtune doctor
+```
+
+Then ask your agent:
 
 ```text
-dataset pull → dataset triage → dataset push
+Use the smithtune skill to fine-tune a model on my LangSmith project <project> with Baseten.
+```
+
+The flow:
+
+```text
+dataset pull → dataset triage (optional) → dataset push
 prepare → plan → train --evaluate → deploy (optional)
 ```
 
@@ -21,17 +55,10 @@ prepare → plan → train --evaluate → deploy (optional)
 
 ## Setup
 
-Install with [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git:
-
-```bash
-uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git'
-```
-
-This includes using an **Agent Council** for dataset selection. A council is a group of
-models that votes on which conversations to keep. Add `--upgrade` to update.
-The override is in place to select a more up to date version of the HuggingFace Transformer's package. Keep its Git ref aligned with the package when pinning a release or commit.
+The [quickstart](#quickstart) install includes the `deepagents` extra, used by the
+optional agent council that votes on which trajectories to keep. The overrides file
+selects a newer Hugging Face Transformers release; when installing another tag, use
+the same tag in both URLs. To update, rerun the install with the new tag and `--force`.
 
 Install the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) for reading traces and datasets:
 
@@ -41,13 +68,15 @@ curl -fsSL https://cli.langsmith.com/install.sh | sh
 
 ## Using with a coding agent
 
-The [smithtune skill](src/smithtune/skills/smithtune/SKILL.md) walks a coding
-agent through the whole flow. Give your agent this prompt, replacing the placeholders:
+The [smithtune skill](https://github.com/langchain-ai/smithtune/blob/main/src/smithtune/skills/smithtune/SKILL.md) walks a coding
+agent through the whole flow: choosing and testing a filter, optional council
+review, preparation, training, evaluation, and deployment, with a check after each
+step. Install it with `npx skills add langchain-ai/smithtune` (add `-g` to install
+it for every project), then describe your task:
 
 ```text
-Help me <task> with smithtune using <provider>.
+Use the smithtune skill to <task> with <provider>.
 My data: <workspace/project/dataset IDs or prepared-data directory>.
-Follow https://github.com/langchain-ai/smithtune/blob/main/src/smithtune/skills/smithtune/SKILL.md.
 ```
 
 ### Credentials and first-use setup
@@ -56,16 +85,19 @@ Set these environment variables in the shell where you run smithtune:
 
 | Variable | Needed for |
 | --- | --- |
-| `LANGSMITH_API_KEY` | Dataset access, split publication, and LangSmith experiments |
-| `FIREWORKS_API_KEY` **or** `BASETEN_API_KEY` | Your chosen provider's preparation, training, and evaluation |
-| `BASETEN_API_KEY` | The default replay judge, GLM-5.3-Flash on Baseten Model APIs (also the Baseten training key) |
+| `LANGSMITH_API_KEY` | Every workflow: dataset access, split publication, and LangSmith experiments |
+| `BASETEN_API_KEY` | Baseten training and evaluation, plus the default council and evaluation judge (DeepSeek V4.1 Flash and GLM-5.3-Flash on Baseten Model APIs) |
+| `FIREWORKS_API_KEY` | Fireworks training and evaluation, and Fireworks-hosted judges |
 
 The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
-Agent Council review with the default models requires only `BASETEN_API_KEY`. The model choices are configurable.
 
-See [other replay judges](docs/reference.md#replay-options) to change the judge.
+**Fireworks only, without a Baseten key:** use the same judge models on Fireworks.
+Pass `--judges deepseek-v4.1-flash,glm-5.3-flash` to `dataset triage`, and
+`--judge-model accounts/fireworks/models/deepseek-v4p1-flash` to `plan`, `train`,
+and `evaluate`. See [replay judges](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#replay-options) for
+other options.
 
-Read [Data Rights and Permitted Use](docs/data-rights-and-permitted-use.md).
+Read [Data Rights and Permitted Use](https://github.com/langchain-ai/smithtune/blob/main/docs/data-rights-and-permitted-use.md).
 The first workflow requires an interactive acknowledgment, saved locally;
 `--confirm` does not replace it. Before running scripts, acknowledge and check setup:
 
@@ -105,7 +137,7 @@ model=qwen3p8-27b
 workspace_id='<workspace-id>'
 data_dir='./data/my-sft'
 run_dir='./runs/my-sft'
-judge_model='baseten/zai-org/GLM-5.3-Flash'
+judge_model='baseten/zai-org/GLM-5.3-Flash'  # Fireworks only: accounts/fireworks/models/deepseek-v4p1-flash
 
 smithtune models list --provider "$provider"
 ```
@@ -168,12 +200,14 @@ on a strict majority. You need:
 
 - the `deepagents` extra (included in the install above);
 - keys for the judges: `BASETEN_API_KEY` for the default council (DeepSeek
-  V4.1 Flash and GLM-5.3-Flash on Baseten), or pick others with `--judges`;
+  V4.1 Flash and GLM-5.3-Flash on Baseten), or pick others with `--judges`
+  (see [judge options](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md#review-training-examples-with-an-agent-council));
 - a `rubric.md` describing the task, what to keep, what to drop, and a few
   concrete examples of each. smithtune ships no default rubric; `triage`
-  requires `--rubric` or `--rule`. The
-  [smithtune skill](src/smithtune/skills/smithtune/SKILL.md) has a template. Write it after reading a varied sample of the
-  pulled trajectories.
+  requires `--rubric` or `--rule`. Write it after reading a varied sample of the
+  pulled trajectories; the
+  [smithtune skill](https://github.com/langchain-ai/smithtune/blob/main/src/smithtune/skills/smithtune/SKILL.md#3-triage-with-a-council-only-in-council-mode)
+  has a template.
 
 ```bash
 smithtune dataset triage data/datasets/my-sft --rubric ./rubric.md   # preview, no model calls
@@ -189,7 +223,7 @@ not guarantee good training data.
 Keep the same directory throughout. The review mode, filter, window, and limits
 are fixed once you pull. Use `smithtune dataset resume data/datasets/my-sft` to
 inspect pending work and add `--confirm` to continue it. See
-[dataset curation](docs/datasets.md) for selection and recovery details.
+[dataset curation](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md) for selection and recovery details.
 
 ## Prepare data
 
@@ -203,7 +237,7 @@ smithtune prepare \
   --data-dir "$data_dir"
 ```
 
-Preparation checks each conversation and the tools available at each assistant turn.
+Preparation checks each trajectory and the tools available at each assistant turn.
 It assigns about 80% to training, 10% to validation, and 10% to testing. Each source trajectory
 stays in one split; the memberships are also published to the LangSmith dataset.
 
@@ -211,7 +245,7 @@ Recorded system messages are preserved; reasoning is omitted by default. Unsuppo
 or overlong trajectories are excluded without truncation and listed in
 `"$data_dir/prepared/rejected.json"`. Each supported assistant answer becomes one
 training target, with its preceding context and the tools available at that call.
-See the [preparation reference](docs/reference.md#prepare-data) for data requirements,
+See the [preparation reference](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#prepare-data) for data requirements,
 reasoning options, and split recovery.
 
 ## Plan and train
@@ -275,7 +309,7 @@ with the base model and saves results in `"$run_dir/replay"`. Rerunning reuses c
 predictions and judgments and retries LangSmith publication. Keep your local artifacts.
 
 To change the judge, replay cap, or sampling settings, use a fresh
-`--output-dir` on both commands. See [evaluation options and recovery](docs/reference.md#replay-options).
+`--output-dir` on both commands. See [evaluation options and recovery](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#replay-options).
 
 ## Deploy a trained model
 
@@ -293,7 +327,7 @@ smithtune deploy --provider fireworks --run-dir "$run_dir" \
   --confirm
 ```
 
-**Baseten**: install the [deployment extra](docs/deployment.md#deploy-a-baseten-checkpoint)
+**Baseten**: install the [deployment extra](https://github.com/langchain-ai/smithtune/blob/main/docs/deployment.md#deploy-a-baseten-checkpoint)
 first. Choose hardware and a context cap suitable for your model; these are example values:
 
 ```bash
@@ -312,13 +346,13 @@ smithtune undeploy --provider fireworks \
 smithtune undeploy --provider baseten --run-dir "$run_dir" --confirm
 ```
 
-See the [deployment guide](docs/deployment.md) for setup, recovery, and endpoint evaluation.
+See the [deployment guide](https://github.com/langchain-ai/smithtune/blob/main/docs/deployment.md) for setup, recovery, and endpoint evaluation.
 
 ## More guides
 
 | Task | Guide |
 | --- | --- |
-| Filter, judge, resume, or extend a dataset | [Dataset curation](docs/datasets.md) |
-| Configure models, splits, reasoning, or evaluation | [Preparation and evaluation reference](docs/reference.md) |
-| Deploy and manage endpoints | [Deployment](docs/deployment.md) |
-| Contribute to smithtune | [Development setup](CONTRIBUTING.md) |
+| Filter, judge, resume, or extend a dataset | [Dataset curation](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md) |
+| Configure models, splits, reasoning, or evaluation | [Preparation and evaluation reference](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md) |
+| Deploy and manage endpoints | [Deployment](https://github.com/langchain-ai/smithtune/blob/main/docs/deployment.md) |
+| Contribute to smithtune | [Development setup](https://github.com/langchain-ai/smithtune/blob/main/CONTRIBUTING.md) |

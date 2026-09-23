@@ -17,7 +17,7 @@ from smithtune.dataset import _source_key, validate_trajectories
 from smithtune.dataset_artifacts import LazySequence, load_conversation, save_conversation
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
-from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, rubric_text, validate_judgment
+from smithtune.triage_judges import BASETEN_REASONING, FIREWORKS_REASONING, PROVIDERS, api_judge, check_credentials, context_window_exceeded, deepagent_judge, judge_messages, JUDGE_PROMPT, validate_judgment
 from smithtune.triage_coordinator import COORDINATOR_PROMPT
 from smithtune.triage_source import conversation_trajectories, load_snapshot, multimodal_types, snapshot, training_error
 
@@ -27,6 +27,8 @@ JUDGE_ALIASES = {
     "deepseek-v4.1-flash": ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
     "glm-5.3-flash": ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
     "gpt-5.6-terra": ("openai", "gpt-5.6-terra"),
+    "baseten-deepseek-v4.1-flash": ("baseten", "deepseek-ai/DeepSeek-V4.1-Flash"),
+    "baseten-glm-5.3-flash": ("baseten", "zai-org/GLM-5.3-Flash"),
 }
 
 DEFAULT_COUNCIL = {"judges": [
@@ -184,12 +186,12 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     filtered |= training_filtered
     rejections = [_result(_label(trajectory, {}, config["judges"], error=training_errors[trajectory["trajectory_id"]]))
                   for trajectory in judging if trajectory["trajectory_id"] in filtered]
-    rubric = rubric_text()
+    rubric = JUDGE_PROMPT
     if selection_rubric is not None:
         rubric += "\nTask-specific selection rubric:\n" + selection_rubric
     identity = {"snapshot_sha256": frozen["snapshot_sha256"], "config": config, "rubric_sha256": json_sha256(rubric),
                 "runner": runner_mode, "max_output_tokens": max_output_tokens,
-                "reasoning": {"fireworks": "none", "gpt-5.6-terra": "none"},
+                "reasoning": {"fireworks": "none"},
                 "prefilter": "multimodal-and-provider-context-v1", "judging_unit": "conversation-v1"}
     if target is not None:
         identity.pop("snapshot_sha256")
@@ -198,6 +200,8 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
         identity["selection_rubric"] = selection_rubric
     if target is not None or any(trajectory["has_assistant_runs"] for trajectory in judging):
         identity["tool_evidence"] = "per-assistant-v1"
+    if any(judge["model"] == "gpt-5.6-terra" for judge in config["judges"]):
+        identity["reasoning"]["gpt-5.6-terra"] = "none"
     identity["reasoning"].update({judge["model"]: FIREWORKS_REASONING[judge["model"]] for judge in config["judges"]
                                   if judge["provider"] == "fireworks" and judge["model"] in FIREWORKS_REASONING})
     if any(judge["provider"] == "baseten" for judge in config["judges"]):
@@ -207,7 +211,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     if runner_mode == "deepagent":
         # The coordinator prompt changes scheduling decisions and belongs in
         # the resume identity just like the judge instructions.
-        identity.update(agent_version=11, skill_sha256=json_sha256(COORDINATOR_PROMPT))
+        identity.update(agent_version=12, coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(multimodal_filtered),

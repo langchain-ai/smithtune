@@ -60,7 +60,8 @@ def test_doctor_reports_only_credential_presence(monkeypatch):
     monkeypatch.setenv("LANGSMITH_GATEWAY_API_KEY", "gateway-test-key")
     result = doctor.diagnose()
     assert result["credentials"]["ANTHROPIC_API_KEY"] == "set"
-    assert result["credentials"]["LANGSMITH_GATEWAY_API_KEY"] == "set"
+    assert "LANGSMITH_GATEWAY_API_KEY" not in result["credentials"]
+    assert set(result["credentials"]) == set(result["credentials_required_for"])
     assert "test-key" not in json.dumps(result)
     assert "SMITHTUNE_ANTHROPIC_API_KEY" not in result["credentials"]
     assert "ANTHROPIC_CUSTOM_HEADERS" not in result["credentials"]
