@@ -8,7 +8,8 @@ smithtune is an early beta project. If you run into issues, please report them
 in the [repository](https://github.com/langchain-ai/smithtune/issues).
 
 ```text
-dataset create → prepare → plan → train --evaluate → deploy (optional)
+dataset pull → dataset triage (optional) → dataset push
+prepare → plan → train --evaluate → deploy (optional)
 ```
 
 | What you have | Start here |
@@ -81,7 +82,6 @@ Paid model calls and GPU capacity require `--confirm` on the command to run them
 
 | Command | Without `--confirm` |
 | --- | --- |
-| `dataset create` | Downloads and previews; no council calls or upload |
 | `dataset triage` | Previews council calls |
 | `dataset resume` | Shows pending work |
 | `train`, `evaluate`, `deploy` | Stops before paid work |
@@ -115,34 +115,36 @@ preparation selects its tokenizer and formatting.
 ## Create a dataset from trajectories
 
 Skip this step if you already have a LangSmith trajectory dataset. Otherwise,
-select a tracing project and filter, preview the workflow, then confirm:
+download from a tracing project, optionally judge the trajectories, then upload:
 
 ```bash
 project_id='<project-id>'
 
-smithtune dataset create data/datasets/my-sft \
+smithtune dataset pull data/datasets/my-sft \
   --workspace-id "$workspace_id" --project-id "$project_id" \
-  --name my-sft-dataset \
   --filter 'and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))'
 
-smithtune dataset create data/datasets/my-sft --confirm
+# Optional: preview council review, then confirm to run it.
+smithtune dataset triage data/datasets/my-sft --rubric ./rubric.md
+smithtune dataset triage data/datasets/my-sft --confirm
+
+smithtune dataset push data/datasets/my-sft --name my-sft-dataset
+smithtune dataset push data/datasets/my-sft --confirm
 ```
 
-- `--filter` alone selects without model calls. Add `--rule` or `--rubric FILE` for council review.
-- Without a filter, `create` defaults to council review; `--no-triage` skips it.
-- Defaults: up to 100 candidate trajectories from the last 24 hours. Set `--limit`, `--start-time`, and `--end-time` to change them.
-- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window.
+- `pull` downloads without model calls. Inspect its summary for usable trajectories and exclusion reasons.
+- Skip `triage` when source filters fully express your selection criteria. Otherwise, use `--rule` or `--rubric FILE` to specify council criteria.
+- `push` previews the upload; `--confirm` uploads the eligible trajectories. If council review was started, it must finish first.
+- Defaults: up to 100 candidate trajectories from the last 24 hours. Set `--limit`, `--start-time`, and `--end-time` on `pull` to change them.
+- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. Excluded candidates are not replaced.
 
-Check the download summary for selected roots, full threads, and usable or excluded
-trajectories. Invalid or empty trajectories are excluded before judging or upload;
-the download does not replace them with more candidates.
-Resume interrupted work with `smithtune dataset resume data/datasets/my-sft --confirm`.
-For separate `dataset pull`, `dataset triage`, and `dataset push` stages, see
-[dataset curation](docs/datasets.md).
+Keep the same directory throughout. Use `smithtune dataset resume data/datasets/my-sft`
+to inspect pending work and add `--confirm` to continue it. See
+[dataset curation](docs/datasets.md) for selection and recovery details.
 
 ## Prepare data
 
-Use the dataset ID returned by creation, or your existing dataset ID:
+Use the dataset ID returned by `push`, or your existing dataset ID:
 ```bash
 dataset_id='<dataset-id>'
 

@@ -94,7 +94,7 @@ def test_storage_failure_stops_workflow(monkeypatch):
 
 
 @pytest.mark.parametrize("argv", [
-    ["dataset", "create", "example", "--confirm"],
+    ["dataset", "push", "example", "--confirm"],
     ["dataset", "publish-splits", "--data-dir", "example"],
     ["prepare", "--workspace-id", "w", "--dataset-id", "d", "--model", "m"],
     ["capture-contract", "--workspace-id", "w", "--run-id", "r", "--output", "example"],

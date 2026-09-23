@@ -52,27 +52,23 @@ the application's task and tools from its traces; keep domain-specific rules
 and evidence in local run files. The coordinator above only dispatches saved
 tasks; it must not start an interview or change the rubric.
 
-Run `smithtune doctor` and `smithtune dataset create --help` for setup. Use one
-saved directory across `pull`, `triage`, `push`, `create`, and `resume`.
+Run `smithtune doctor` and `smithtune dataset pull --help` for setup. Use one
+saved directory across `pull`, `triage`, `push`, and `resume`.
 
 First map the user's selection criteria to the project's actual feedback,
 metadata, tags, and error fields. Use `--filter` for criteria those fields express.
 Do not invent feedback keys, thresholds, or the meaning of missing values.
-Write `rubric.md` with the task, keep/drop criteria, and concrete examples.
+When filters are insufficient, write `rubric.md` with the task, keep/drop criteria, and concrete examples.
 Review it with the user, then pass `--rubric ./rubric.md` for council judging.
 Use `--rule` as a shortcut for short additional criteria.
 
-- `dataset create DIR` composes downloading, optional judging, and uploading.
-  A filter with no council criteria skips inference. Without a filter, create
-  defaults to council judging. `--rubric`, `--rule`, or `--judges` requests judging even with
-  a filter; filtering always happens before trajectory downloads and judging.
-  `--no-triage` explicitly skips council and cannot discard judging criteria.
-- Preview without `--confirm`: review the selected path and pending work. When
-  the planned judging and uploads are authorized, repeat with `--confirm`.
-- For staged work, use `dataset pull DIR` with source IDs, time window, and
-  optional `--filter` / `--limit`. Read examples and agree on the rubric before
-  running `dataset triage DIR --rubric ./rubric.md` to preview. Check the saved
-  text in `plan.json`, then use `dataset triage DIR --confirm` to judge.
+- Use `dataset pull DIR` with source IDs, time window, and optional `--filter` / `--limit`.
+  Inspect its download summary, exclusion reasons, and representative saved trajectories.
+  Pull makes no model calls. If the source filters fully express the selection criteria,
+  proceed to push without a council.
+- When content needs judging, agree on the rubric and run
+  `dataset triage DIR --rubric ./rubric.md` to preview. Check the saved text in
+  `plan.json`, then use `dataset triage DIR --confirm` when judging is authorized.
   Inspect a small batch's decisions before scoring the larger pool.
   Read `labels.jsonl`, individual votes in `judgments.jsonl`, and `report.md`
   and explain the counts and reasons. Failed judge requests remain incomplete.
@@ -82,6 +78,8 @@ Use `--rule` as a shortcut for short additional criteria.
   source filters and structural checks without model calls.
 - `dataset resume DIR` shows pending stages without network calls. With
   `--confirm`, it continues the saved workflow and reuses completed work.
+- On failure, identify the stage and saved directory, inspect pending work, and resume
+  that directory. Completed downloads, votes, and upload receipts are reused.
 - Pass the resulting dataset ID to `prepare -> plan -> train`.
 
 The default council is DeepSeek V4.1 Flash and GLM-5.3-Flash on Fireworks plus

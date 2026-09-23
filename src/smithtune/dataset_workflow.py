@@ -23,13 +23,13 @@ def _open(directory, command, options):
     if (directory / "checkpoint.json").exists():
         checkpoint = storage.load(directory)
         if checkpoint["kind"] != "triage":
-            raise PipelineError("this directory uses the older direct-import layout; use dataset resume DIR to finish it")
+            raise PipelineError("unsupported curation checkpoint; use a new directory")
     elif (directory / "snapshot.json").exists():
         # Existing judged snapshots retain their evidence and vote identities.
         source = triage_source.load_snapshot(directory)["source"]
         checkpoint = storage.open_checkpoint(directory, "triage", source)
     else:
-        if command not in {"pull", "create"} or not all(options.get(key) for key in ("workspace_id", "project_id")):
+        if command != "pull" or not all(options.get(key) for key in ("workspace_id", "project_id")):
             raise PipelineError("start with dataset pull DIR --workspace-id WORKSPACE --project-id PROJECT")
         if any(path.name != ".smithtune.lock" for path in directory.iterdir()):
             raise PipelineError("new curation requires an empty directory")
@@ -55,7 +55,7 @@ def _settings(directory, checkpoint, command, options):
     concurrency = options.get("concurrency")
     if concurrency is not None and (type(concurrency) is not int or not 1 <= concurrency <= 16):
         raise PipelineError("concurrency must be between 1 and 16; downloads cap at 4")
-    if command in {"pull", "create"}:
+    if command == "pull":
         state["download_concurrency"] = min(concurrency, 4) if concurrency is not None else state.get("download_concurrency", 4)
     # Older triage checkpoints include council intent, even if downloading stopped before the plan.
     if not checkpoint.get("workflow") and checkpoint["source"].get("selection_mode") != "trajectories":
@@ -69,19 +69,8 @@ def _settings(directory, checkpoint, command, options):
         state["destination"] = {"name": receipt.get("dataset_name"),
                                 "dataset_id": None if receipt.get("dataset_name") else receipt["dataset_id"]}
     has_council_options = any(options.get(key) is not None for key in COUNCIL_FLAGS)
-    has_criteria = any(options.get(key) is not None for key in ("judges", "rules", "config_path", "rubric_path", "runner_mode"))
-    if options.get("no_triage") and (any(options.get(key) is not None for key in COUNCIL_FLAGS if key != "concurrency") or "triage" in state["stages"]):
-        raise PipelineError("--no-triage conflicts with council judging or rules; use a new directory")
     stages = set(state["stages"])
-    if command == "create":
-        if "push" not in stages:
-            wants_council = not options.get("no_triage") and (has_criteria or not checkpoint["source"].get("filter"))
-            stages.update(("pull", "push"))
-            if wants_council:
-                stages.add("triage")
-        elif has_criteria:
-            stages.add("triage")
-    elif command in STAGES:
+    if command in STAGES:
         stages.add(command)
     if "triage" in stages and "triage" not in state["stages"] and (directory / "dataset-import.json").exists():
         raise PipelineError("cannot add council judging after upload started; use a new directory")
@@ -203,40 +192,16 @@ def _push(directory, frozen, state, *, confirm, runner):
     return {**imported, **result}
 
 
-def _legacy_resume(directory, checkpoint, *, confirm, runner):
-    """Finish a direct import made before the staged command interface."""
-    from smithtune.curation import _import_selection
-
-    selections = [path for path in directory.glob("*.json") if path.name != "checkpoint.json" and _load_json(path) == checkpoint["source"]]
-    if len(selections) != 1:
-        raise PipelineError("cannot locate the original selection file; restore it before resuming")
-    selection = selections[0]
-    receipt = _load_json(selection.with_suffix(".import.json"))
-    if receipt.get("schema_version") != 2:
-        raise PipelineError("legacy upload receipt needs inspection; use a new directory with --dataset-id")
-    complete = receipt.get("status") == "complete"
-    result = {"run_dir": str(directory), "status": "complete" if complete else "preview",
-              "pending_stages": [] if complete else ["push"]}
-    if confirm:
-        destination = {"name": receipt["dataset_name"]} if receipt.get("dataset_name") else {"dataset_id": receipt["dataset_id"]}
-        result.update(_import_selection(selection=selection, runner=runner, **destination), status="complete", pending_stages=[])
-    if result["pending_stages"]:
-        result["next_command"] = f"smithtune dataset resume {shlex.quote(str(directory))} --confirm"
-    return result
-
-
 def run(command, directory=None, *, confirm=False, runner=_run, judge_call=None, **options):
+    if command not in (*STAGES, "resume"):
+        raise PipelineError(f"unknown dataset command: {command}")
     if directory is None:
-        if command not in {"pull", "create"}:
+        if command != "pull":
             raise PipelineError(f"dataset {command} requires a saved directory")
         directory = new_run_directory()
     directory = Path(directory)
     print(f"Dataset directory: {directory}", file=sys.stderr)
     with output_lock(directory):
-        if command == "resume" and (directory / "checkpoint.json").exists():
-            checkpoint = storage.load(directory)
-            if checkpoint["kind"] == "create":
-                return _legacy_resume(directory, checkpoint, confirm=confirm, runner=runner)
         checkpoint = _open(directory, command, options)
         state = _settings(directory, checkpoint, command, options)
         frozen = triage_source.load_snapshot(directory) if (directory / "snapshot.json").exists() else None
@@ -248,9 +213,9 @@ def run(command, directory=None, *, confirm=False, runner=_run, judge_call=None,
         if command == "resume" and not confirm:
             result["status"] = "preview" if pending else "complete"
         else:
-            stages = state["stages"] if command in {"create", "resume"} else [command]
+            stages = state["stages"] if command == "resume" else [command]
             for stage in stages:
-                if command in {"create", "resume"} and stage == "triage" and stage not in pending:
+                if command == "resume" and stage == "triage" and stage not in pending:
                     result["triage"] = _load_json(directory / "summary.json")
                     continue
                 if stage == "pull":

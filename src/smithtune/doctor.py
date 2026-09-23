@@ -21,7 +21,7 @@ def diagnose() -> dict:
             packages[name] = None
     tools = {}
     for name, operations in (
-        ("langsmith", "dataset pull/create, dataset push, capture-contract, prepare (unless --no-fetch)"),
+        ("langsmith", "dataset pull, dataset push, capture-contract, prepare (unless --no-fetch)"),
         ("firectl", "deploy, undeploy"),
     ):
         available = shutil.which(name) is not None
