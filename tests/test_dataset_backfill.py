@@ -31,7 +31,7 @@ class Candidates(API):
 @pytest.mark.parametrize("concurrency", [1, 4])
 def test_backfill_reaches_target_without_extra_downloads(tmp_path, concurrency):
     api = Candidates([[10, 11], [12, 13], [14, 15]], invalid=[10, 12])
-    result = run(tmp_path, api, target_count=3, max_candidates=10, concurrency=concurrency,
+    result = run(tmp_path, api, no_triage=True, target_count=3, max_candidates=10, concurrency=concurrency,
                  filter='eq(name,"reviewer")', judge=no_judge)
     summary = result["download_summary"]
     assert summary["examined"] == 5 and summary["usable"] == 3 and summary["excluded"] == 2
@@ -50,15 +50,15 @@ def test_backfill_reaches_target_without_extra_downloads(tmp_path, concurrency):
 @pytest.mark.parametrize("cap,reason,examined", [(3, "candidate_cap", 3), (10, "source_exhausted", 4)])
 def test_backfill_reports_shortfall(tmp_path, capsys, cap, reason, examined):
     api = Candidates([[10, 11], [12, 13]], invalid=[10, 11, 12])
-    result = run(tmp_path, api, target_count=3, max_candidates=cap, judge=no_judge)
+    result = run(tmp_path, api, no_triage=True, target_count=3, max_candidates=cap, judge=no_judge)
     summary = result["download_summary"]
     assert result["status"] == "complete" and not result["pending_stages"]
     assert summary["examined"] == examined and summary["stop_reason"] == reason
     assert summary["usable"] == (1 if examined == 4 else 0) and not summary["target_met"]
     output = capsys.readouterr().err
-    assert f"Examined {examined} candidates" in output and "target of 3" in output
+    assert f"Examined {examined} candidates" in output and "requested 3" in output
     api.calls.clear()
-    assert run(tmp_path, api)["download_summary"] == summary
+    assert run(tmp_path, api, "resume")["collection"]["eligible"] == summary["usable"]
     assert not api.calls
 
 
@@ -70,7 +70,7 @@ def test_duplicate_threads_do_not_consume_candidate_cap(tmp_path):
          {"trace_id": uid(3), "thread_id": None, "start_time": "2026-09-02T00:00:00Z"}],
     ]
     api.trajectory_pages = {None: {"messages": [], "next_cursor": None}}
-    result = run(tmp_path, api, target_count=1, max_candidates=2, judge=no_judge)
+    result = run(tmp_path, api, no_triage=True, target_count=1, max_candidates=2, judge=no_judge)
     summary = result["download_summary"]
     assert summary["examined"] == 2 and summary["usable"] == 1 and summary["target_met"]
     assert summary["threads"] == 1 and summary["standalone_traces"] == 1
@@ -92,7 +92,7 @@ def test_backfill_resume_reuses_pages_and_completed_downloads(tmp_path, failure)
         return api(command, **kwargs)
 
     with pytest.raises(KeyboardInterrupt):
-        run(tmp_path, runner, target_count=2, max_candidates=4, concurrency=1, judge=no_judge)
+        run(tmp_path, runner, no_triage=True, target_count=2, max_candidates=4, concurrency=1, judge=no_judge)
     assert not (tmp_path / "snapshot.json").exists()
     api.calls.clear()
     result = run(tmp_path, api, "resume", confirm=True, judge=no_judge)
@@ -121,7 +121,7 @@ def test_resume_keeps_other_workers_completed_downloads(tmp_path):
         return response
 
     with pytest.raises(PipelineError, match="source temporarily unavailable"):
-        run(tmp_path, runner, target_count=3, max_candidates=4, concurrency=3, judge=no_judge)
+        run(tmp_path, runner, no_triage=True, target_count=3, max_candidates=4, concurrency=3, judge=no_judge)
     api.calls.clear()
     result = run(tmp_path, api, "resume", confirm=True, judge=no_judge)
     assert result["download_summary"]["target_met"] and result["download_summary"]["examined"] == 3
@@ -148,7 +148,7 @@ def test_backfill_replaces_structurally_unusable_content(tmp_path, bad_content):
             response.stdout = json.dumps(page)
         return response
 
-    result = run(tmp_path, runner, target_count=1, max_candidates=2, judge=no_judge)
+    result = run(tmp_path, runner, no_triage=True, target_count=1, max_candidates=2, judge=no_judge)
     assert result["download_summary"]["usable"] == 1 and result["download_summary"]["excluded"] == 1
     assert result["download_summary"]["examined"] == 2
     pushed = run(tmp_path, api, "push", name="usable", confirm=True, judge=no_judge)
@@ -157,7 +157,7 @@ def test_backfill_replaces_structurally_unusable_content(tmp_path, bad_content):
 
 
 @pytest.mark.parametrize("options", [{"target_count": 0}, {"max_candidates": 0},
-                                     {"target_count": 3, "max_candidates": 2}, {"max_candidates": 2001}])
+                                     {"target_count": -1}, {"max_candidates": 2001}])
 def test_invalid_bounds_fail_before_remote_reads(tmp_path, options):
     api = API()
     with pytest.raises(PipelineError, match="target count|max candidates"):
@@ -171,7 +171,7 @@ def test_cli_passes_explicit_bounds_and_rejects_old_limit(tmp_path, monkeypatch,
     monkeypatch.setattr(dataset_workflow, "run", lambda *args, **kwargs: original(*args, **kwargs, runner=api))
     args = ["dataset", "pull", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101),
             "--start-time", SOURCE["start_time"], "--end-time", SOURCE["end_time"]]
-    cli.main([*args, "--target-count", "1", "--max-candidates", "2"])
+    cli.main([*args, "--no-triage", "--target-count", "1", "--max-candidates", "2"])
     result = json.loads(capsys.readouterr().out)
     assert result["source"]["target_count"] == 1 and result["source"]["max_candidates"] == 2
     assert result["download_summary"]["target_met"]
@@ -205,6 +205,6 @@ def test_small_reviewed_dataset_advisory_does_not_block_upload(tmp_path, capsys,
 
 def test_unreviewed_dataset_does_not_claim_council_approval(tmp_path):
     api = Candidates([[10]])
-    run(tmp_path, api, target_count=1, max_candidates=1)
+    run(tmp_path, api, no_triage=True, target_count=1, max_candidates=1)
     result = run(tmp_path, api, "push", name="unreviewed")
     assert "advisories" not in result

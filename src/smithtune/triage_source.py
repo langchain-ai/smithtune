@@ -24,6 +24,7 @@ from smithtune.dataset_artifacts import LazySequence
 from smithtune.providers.base import PipelineError
 
 
+MAX_COLLECTION_ROUNDS = 3
 MAX_SOURCE_PAGES = 1000
 MAX_EXPANDED_TRACES = 10_000
 
@@ -147,7 +148,7 @@ def _root_selection(source: dict, *, runner) -> list[dict]:
     return sorted(random.Random(source["seed"]).sample(roots, min(source["limit"], len(roots))), key=lambda r: r["trace_id"]) if source["limit"] else roots
 
 
-def _candidate_roots(source: dict, output_dir: Path, checkpoint: dict, *, runner):
+def _candidate_roots(source: dict, output_dir: Path, checkpoint: dict, *, candidate_limit: int, runner):
     """Resume candidate discovery from saved pages; count each scope once."""
     roots = checkpoint["roots"]
     yield from list(roots)
@@ -155,7 +156,7 @@ def _candidate_roots(source: dict, output_dir: Path, checkpoint: dict, *, runner
     selection = checkpoint.setdefault("root_selection", {
         "pending": [], "cursor": None, "exhausted": False, "cursors": [],
     })
-    while len(roots) < source["max_candidates"]:
+    while len(roots) < candidate_limit:
         if selection["pending"]:
             root = selection["pending"].pop(0)
             key = _scope_key(root)
@@ -205,7 +206,7 @@ def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: s
                              for root in sorted(roots, key=lambda r: (r.get("start_time") or "", r["id"]))))
 
 
-def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42, target_count=None, max_candidates=None) -> dict:
+def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42, target_count=None, max_candidates=None, review_mode=None) -> dict:
     start_time, end_time = resolve_time_window(start_time, end_time)
     value = {"workspace_id": _uuid(workspace_id, "workspace id"), "project_id": _uuid(project_id, "project id"),
              "start_time": start_time, "end_time": end_time, "filter": filter, "limit": limit, "seed": seed}
@@ -216,11 +217,15 @@ def source_options(workspace_id, project_id, start_time=None, end_time=None, *, 
     if target_count is not None:
         if type(target_count) is not int or not 1 <= target_count <= MAX_LIMIT:
             raise PipelineError(f"target count must be between 1 and {MAX_LIMIT}")
-        if type(max_candidates) is not int or not target_count <= max_candidates <= MAX_LIMIT:
-            raise PipelineError(f"max candidates must be between target count and {MAX_LIMIT}")
+        if type(max_candidates) is not int or not 1 <= max_candidates <= MAX_LIMIT:
+            raise PipelineError(f"max candidates must be between 1 and {MAX_LIMIT}")
         value.pop("limit")
         value.pop("seed")
         value.update(target_count=target_count, max_candidates=max_candidates)
+        if review_mode is not None:
+            if review_mode not in {"council", "none"}:
+                raise PipelineError("invalid review mode")
+            value["review_mode"] = review_mode
     return value
 
 
@@ -240,28 +245,43 @@ def training_error(unit: dict) -> str | None:
     return None
 
 
-def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> dict:
+def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1, extend=False) -> dict:
     if type(concurrency) is not int or not 1 <= concurrency <= 4:
         raise PipelineError("download concurrency must be between 1 and 4")
     path = output_dir / "snapshot.json"
-    if path.exists():
-        value = load_snapshot(output_dir)
-        if value["source"] != source:
-            raise PipelineError("triage snapshot uses a different source query; use a new output directory")
-        return value
     checkpoint = storage.open_checkpoint(output_dir, "triage", source)
+    value = load_snapshot(output_dir) if path.exists() else None
+    if value is not None and value["source"] != source:
+        raise PipelineError("triage snapshot uses a different source query; use a new output directory")
+    collection = checkpoint.get("collection")
+    if value is not None:
+        active_round = collection["round"] if collection else None
+        complete = value.get("selection_result", {}).get("round") == active_round
+        if complete and not extend:
+            return value
+        if complete and extend:
+            if collection is None or collection["round"] >= MAX_COLLECTION_ROUNDS:
+                raise PipelineError("collection limit reached; use the saved dataset or start a new curation run")
+            collection.update(round=collection["round"] + 1, start=len(checkpoint["roots"]))
+            storage.save(output_dir, checkpoint)
+    if source.get("review_mode") and collection is None:
+        collection = checkpoint["collection"] = {"round": 1, "start": 0}
+        storage.save(output_dir, checkpoint)
     # Raw API pages and run trees are temporary. Resume reuses complete units,
     # never stitches an interrupted conversation to newly fetched pages.
     runner = partial(_fetch, runner=runner, cache_dir=output_dir, use_cache=False)
-    target = source.get("target_count")
+    goal = source.get("target_count")
+    target = None if source.get("review_mode") == "council" else goal
     if "roots" not in checkpoint:
-        checkpoint.update(roots=[] if target is not None else _root_selection(source, runner=runner), captured_at=_utc_now())
+        checkpoint.update(roots=[] if goal is not None else _root_selection(source, runner=runner), captured_at=_utc_now())
         storage.save(output_dir, checkpoint)
     roots = checkpoint["roots"]
     workspace, project = source["workspace_id"], source["project_id"]
-    if target is not None:
-        candidates = _candidate_roots(source, output_dir, checkpoint, runner=runner)
-        print(f"Downloading toward {target} usable trajectories; examining at most {source['max_candidates']} candidates...", file=sys.stderr)
+    if goal is not None:
+        candidate_limit = (collection["start"] if collection else 0) + source["max_candidates"]
+        candidates = _candidate_roots(source, output_dir, checkpoint, candidate_limit=candidate_limit, runner=runner)
+        print(f"Collecting up to {source['max_candidates']} new candidates" +
+              (f" for round {collection['round']}..." if collection else "..."), file=sys.stderr)
     else:
         candidates = iter(roots)
         print(f"Downloading trajectories for {len(roots)} selected roots...", file=sys.stderr)
@@ -348,13 +368,20 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
     value = {"schema_version": 3, "source": source,
              "selected_trace_ids": [root["trace_id"] for root in roots],
              "unit_files": [checkpoint["downloads"][json_sha256(key)] for key in selected]}
-    if target is not None:
+    if goal is not None:
+        selection = checkpoint.get("root_selection", {})
+        source_exhausted = bool(selection.get("exhausted") and
+                                not any(_scope_key(root) not in selected for root in selection.get("pending", [])))
         value["selection_result"] = {
-            "target_count": target, "max_candidates": source["max_candidates"],
-            "examined": downloaded, "usable": usable, "target_met": usable >= target,
-            "stop_reason": "target_reached" if usable >= target else
-                           "candidate_cap" if downloaded >= source["max_candidates"] else "source_exhausted",
+            "target_count": goal, "max_candidates": source["max_candidates"],
+            "examined": downloaded, "usable": usable, "source_exhausted": source_exhausted,
+            "stop_reason": "target_reached" if target is not None and usable >= target else
+                           "source_exhausted" if source_exhausted else "candidate_cap",
         }
+        if target is not None:
+            value["selection_result"]["target_met"] = usable >= target
+        if collection:
+            value["selection_result"].update(round=collection["round"], round_examined=downloaded - collection["start"])
     value["snapshot_sha256"] = json_sha256(value)
     _json_dump(path, value)
     return load_snapshot(output_dir)

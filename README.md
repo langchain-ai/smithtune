@@ -135,12 +135,14 @@ smithtune dataset push data/datasets/my-sft --confirm
 
 - `pull` downloads without model calls. Inspect its summary for usable trajectories and exclusion reasons.
 - `triage` reviews training-example quality with an agent council. Use `--rule` or `--rubric FILE` to specify your criteria, then inspect the decisions.
-- `push` previews the upload; `--confirm` uploads the eligible trajectories. If council review was started, it must finish first.
-- Defaults: target 100 structurally usable trajectories, examining at most 1,000 candidates from the last 24 hours. Set `--target-count`, `--max-candidates`, and time bounds on `pull` to change them.
-- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. Structural exclusions are backfilled within those bounds; council rejections are not.
+- `push` previews the upload; `--confirm` uploads the eligible trajectories. Council review must finish first unless the directory uses `--no-triage`.
+- Defaults: target 100 council-approved trajectories, collecting up to 1,000 new candidates per round from the last 24 hours. Set `--target-count`, `--max-candidates`, and time bounds on the first `pull`.
+- Filters match trace roots. Each match selects its whole thread when present, including turns outside the filter and time window. If review exhausts the pool below target, repeat `pull` and `triage` in the same directory. Up to three rounds reuse saved candidates and reviews.
 
-You can skip council review when trusted feedback or quality labels already
-establish which trajectories meet your training criteria. Selecting an agent by
+Use `--no-triage` on the first `pull` when trusted feedback or quality labels already
+establish which trajectories meet your training criteria. The target then counts
+structurally usable trajectories, and you can proceed directly to `push`. The mode
+is saved for subsequent commands. Selecting an agent by
 name or filtering out errors alone does not establish training quality. Council
 review helps assess quality; it does not guarantee good training data.
 

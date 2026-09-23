@@ -36,9 +36,12 @@ def _open(directory, command, options):
         source = triage_source.source_options(options["workspace_id"], options["project_id"],
             options.get("start_time"), options.get("end_time"), filter=options.get("filter"),
             target_count=options.get("target_count") if options.get("target_count") is not None else 100,
-            max_candidates=options.get("max_candidates") if options.get("max_candidates") is not None else 1000)
+            max_candidates=options.get("max_candidates") if options.get("max_candidates") is not None else 1000,
+            review_mode="none" if options.get("no_triage") else "council")
         source["selection_mode"] = "trajectories"
         checkpoint = storage.open_checkpoint(directory, "triage", source)
+    if options.get("no_triage") and checkpoint["source"].get("review_mode") != "none":
+        raise PipelineError("--no-triage conflicts with the saved review mode; use a new directory")
     for key in SOURCE_FLAGS:
         value = options.get(key)
         if value is not None:
@@ -67,7 +70,12 @@ def _settings(directory, checkpoint, command, options):
         state["stages"].append("push")
         state["destination"] = {"name": receipt.get("dataset_name"),
                                 "dataset_id": None if receipt.get("dataset_name") else receipt["dataset_id"]}
-    has_council_options = any(options.get(key) is not None for key in COUNCIL_FLAGS)
+    review_mode = checkpoint["source"].get("review_mode")
+    if review_mode == "none" and command == "triage":
+        raise PipelineError("this directory uses --no-triage; use a new directory for council review")
+    if review_mode == "council" and "triage" not in state["stages"]:
+        state["stages"].append("triage")
+    has_council_options = command == "triage" and any(options.get(key) is not None for key in COUNCIL_FLAGS)
     stages = set(state["stages"])
     if command in STAGES:
         stages.add(command)
@@ -83,7 +91,7 @@ def _settings(directory, checkpoint, command, options):
         state["destination"] = destination
     if "triage" in stages:
         if state["council"] is None or has_council_options:
-            settings = triage.council_settings(directory, saved_settings=state["council"], **{key: options.get(key) for key in COUNCIL_FLAGS})
+            settings = triage.council_settings(directory, saved_settings=state["council"], **({key: options.get(key) for key in COUNCIL_FLAGS} if command == "triage" else {}))
             if state["council"] is not None and settings != state["council"] and (directory / "triage-config.json").exists():
                 raise PipelineError("council settings conflict with saved votes; use a new directory")
             state["council"] = settings
@@ -98,11 +106,14 @@ def _settings(directory, checkpoint, command, options):
 
 def _pending(directory, state):
     pending = []
-    if not (directory / "snapshot.json").exists():
+    snapshot_path = directory / "snapshot.json"
+    snapshot = _load_json(snapshot_path) if snapshot_path.exists() else {}
+    collection = storage.load(directory).get("collection", {})
+    if not snapshot or (collection and collection["round"] != snapshot.get("selection_result", {}).get("round")):
         pending.append("pull")
     if "triage" in state["stages"]:
         summary = _load_json(directory / "summary.json") if (directory / "summary.json").exists() else {}
-        if pending or summary.get("status") != "complete":
+        if pending or summary.get("status") != "complete" or (snapshot.get("source", {}).get("review_mode") and summary.get("snapshot_sha256") != snapshot.get("snapshot_sha256")):
             pending.append("triage")
     if "push" in state["stages"]:
         receipt = _load_json(directory / "dataset-import.json") if (directory / "dataset-import.json").exists() else {}
@@ -155,7 +166,7 @@ def _download_summary(frozen):
         reason = {"target_reached": "Target reached.", "candidate_cap": "Stopped at the candidate cap.",
                   "source_exhausted": "No more matching candidates in the selected time window."}[selection["stop_reason"]]
         print(f"Examined {selection['examined']} candidates; saved {selection['usable']} structurally usable "
-              f"trajectories against a target of {selection['target_count']}. {reason}", file=sys.stderr)
+              f"trajectories. {reason}", file=sys.stderr)
     return summary
 
 
@@ -198,6 +209,55 @@ def _push(directory, frozen, state, *, confirm, runner):
     return {**imported, **result}
 
 
+def _collection_status(directory, frozen, state):
+    source = frozen["source"]
+    mode = source.get("review_mode")
+    if mode is None:
+        return None
+    selection = frozen["selection_result"]
+    summary = _load_json(directory / "summary.json") if (directory / "summary.json").exists() else {}
+    approved = summary.get("eligible_conversations", 0) if mode == "council" else selection["usable"]
+    review_complete = mode == "none" or (summary.get("status") == "complete" and summary.get("snapshot_sha256") == frozen["snapshot_sha256"])
+    if "pull" in _pending(directory, state):
+        status = "downloading"
+    elif not review_complete:
+        status = "needs_review"
+    elif approved >= source["target_count"]:
+        status = "target_reached"
+    elif selection["round"] >= triage_source.MAX_COLLECTION_ROUNDS:
+        status = "round_limit"
+    elif selection["source_exhausted"]:
+        status = "source_exhausted"
+    else:
+        status = "needs_candidates"
+    active_round = storage.load(directory)["collection"]["round"] if status == "downloading" else selection["round"]
+    return {"status": status, "round": active_round, "eligible": approved,
+            "target_count": source["target_count"], "review_mode": mode}
+
+
+def _collection_guidance(directory, collection):
+    quoted = shlex.quote(str(directory))
+    count, target = collection["eligible"], collection["target_count"]
+    prefix = (f"Council approved {count} of the requested {target} trajectories." if collection["review_mode"] == "council"
+              else f"{count} of the requested {target} trajectories passed structural checks. No council review was performed.")
+    status = collection["status"]
+    if status == "needs_review":
+        return "Candidate pool ready for council review.", f"smithtune dataset triage {quoted}"
+    if status == "downloading":
+        return "Collection is unfinished; resume the current round.", f"smithtune dataset resume {quoted} --confirm"
+    if status == "needs_candidates":
+        return prefix + f" This candidate pool is exhausted. Run smithtune dataset pull {quoted} to collect more candidates.", f"smithtune dataset pull {quoted}"
+    if status == "round_limit":
+        return (prefix + f" The collection limit has been reached after {triage_source.MAX_COLLECTION_ROUNDS} rounds. "
+                "Your eligible trajectories are saved and can be uploaded. To pursue a larger dataset, "
+                "start a new curation run with broader source criteria."), None
+    if status == "source_exhausted":
+        return (prefix + " No unseen matching candidates remain in the selected time window. "
+                "Your eligible trajectories are saved and can be uploaded. To collect more, start a new "
+                "curation run with broader source criteria."), None
+    return prefix + " Target reached.", None
+
+
 def run(command, directory=None, *, confirm=False, runner=_run, judge_call=None, **options):
     if command not in (*STAGES, "resume"):
         raise PipelineError(f"unknown dataset command: {command}")
@@ -225,11 +285,15 @@ def run(command, directory=None, *, confirm=False, runner=_run, judge_call=None,
                     result["triage"] = _load_json(directory / "summary.json")
                     continue
                 if stage == "pull":
-                    if frozen is None:
+                    collection = _collection_status(directory, frozen, state) if frozen is not None else None
+                    extend = command == "pull" and collection is not None and collection["status"] == "needs_candidates"
+                    if extend and (directory / "dataset-import.json").exists():
+                        raise PipelineError("cannot collect more candidates after upload started; use a new directory")
+                    if frozen is None or "pull" in pending or extend:
                         frozen = triage_source.snapshot(checkpoint["source"], directory, runner=runner,
-                                                       concurrency=state.get("download_concurrency", 4))
+                                                       concurrency=state.get("download_concurrency", 4), extend=extend)
                     result.update(downloaded=len(frozen["units"]), download_summary=_download_summary(frozen))
-                elif frozen is None:
+                elif frozen is None or "pull" in _pending(directory, state):
                     raise PipelineError("download is incomplete; run dataset resume DIR --confirm or dataset pull DIR first")
                 elif stage == "triage":
                     council = triage._run_triage(checkpoint["source"], directory, dry_run=not confirm, confirm=confirm,
@@ -252,6 +316,13 @@ def run(command, directory=None, *, confirm=False, runner=_run, judge_call=None,
                            "trajectories to improve reliability.")
                 result["advisories"] = [message]
                 print(message, file=sys.stderr)
+        if frozen is not None and checkpoint["source"].get("review_mode"):
+            collection = _collection_status(directory, frozen, state)
+            message, next_command = _collection_guidance(directory, collection)
+            result.update(collection=collection, message=message)
+            print(message, file=sys.stderr)
+            if next_command:
+                result.setdefault("next_command", next_command)
         # Reload download progress rather than overwriting it with the pre-pull object.
         checkpoint = storage.load(directory)
         checkpoint["workflow"] = state

@@ -272,7 +272,7 @@ def test_unresolvable_schema_is_not_reported_as_invalid_arguments(tmp_path):
         binding["tools"] = [unresolved]
     api = SourceAPI(incoming)
 
-    dataset_workflow.run("pull", tmp_path, workspace_id=uid(100), project_id=uid(101),
+    dataset_workflow.run("pull", tmp_path, workspace_id=uid(100), project_id=uid(101), no_triage=True,
                          start_time="2026-09-01T00:00:00Z", end_time="2026-09-08T00:00:00Z", runner=api)
     result = dataset_workflow.run("push", tmp_path, name="new", confirm=True, runner=api)
     assert result["rejected"] == 1
