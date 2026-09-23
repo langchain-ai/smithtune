@@ -197,13 +197,11 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
     checkpoint = storage.open_checkpoint(output_dir, "triage", source)
     # Raw API pages and run trees are temporary. Resume reuses complete units,
     # never stitches an interrupted conversation to newly fetched pages.
-    live_runner = partial(_fetch, runner=runner, cache_dir=output_dir, use_cache=False)
-    runner = live_runner
+    runner = partial(_fetch, runner=runner, cache_dir=output_dir, use_cache=False)
     if "roots" not in checkpoint:
         checkpoint.update(roots=_root_selection(source, runner=runner), captured_at=_utc_now())
         storage.save(output_dir, checkpoint)
     roots = checkpoint["roots"]
-    captured_at = checkpoint["captured_at"]
     if not roots:
         raise PipelineError("no traces match the source query; check the project, time window, and filter")
     workspace, project = source["workspace_id"], source["project_id"]
@@ -218,26 +216,22 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1) -> d
         saved = storage.downloaded(output_dir, checkpoint, key)
         if saved is not None:
             return key, saved
-        unit_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
-                                       end_time=captured_at, runner=runner) if thread else [tid]
-        if tid not in unit_traces:
-            raise PipelineError("selected root was not found in its conversation")
         trajectory = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid},
                                        runner=runner, retain_empty=True)
+        # Validate the downloaded evidence's source, without requiring a live
+        # thread to remain unchanged while its pages are read.
+        source_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
+                                        end_time=_utc_now(), runner=runner) if thread else [tid]
+        if tid not in source_traces:
+            raise PipelineError("selected root was not found in its conversation")
+        downloaded_traces = set(trajectory["trace_ids"])
+        if not downloaded_traces <= set(source_traces):
+            raise PipelineError("trajectory evidence belongs to another trace")
+        # Empty/rejected payloads retain the selected root for recovery metadata.
+        unit_traces = [trace_id for trace_id in source_traces if trace_id in downloaded_traces] or [tid]
         unit_records = [{"trace_id": trace_id, "thread_id": thread, "project_id": project} for trace_id in unit_traces]
-        if thread:
-            # The trajectory is live; verify membership again without cached reads.
-            current_traces = thread_trace_ids(workspace, project, thread, start_time=project_start,
-                                             end_time=_utc_now(), runner=live_runner)
-            if set(current_traces) != set(unit_traces):
-                # Keep the frozen selection, but discard all payload from the unstable read.
-                trajectory = {"messages": [], "source": None, "trace_ids": [],
-                              "training_error": f"thread {thread} changed during download; whole trajectory excluded. "
-                                                "Use a new output directory to reconsider it in a fresh snapshot."}
         all_messages = trajectory["messages"]
         example_id = str(uuid5(NAMESPACE_URL, json_sha256({"workspace": workspace, "project": project, "key": key, "messages": all_messages})))
-        if not set(trajectory["trace_ids"]) <= set(unit_traces):
-            raise PipelineError("trajectory evidence belongs to another trace")
         example = {"id": example_id, "inputs": {"messages": all_messages}, "outputs": None,
                    "metadata": {"trajectory_format": "messages", "conversation_scope": "root",
                                 "source_project_id": project, "source_thread_id": thread,
