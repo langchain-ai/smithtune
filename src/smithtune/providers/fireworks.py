@@ -6,7 +6,11 @@ import json
 import math
 import os
 import re
+import shlex
+import subprocess
+import sys
 import tempfile
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -17,6 +21,7 @@ from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _load_jsonl, _run, _utc_now
 from smithtune.capabilities import open_without_redirects, preflight_model
+from smithtune.doctor import MIN_FIRECTL_SHAPE_MATCH, firectl_version
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
@@ -35,6 +40,9 @@ from smithtune.providers.base import (
     TrainingOptions,
 )
 from smithtune.rendering import SFT_TARGET_POLICY, load_training_renderer, resolve_rendering_model
+
+DEPLOYMENT_TIMEOUT_SECONDS = 1800
+READY_POLL_SECONDS = 15
 
 
 TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
@@ -570,40 +578,47 @@ class FireworksProvider:
         account_id: str,
         output_model_id: str,
         deployment_id: str,
-        deployment_shape: str,
+        deployment_shape: str | None = None,
         *,
         confirm: bool,
+        timeout: float = DEPLOYMENT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
-        _require_confirm(confirm, "checkpoint promotion, deployment, and smoke-test inference")
         _validate_resource_id(account_id, "account id")
         _validate_resource_id(output_model_id, "output model id")
         _validate_resource_id(deployment_id, "deployment id")
-        if not os.environ.get("FIREWORKS_API_KEY"):
-            raise PipelineError("FIREWORKS_API_KEY is not set")
-        self.promote(run_dir, output_model_id, confirm=confirm, account_id=account_id)
-        _set_skill_session(run_dir)
+        if deployment_shape is not None and not deployment_shape.strip():
+            raise PipelineError("--deployment-shape must not be empty")
+        if not math.isfinite(timeout) or not 1 <= timeout <= 7200:
+            raise PipelineError("deployment timeout must be between 1 and 7200 seconds")
         model = f"accounts/{account_id}/models/{output_model_id}"
         deployment = f"accounts/{account_id}/deployments/{deployment_id}"
-        _run(
-            [
-                "firectl",
-                "deployment",
-                "create",
-                model,
-                "--deployment-id",
-                deployment_id,
-                "--deployment-shape",
-                deployment_shape,
-                "--account-id",
-                account_id,
-                "--wait",
-            ]
+        if not confirm:
+            return self._deploy_preview(run_dir, model, deployment, output_model_id, deployment_shape)
+        if not os.environ.get("FIREWORKS_API_KEY"):
+            raise PipelineError("FIREWORKS_API_KEY is not set")
+        if deployment_shape is None:
+            _require_shape_matching()
+        self.promote(run_dir, output_model_id, confirm=confirm, account_id=account_id)
+        _set_skill_session(run_dir)
+        # Match after promotion: the promoted model must exist before Fireworks can match its shapes.
+        shape = {"name": deployment_shape, "source": "explicit"} if deployment_shape else _match_deployment_shape(model)
+        print(f"Deployment shape: {_describe_shape(shape)}", file=sys.stderr)
+        print("Creating the Fireworks deployment; this can take several minutes...", file=sys.stderr)
+        handoff = ["smithtune", "deploy", "--provider", "fireworks", "--run-dir", str(run_dir), "--account-id", account_id,
+                   "--output-model-id", output_model_id, "--deployment-id", deployment_id,
+                   "--deployment-shape", shape["name"], "--confirm"]
+        _run_firectl_change(
+            ["firectl", "deployment", "create", model, "--deployment-id", deployment_id,
+             "--deployment-shape", shape["name"], "--account-id", account_id, "--wait"],
+            "create the deployment", handoff,
         )
         model_route = f"{model}#{deployment}"
         endpoint = {"inference_url": INFERENCE_URL, "model": model_route, "deployment": deployment,
-                    "smoke_test": {"status": "pending"}}
+                    "deployment_shape": shape, "smoke_test": {"status": "pending"}}
         receipt = run_dir / "endpoint.json"
         _json_dump(receipt, endpoint)
+        # READY can still be waiting for capacity; serve only once a replica is ready.
+        _wait_for_ready_replica(deployment, account_id, timeout)
         try:
             endpoint["smoke_test"] = _inference_smoke_test(model_route)
         except Exception:
@@ -613,22 +628,121 @@ class FireworksProvider:
         _json_dump(receipt, endpoint)
         return endpoint
 
+    def _deploy_preview(self, run_dir: Path, model: str, deployment: str, output_model_id: str,
+                        deployment_shape: str | None) -> dict[str, Any]:
+        promoted = _saved_promotion(run_dir, output_model_id)
+        if deployment_shape:
+            shape: dict[str, Any] = {"name": deployment_shape, "source": "explicit"}
+        elif promoted:
+            _require_shape_matching()
+            shape = _match_deployment_shape(model)
+        else:
+            shape = {"source": "matched_after_promotion",
+                     "note": "the checkpoint is promoted first, then its validated deployment shapes are matched"}
+        return {"status": "preview", "model": model, "deployment": deployment,
+                "promotion": "saved" if promoted else "pending", "deployment_shape": shape,
+                "next_command": "rerun with --confirm to promote, create the deployment, and smoke test it"}
+
     def undeploy(self, account_id: str, deployment_id: str, *, confirm: bool) -> None:
         _require_confirm(confirm, "deployment deletion")
         _validate_resource_id(deployment_id, "deployment id")
-        _run(
-            [
-                "firectl",
-                "deployment",
-                "delete",
-                f"accounts/{account_id}/deployments/{deployment_id}",
-                "--account-id",
-                account_id,
-                "--ignore-checks",
-                "--wait",
-            ]
+        handoff = ["smithtune", "undeploy", "--provider", "fireworks", "--account-id", account_id,
+                   "--deployment-id", deployment_id, "--confirm"]
+        _run_firectl_change(
+            ["firectl", "deployment", "delete", f"accounts/{account_id}/deployments/{deployment_id}",
+             "--account-id", account_id, "--ignore-checks", "--wait"],
+            "delete the deployment", handoff,
         )
 
+
+
+
+
+def _run_firectl_change(command: list[str], action: str, handoff: list[str]) -> None:
+    """Run a mutating firectl command; hand it to the user when firectl refuses agents."""
+    try:
+        result = _run(command, capture=True)
+    except subprocess.CalledProcessError as exc:
+        output = f"{exc.stdout or ''}\n{exc.stderr or ''}"
+        if "cannot run inside an AI agent" in output:
+            raise PipelineError(
+                f"Fireworks blocks firectl from changing resources inside an AI agent, so smithtune cannot {action} here. "
+                f"Run this yourself in a terminal outside the agent: {shlex.join(handoff)}"
+            ) from None
+        detail = next((line.strip() for line in output.splitlines() if "fail" in line.lower() or "error" in line.lower()), "")
+        raise PipelineError(f"firectl could not {action}" + (f": {detail[:300]}" if detail else "")) from None
+    for line in (result.stdout or "").splitlines()[-3:]:
+        print(line, file=sys.stderr)
+
+
+def _require_shape_matching() -> None:
+    installed = firectl_version()
+    if installed is None or installed < MIN_FIRECTL_SHAPE_MATCH:
+        found = ".".join(map(str, installed)) if installed else "unknown"
+        raise PipelineError(
+            f"automatic deployment shape selection needs firectl {'.'.join(map(str, MIN_FIRECTL_SHAPE_MATCH))} or newer "
+            f"(found {found}); run `firectl upgrade`, or pass --deployment-shape"
+        )
+
+
+def _match_deployment_shape(model: str) -> dict[str, Any]:
+    """Use the first validated shape the server matches for this account (its preference order)."""
+    try:
+        result = _run(["firectl", "deployment-shape-version", "match", "--model", model, "-o", "json"], capture=True)
+        shapes = json.loads(result.stdout)
+    except subprocess.CalledProcessError as exc:
+        raise PipelineError(f"firectl could not match a deployment shape for {model}; pass --deployment-shape") from exc
+    except ValueError as exc:
+        raise PipelineError("firectl returned invalid deployment shape JSON; pass --deployment-shape") from exc
+    if not isinstance(shapes, list):
+        raise PipelineError("firectl returned invalid deployment shape JSON; pass --deployment-shape")
+    validated = [shape for shape in shapes if isinstance(shape, dict) and shape.get("validated") is True
+                 and shape.get("latest_validated") is True and isinstance(shape.get("snapshot"), dict)
+                 and isinstance(shape["snapshot"].get("name"), str)]
+    if not validated:
+        raise PipelineError(f"no validated deployment shape is available to this account for {model}; pass --deployment-shape")
+    chosen = validated[0]["snapshot"]
+    return {"name": chosen["name"], "version": validated[0].get("name"), "display_name": chosen.get("display_name"),
+            "accelerator": f"{chosen.get('accelerator_count')}x {chosen.get('accelerator_type')}", "source": "matched",
+            "alternatives": [shape["snapshot"].get("display_name") for shape in validated[1:]]}
+
+
+def _describe_shape(shape: dict[str, Any]) -> str:
+    if shape["source"] == "explicit":
+        return f"{shape['name']} (from --deployment-shape)"
+    return f"{shape.get('display_name') or shape['name']} ({shape.get('accelerator')}; matched by firectl)"
+
+
+def _saved_promotion(run_dir: Path, output_model_id: str) -> bool:
+    receipt = run_dir / "promotion.json"
+    if not receipt.exists():
+        return False
+    saved = _load_json(receipt)
+    promotions = [saved, *saved.get("previous_promotions", [])] if isinstance(saved, dict) else []
+    return any(isinstance(item, dict) and item.get("output_model_id") == output_model_id for item in promotions)
+
+
+def _wait_for_ready_replica(deployment: str, account_id: str, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        result = _run(["firectl", "deployment", "get", deployment, "--account-id", account_id, "-o", "json"], capture=True)
+        try:
+            state = json.loads(result.stdout)
+        except ValueError as exc:
+            raise PipelineError("firectl returned invalid deployment JSON") from exc
+        ready = (state.get("replica_stats") or {}).get("ready_replica_count") or 0
+        if state.get("state") in {"FAILED", "DELETING", "DELETED"}:
+            raise PipelineError(f"Fireworks deployment is {state.get('state')}; inspect it in Fireworks")
+        if ready > 0:
+            return
+        if time.monotonic() >= deadline:
+            raise PipelineError(
+                f"Fireworks deployment {deployment} is {state.get('state')} but has no ready replica after "
+                f"{int(timeout)}s (capacity may be pending); stop it with smithtune undeploy "
+                f"--provider fireworks --account-id {account_id} --deployment-id {deployment.rsplit('/', 1)[1]} --confirm"
+            )
+        print(f"Waiting for a ready replica (state {state.get('state')}, ready replicas {ready})...", file=sys.stderr)
+        time.sleep(min(READY_POLL_SECONDS, max(0, deadline - time.monotonic())))
 
 def _validate_resource_id(value: str, label: str) -> None:
     if not RESOURCE_ID.fullmatch(value):

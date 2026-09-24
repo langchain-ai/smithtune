@@ -100,8 +100,10 @@ serving configuration.
 
 ## Deploy a Fireworks checkpoint
 
-Install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) and set
-`FIREWORKS_API_KEY`. Use a Fireworks training run.
+Install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) **1.8.5 or
+newer** (`firectl version`; upgrade with `firectl upgrade`) and set
+`FIREWORKS_API_KEY`. Use a Fireworks training run. `smithtune doctor` reports the
+installed firectl version and whether automatic shape selection is available.
 
 Use `deploy` when you want an endpoint for repeated use. It automatically promotes
 the selected checkpoint to a named Fireworks model, then starts the endpoint;
@@ -117,13 +119,39 @@ run_dir='./runs/my-sft'
 account_id='<your-fireworks-account>'
 output_model_id='my-sft'
 deployment_id='my-sft'
-deployment_shape='<compatible-deployment-shape>'
+
+# Preview: shows the model, whether it is promoted yet, and the deployment shape.
+smithtune deploy --provider fireworks \
+  --run-dir "$run_dir" --account-id "$account_id" \
+  --output-model-id "$output_model_id" --deployment-id "$deployment_id"
 
 smithtune deploy --provider fireworks \
   --run-dir "$run_dir" --account-id "$account_id" \
-  --output-model-id "$output_model_id" --deployment-id "$deployment_id" \
-  --deployment-shape "$deployment_shape" --confirm
+  --output-model-id "$output_model_id" --deployment-id "$deployment_id" --confirm
 ```
+
+**Deployment shape.** A shape fixes the hardware and serving configuration. By
+default, `deploy` promotes the checkpoint first (the model must exist before
+Fireworks can match shapes for it), then runs
+`firectl deployment-shape-version match --model accounts/<account>/models/<output-model-id>`
+and uses the first validated shape it returns. That list is already restricted to
+shapes your account can deploy and excludes Multi-LoRA-only shapes, so it fits a
+live-merge deployment. The chosen shape and the alternatives are saved in
+`"$run_dir/endpoint.json"`. Once the model is promoted, the preview shows the
+shape it will use. To choose yourself, pass `--deployment-shape <shape>`, or
+`--deployment-shape default` to let Fireworks pick (firectl 1.8.8+).
+
+**Coding agents.** firectl refuses to create or delete deployments when it runs
+inside an AI agent (Claude Code, Cursor, and others). From an agent, `deploy
+--confirm` promotes the checkpoint, matches the shape, and then stops with the
+exact `smithtune deploy ... --deployment-shape <shape> --confirm` command to run
+in your own terminal; `undeploy` does the same. The printed command pins the
+matched shape, so it also works with firectl older than 1.8.5.
+
+**Readiness.** A deployment can report `READY` while still waiting for capacity.
+`deploy` waits until `replica_stats.ready_replica_count > 0` (up to
+`--deployment-timeout`, default 1800 seconds) before its smoke test. If no replica
+becomes ready in time, it stops and prints the `undeploy` command.
 
 `--account-id` must be the account that owns the training checkpoint. A matching
 saved promotion is reused. If deployment creation fails after promotion
