@@ -108,7 +108,7 @@ def test_empty_page_with_continuation_is_not_an_empty_trajectory(tmp_path):
 
 
 @pytest.mark.parametrize("scope", ["trace", "thread"])
-def test_foreign_trace_metadata_stops_snapshot_before_judging(tmp_path, scope):
+def test_foreign_trace_metadata_is_excluded_before_judging(tmp_path, scope):
     api = API()
     if scope == "trace":
         api.root_pages[0][0]["thread_id"] = None
@@ -122,9 +122,12 @@ def test_foreign_trace_metadata_stops_snapshot_before_judging(tmp_path, scope):
             response.stdout = json.dumps(body)
         return response
 
-    with pytest.raises(PipelineError, match="another trace"):
-        triage_source.snapshot(source(), tmp_path, runner=foreign)
-    assert not (tmp_path / "snapshot.json").exists()
+    frozen = triage_source.snapshot(source(), tmp_path, runner=foreign)
+    unit, = frozen["units"]
+    assert "outside its source" in unit["training_error"]
+    # Foreign messages are never kept, judged, or uploaded.
+    assert unit["example"]["inputs"]["messages"] == []
+    assert unit["example"]["metadata"].get("smithtune_source") is None
 
 
 def test_missing_assistant_metadata_is_saved_and_excluded_before_council(tmp_path):
