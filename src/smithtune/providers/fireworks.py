@@ -673,6 +673,11 @@ def _run_firectl_change(command: list[str], action: str, handoff: list[str], *, 
                 f"Fireworks blocks firectl from changing resources inside an AI agent, so smithtune cannot {action} here. "
                 f"Run this yourself in a terminal outside the agent: {shlex.join(handoff)}.{option}"
             ) from None
+        if "code = AlreadyExists" in output:
+            raise PipelineError(
+                f"cannot {action}: it already exists in Fireworks. Choose a new --deployment-id, "
+                "or stop the existing one with smithtune undeploy first"
+            ) from None
         detail = next((line.strip() for line in output.splitlines() if "fail" in line.lower() or "error" in line.lower()), "")
         raise PipelineError(f"firectl could not {action}" + (f": {detail[:300]}" if detail else "")) from None
     for line in (result.stdout or "").splitlines()[-3:]:

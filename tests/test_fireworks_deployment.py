@@ -261,3 +261,13 @@ def test_other_firectl_failures_are_summarized_without_the_raw_command(deploymen
     with pytest.raises(PipelineError, match="could not create the deployment: Error: quota exceeded") as failure:
         deploy(directory)
     assert "['firectl'" not in str(failure.value)
+
+
+def test_existing_deployment_id_explains_the_next_step(deployment, monkeypatch):
+    directory, events = deployment
+    exists = ("Failed to execute: error creating deployment: rpc error: code = AlreadyExists desc = deployment "
+              "accounts/account-id/deployments/endpoint-id already exists")
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events, fail=exists))
+    with pytest.raises(PipelineError, match="already exists in Fireworks. Choose a new --deployment-id"):
+        deploy(directory)
+    assert not (directory / "endpoint.json").exists()
