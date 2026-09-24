@@ -230,6 +230,7 @@ def test_agent_block_hands_the_exact_deploy_command_to_the_user(deployment, monk
     assert ("smithtune deploy --provider fireworks --run-dir " + str(directory) + " --account-id account-id "
             "--output-model-id model-id --deployment-id endpoint-id --deployment-shape "
             "accounts/fireworks/deploymentShapes/base-1x-h100 --confirm") in message
+    assert "FIRECTL_AGENT_SAFE_ACCOUNTS=account-id" in message
     assert (directory / "promotion.json").exists() and not (directory / "endpoint.json").exists()
 
 
@@ -249,8 +250,9 @@ def test_handoff_command_succeeds_outside_the_agent(deployment, monkeypatch):
 def test_agent_block_hands_undeploy_to_the_user(monkeypatch):
     monkeypatch.setattr(fireworks, "_run", FakeFirectl(block_agents=True))
     with pytest.raises(PipelineError, match="smithtune undeploy --provider fireworks --account-id account-id "
-                                            "--deployment-id endpoint-id --confirm"):
+                                            "--deployment-id endpoint-id --confirm") as failure:
         fireworks.FireworksProvider().undeploy("account-id", "endpoint-id", confirm=True)
+    assert "never lets agents" in str(failure.value) and "FIRECTL_AGENT_SAFE_ACCOUNTS" not in str(failure.value)
 
 
 def test_other_firectl_failures_are_summarized_without_the_raw_command(deployment, monkeypatch):

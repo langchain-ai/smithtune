@@ -146,7 +146,11 @@ inside an AI agent (Claude Code, Cursor, and others). From an agent, `deploy
 --confirm` promotes the checkpoint, matches the shape, and then stops with the
 exact `smithtune deploy ... --deployment-shape <shape> --confirm` command to run
 in your own terminal; `undeploy` does the same. The printed command pins the
-matched shape, so it also works with firectl older than 1.8.5.
+matched shape, so it also works with firectl older than 1.8.5. If your team
+allows agents to create deployments on the account, set
+`FIRECTL_AGENT_SAFE_ACCOUNTS=<account>` (firectl's own allowlist). firectl never
+lets agents delete deployments, even on agent-safe accounts, so `undeploy`
+always needs a person.
 
 **Readiness.** A deployment can report `READY` while still waiting for capacity.
 `deploy` waits until `replica_stats.ready_replica_count > 0` (up to

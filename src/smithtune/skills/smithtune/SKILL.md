@@ -439,8 +439,10 @@ mutating commands when it detects an AI agent, so `deploy --confirm` and
 `undeploy` stop with a message containing the exact `smithtune` command to run.
 As the agent: run the preview (no `--confirm`) to show the shape, run
 `--confirm` once (it promotes the checkpoint and then stops), and give the user
-the printed command to run in their own terminal. Do not try to bypass the
-block. Baseten deploys are not affected.
+the printed command to run in their own terminal. If the user confirms their
+team allows it, `FIRECTL_AGENT_SAFE_ACCOUNTS=<account>` (firectl's allowlist)
+lets you create the deployment; `undeploy` always needs the user. Never hide
+the agent environment to get past the block. Baseten deploys are not affected.
 
 Stop serving when the user is done:
 

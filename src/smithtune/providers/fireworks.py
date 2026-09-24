@@ -610,7 +610,7 @@ class FireworksProvider:
         _run_firectl_change(
             ["firectl", "deployment", "create", model, "--deployment-id", deployment_id,
              "--deployment-shape", shape["name"], "--account-id", account_id, "--wait"],
-            "create the deployment", handoff,
+            "create the deployment", handoff, agent_safe_allowed=True,
         )
         model_route = f"{model}#{deployment}"
         endpoint = {"inference_url": INFERENCE_URL, "model": model_route, "deployment": deployment,
@@ -651,23 +651,27 @@ class FireworksProvider:
         _run_firectl_change(
             ["firectl", "deployment", "delete", f"accounts/{account_id}/deployments/{deployment_id}",
              "--account-id", account_id, "--ignore-checks", "--wait"],
-            "delete the deployment", handoff,
+            "delete the deployment", handoff, agent_safe_allowed=False,
         )
 
 
 
 
 
-def _run_firectl_change(command: list[str], action: str, handoff: list[str]) -> None:
+def _run_firectl_change(command: list[str], action: str, handoff: list[str], *, agent_safe_allowed: bool) -> None:
     """Run a mutating firectl command; hand it to the user when firectl refuses agents."""
     try:
         result = _run(command, capture=True)
     except subprocess.CalledProcessError as exc:
         output = f"{exc.stdout or ''}\n{exc.stderr or ''}"
         if "cannot run inside an AI agent" in output:
+            account = command[command.index("--account-id") + 1]
+            # firectl allows some changes on accounts listed in FIRECTL_AGENT_SAFE_ACCOUNTS; deletes never.
+            option = (f" If your team allows agents to change this account, set FIRECTL_AGENT_SAFE_ACCOUNTS={account} instead."
+                      if agent_safe_allowed else " firectl never lets agents do this, even on agent-safe accounts.")
             raise PipelineError(
                 f"Fireworks blocks firectl from changing resources inside an AI agent, so smithtune cannot {action} here. "
-                f"Run this yourself in a terminal outside the agent: {shlex.join(handoff)}"
+                f"Run this yourself in a terminal outside the agent: {shlex.join(handoff)}.{option}"
             ) from None
         detail = next((line.strip() for line in output.splitlines() if "fail" in line.lower() or "error" in line.lower()), "")
         raise PipelineError(f"firectl could not {action}" + (f": {detail[:300]}" if detail else "")) from None
