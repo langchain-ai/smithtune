@@ -177,6 +177,11 @@ def preflight_model(
         vision = getattr(capability, "supports_vision_language", None)
         if vision is not None and not isinstance(vision, bool):
             raise PipelineError("Baseten returned an invalid vision support flag")
+        # _validate_capability already refused a workspace that is not enabled
+        # for this model; keep the same shape check on the optional flag here.
+        enabled = getattr(capability, "enabled", None)
+        if enabled is not None and not isinstance(enabled, bool):
+            raise PipelineError("Baseten returned an invalid model enablement flag")
     elif model.provider == "fireworks":
         _require_serverless_context(model.base_model, context)
         resolver = capability_resolver or fetch_fireworks_model_capability

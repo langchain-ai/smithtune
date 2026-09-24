@@ -296,6 +296,64 @@ def test_baseten_rejects_invalid_or_insufficient_capability(capability):
         capabilities.preflight_model(baseten.DEFAULT_MODEL, capability_resolver=lambda *args: capability)
 
 
+def test_baseten_preflight_refuses_a_model_the_workspace_is_not_enabled_for():
+    capability = baseten.BasetenModelCapability(
+        baseten.DEFAULT_MODEL.base_model, 262_144, False, 262_144, 0, False,
+        baseten.BasetenEnablementDetails(
+            reason="needs_approval",
+            reason_detail=(
+                "This model is supported, but it requires hardware your "
+                "workspace is not currently approved for."
+            ),
+            remediation=(
+                "Contact Baseten to have the required hardware approved for "
+                "your workspace."
+            ),
+        ),
+    )
+
+    with pytest.raises(baseten.BasetenModelNotEnabled) as failure:
+        capabilities.preflight_model(
+            baseten.DEFAULT_MODEL, capability_resolver=lambda *args: capability
+        )
+
+    assert "Contact Baseten to have the required hardware approved" in str(failure.value)
+    assert failure.value.reason == "needs_approval"
+
+
+def test_baseten_preflight_refuses_an_enabled_length_below_the_required_context():
+    capability = baseten.BasetenModelCapability(
+        baseten.DEFAULT_MODEL.base_model, 262_144, False, 262_144, 65_536, True, None,
+    )
+
+    with pytest.raises(baseten.BasetenRuntimeError, match="enabled for 65,536 tokens"):
+        capabilities.preflight_model(
+            baseten.DEFAULT_MODEL, capability_resolver=lambda *args: capability
+        )
+
+
+def test_baseten_preflight_accepts_a_capability_without_enablement_fields():
+    capability = baseten.BasetenModelCapability(
+        baseten.DEFAULT_MODEL.base_model, 262_144, False,
+    )
+
+    assert capabilities.preflight_model(
+        baseten.DEFAULT_MODEL, capability_resolver=lambda *args: capability
+    ) is baseten.DEFAULT_MODEL
+
+
+@pytest.mark.parametrize("capability", [
+    baseten.BasetenModelCapability("Qwen/Qwen3.8-27B", 262_144, False, None, None, "true"),
+    baseten.BasetenModelCapability("Qwen/Qwen3.8-27B", 262_144, False, None, -1, True),
+    baseten.BasetenModelCapability("Qwen/Qwen3.8-27B", 262_144, False, None, None, False, {"reason": "x"}),
+])
+def test_baseten_rejects_invalid_enablement_metadata(capability):
+    with pytest.raises((PipelineError, baseten.BasetenRuntimeError)):
+        capabilities.preflight_model(
+            baseten.DEFAULT_MODEL, capability_resolver=lambda *args: capability
+        )
+
+
 def test_baseten_does_not_infer_cross_entropy_support_from_catalog_presence():
     model = replace(baseten.DEFAULT_MODEL, base_model="zai-org/GLM-5.3")
     with pytest.raises(PipelineError, match="cross-entropy training compatibility is unverified"):
