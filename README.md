@@ -36,7 +36,7 @@ smithtune doctor
 Then ask your agent:
 
 ```text
-Use the smithtune skill to fine-tune a model on my LangSmith project <project> with Baseten.
+Use the smithtune skill to fine-tune a model on my LangSmith project <project> with [Baseten or Fireworks].
 ```
 
 The flow:
@@ -72,7 +72,7 @@ The [smithtune skill](https://github.com/langchain-ai/smithtune/blob/main/src/sm
 agent through the whole flow: choosing and testing a filter, optional council
 review, preparation, training, evaluation, and deployment, with a check after each
 step. Install it with `npx skills add langchain-ai/smithtune` (add `-g` to install
-it for every project), then describe your task:
+it for every project), or just tell your agent to install it for you.  Then describe your task:
 
 ```text
 Use the smithtune skill to <task> with <provider>.
@@ -90,12 +90,6 @@ Set these environment variables in the shell where you run smithtune:
 | `FIREWORKS_API_KEY` | Fireworks training and evaluation, and Fireworks-hosted judges |
 
 The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
-
-**Fireworks only, without a Baseten key:** use the same judge models on Fireworks.
-Pass `--judges deepseek-v4.1-flash,glm-5.3-flash` to `dataset triage`, and
-`--judge-model accounts/fireworks/models/deepseek-v4p1-flash` to `plan`, `train`,
-and `evaluate`. See [replay judges](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#replay-options) for
-other options.
 
 Read [Data Rights and Permitted Use](https://github.com/langchain-ai/smithtune/blob/main/docs/data-rights-and-permitted-use.md).
 The first workflow requires an interactive acknowledgment, saved locally;
@@ -121,7 +115,7 @@ Paid model calls and GPU capacity require `--confirm` on the command to run them
 | `dataset push` | Previews the upload |
 | `undeploy` | Stops before changing provider resources |
 
-Use `plan` before training and `eval-plan` before evaluation. Neither starts paid
+You can use `plan` before training and `eval-plan` before evaluation. Neither starts paid
 compute. Commands without confirmation can still read remote data or write local
 files. `prepare` and `dataset publish-splits` also write LangSmith split metadata;
 they do not train or call models. Running endpoints keep incurring charges until stopped.
@@ -200,7 +194,7 @@ on a strict majority. You need:
 
 - the `deepagents` extra (included in the install above);
 - keys for the judges: `BASETEN_API_KEY` for the default council (DeepSeek
-  V4.1 Flash and GLM-5.3-Flash on Baseten), or pick others with `--judges`
+  V4.1 Flash and GLM-5.3-Flash on Baseten), 'FIREWORKS_API_KEY' or pick others with `--judges`
   (see [judge options](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md#review-training-examples-with-an-agent-council));
 - a `rubric.md` describing the task, what to keep, what to drop, and a few
   concrete examples of each. smithtune ships no default rubric; `triage`
