@@ -269,10 +269,10 @@ def _parser() -> argparse.ArgumentParser:
     deployment.add_argument("--account-id", help="Fireworks account ID")
     deployment.add_argument("--output-model-id", help="Fireworks model ID")
     deployment.add_argument("--deployment-id", help="Fireworks deployment ID")
-    deployment.add_argument("--deployment-shape", help="Fireworks deployment shape")
+    deployment.add_argument("--deployment-shape", help="Fireworks deployment shape (default: matched by firectl after promotion; needs firectl 1.8.5+)")
     deployment.add_argument("--accelerator", help="required Baseten GPU allocation, for example H200:1")
     deployment.add_argument("--max-seq-len", type=int, help="required Baseten evaluation context cap, verified against the live server; does not configure serving context")
-    deployment.add_argument("--deployment-timeout", type=float, help="Baseten readiness timeout in seconds (default: 1800)")
+    deployment.add_argument("--deployment-timeout", type=float, help="seconds to wait for a ready replica (default: 1800)")
     deployment.add_argument("--confirm", action="store_true")
 
     eval_plan = sub.add_parser("eval-plan", help="build held-out trajectory replay cases")
@@ -640,11 +640,14 @@ def main(argv: list[str] | None = None) -> None:
                     confirm=args.confirm,
                 )
             else:
-                if any(value is not None for value in (args.accelerator, args.max_seq_len, args.deployment_timeout)):
-                    raise PipelineError("--accelerator, --max-seq-len, and --deployment-timeout require --provider baseten")
-                if not all(fireworks_options):
-                    raise PipelineError("Fireworks deploy requires --account-id, --output-model-id, --deployment-id, and --deployment-shape")
-                value = FireworksProvider().deploy(args.run_dir, *fireworks_options, confirm=args.confirm)
+                if any(value is not None for value in (args.accelerator, args.max_seq_len)):
+                    raise PipelineError("--accelerator and --max-seq-len require --provider baseten")
+                if not all(fireworks_options[:3]):
+                    raise PipelineError("Fireworks deploy requires --account-id, --output-model-id, and --deployment-id")
+                value = FireworksProvider().deploy(
+                    args.run_dir, *fireworks_options, confirm=args.confirm,
+                    timeout=args.deployment_timeout if args.deployment_timeout is not None else 1800,
+                )
         elif args.command in ("eval-plan", "evaluate") and args.provider == "fireworks":
             if args.output_dir is None:
                 if args.run_dir is None:

@@ -1902,7 +1902,10 @@ def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkey
 def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     commands = []
     monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
-    monkeypatch.setattr(fireworks, "_run", lambda command, **kwargs: commands.append(command))
+    from firectl_fakes import FakeFirectl
+    firectl = FakeFirectl()
+    commands = firectl.commands
+    monkeypatch.setattr(fireworks, "_run", firectl)
     def smoke_test(route):
         saved = json.loads((tmp_path / "endpoint.json").read_text())
         assert saved["model"] == route
@@ -1936,7 +1939,8 @@ def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch
 def test_failed_deployment_smoke_test_retains_receipt(tmp_path, monkeypatch, error):
     monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
-    monkeypatch.setattr(fireworks, "_run", lambda *args, **kwargs: None)
+    from firectl_fakes import FakeFirectl
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl())
 
     def fail(route):
         assert json.loads((tmp_path / "endpoint.json").read_text())["model"] == route
@@ -1964,8 +1968,9 @@ def test_mutating_steps_require_confirmation(tmp_path: Path):
         )
     with pytest.raises(PipelineError, match="--confirm"):
         fireworks.FireworksProvider().promote(tmp_path / "run", "model-id", confirm=False)
-    with pytest.raises(PipelineError, match="--confirm"):
-        fireworks.FireworksProvider().deploy(tmp_path, "account", "model-id", "deployment-id", "shape", confirm=False)
+    # Deploy previews without --confirm and creates nothing.
+    assert fireworks.FireworksProvider().deploy(
+        tmp_path, "account", "model-id", "deployment-id", "shape", confirm=False)["status"] == "preview"
     with pytest.raises(PipelineError, match="--confirm"):
         replay.run_replay_evaluation(tmp_path, tmp_path / "eval", "tuned", "judge", confirm=False)
 

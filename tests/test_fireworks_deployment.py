@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from firectl_fakes import FakeFirectl, shape
 from smithtune.providers import fireworks
 from smithtune.providers.base import PipelineError
 
@@ -29,7 +30,9 @@ def deployment(tmp_path, monkeypatch):
 
     import fireworks.training.sdk as sdk
     monkeypatch.setattr(sdk, "FireworksClient", Client)
-    monkeypatch.setattr(fireworks, "_run", lambda command: events.append(("deploy", command)))
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events))
+    monkeypatch.setattr(fireworks, "firectl_version", lambda: (1, 8, 9))
+    monkeypatch.setattr(fireworks.time, "sleep", lambda _: None)
     monkeypatch.setattr(fireworks, "_inference_smoke_test", lambda route: {"status": "passed"})
     return tmp_path, events
 
@@ -73,11 +76,15 @@ def test_deploy_reuses_standalone_promotion(deployment, legacy):
 def test_failed_deployment_creation_reuses_saved_promotion(deployment, monkeypatch):
     directory, events = deployment
 
-    def create(command):
-        assert (directory / "promotion.json").exists()
-        events.append(("deploy", command))
-        if sum(event[0] == "deploy" for event in events) == 1:
-            raise PipelineError("deployment creation failed")
+    firectl = FakeFirectl()
+
+    def create(command, **kwargs):
+        if command[1:3] == ["deployment", "create"]:
+            assert (directory / "promotion.json").exists()
+            events.append(("deploy", command))
+            if sum(event[0] == "deploy" for event in events) == 1:
+                raise PipelineError("deployment creation failed")
+        return firectl(command, **kwargs)
 
     monkeypatch.setattr(fireworks, "_run", create)
     with pytest.raises(PipelineError, match="deployment creation failed"):
@@ -143,3 +150,124 @@ def test_standalone_promotion_is_reusable_and_can_register_another_name(deployme
     events.clear()
     deploy(directory)
     assert [event[0] for event in events] == ["deploy"]
+
+
+def deploy_matched(directory, **kwargs):
+    return fireworks.FireworksProvider().deploy(directory, "account-id", "model-id", "endpoint-id", confirm=True, **kwargs)
+
+
+def test_deploy_matches_a_validated_shape_after_promotion(deployment, monkeypatch):
+    directory, events = deployment
+    firectl = FakeFirectl(events=events, shapes=[
+        shape("Stale shape", "NVIDIA_B200_180GB", latest=False),
+        shape("Qwen 1x H100", "NVIDIA_H100_80GB"),
+        shape("Qwen 1x B200", "NVIDIA_B200_180GB"),
+    ])
+    monkeypatch.setattr(fireworks, "_run", firectl)
+    endpoint = deploy_matched(directory)
+    match = next(c for c in firectl.commands if c[1:3] == ["deployment-shape-version", "match"])
+    assert match[-4:] == ["--model", "accounts/account-id/models/model-id", "-o", "json"]
+    # The model is promoted before matching, and the first validated shape is used.
+    assert [e[0] for e in events] == ["promote", "close", "deploy"]
+    create = events[-1][1]
+    assert create[create.index("--deployment-shape") + 1] == "accounts/fireworks/deploymentShapes/qwen-1x-h100"
+    assert endpoint["deployment_shape"]["source"] == "matched"
+    assert endpoint["deployment_shape"]["alternatives"] == ["Qwen 1x B200"]
+
+
+def test_deploy_waits_for_a_ready_replica_not_just_ready_state(deployment, monkeypatch):
+    directory, events = deployment
+    firectl = FakeFirectl(events=events, ready_after=2)
+    monkeypatch.setattr(fireworks, "_run", firectl)
+    smoke = []
+    monkeypatch.setattr(fireworks, "_inference_smoke_test", lambda route: smoke.append(firectl.gets) or {"status": "passed"})
+    deploy(directory)
+    assert smoke == [3]  # smoke test only after a replica is ready
+
+
+def test_deploy_times_out_waiting_for_capacity_with_cleanup_command(deployment, monkeypatch):
+    directory, events = deployment
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events, ready_after=10**9))
+    clock = iter(range(0, 10**6, 100))
+    monkeypatch.setattr(fireworks.time, "monotonic", lambda: next(clock))
+    with pytest.raises(PipelineError, match="no ready replica.*smithtune undeploy --provider fireworks"):
+        deploy(directory, timeout=300)
+    assert json.loads((directory / "endpoint.json").read_text())["smoke_test"] == {"status": "pending"}
+
+
+def test_old_firectl_fails_before_promotion_when_matching_is_needed(deployment, monkeypatch):
+    directory, events = deployment
+    monkeypatch.setattr(fireworks, "firectl_version", lambda: (1, 8, 0))
+    with pytest.raises(PipelineError, match="firectl 1.8.5 or newer .*found 1.8.0"):
+        deploy_matched(directory)
+    assert events == [] and not (directory / "promotion.json").exists()
+    deploy(directory)  # an explicit shape still works on old firectl
+
+
+def test_deploy_preview_shows_the_shape_without_creating_resources(deployment, monkeypatch):
+    directory, events = deployment
+    firectl = FakeFirectl(events=events)
+    monkeypatch.setattr(fireworks, "_run", firectl)
+    preview = fireworks.FireworksProvider().deploy(directory, "account-id", "model-id", "endpoint-id", confirm=False)
+    assert preview["status"] == "preview" and preview["promotion"] == "pending"
+    assert preview["deployment_shape"]["source"] == "matched_after_promotion"
+    deploy_matched(directory)
+    events.clear()
+    firectl.commands.clear()
+    preview = fireworks.FireworksProvider().deploy(directory, "account-id", "model-id", "endpoint-id", confirm=False)
+    assert preview["promotion"] == "saved" and preview["deployment_shape"]["display_name"] == "Base 1x H100"
+    assert events == [] and not any(c[1:3] == ["deployment", "create"] for c in firectl.commands)
+
+
+def test_agent_block_hands_the_exact_deploy_command_to_the_user(deployment, monkeypatch):
+    directory, events = deployment
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events, block_agents=True))
+    with pytest.raises(PipelineError) as failure:
+        deploy_matched(directory)
+    message = str(failure.value)
+    assert "cannot create the deployment here" in message and "outside the agent" in message
+    # The handoff pins the shape already matched, so it also works on firectl < 1.8.5.
+    assert ("smithtune deploy --provider fireworks --run-dir " + str(directory) + " --account-id account-id "
+            "--output-model-id model-id --deployment-id endpoint-id --deployment-shape "
+            "accounts/fireworks/deploymentShapes/base-1x-h100 --confirm") in message
+    assert "FIRECTL_AGENT_SAFE_ACCOUNTS=account-id" in message
+    assert (directory / "promotion.json").exists() and not (directory / "endpoint.json").exists()
+
+
+def test_handoff_command_succeeds_outside_the_agent(deployment, monkeypatch):
+    directory, events = deployment
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events, block_agents=True))
+    with pytest.raises(PipelineError):
+        deploy_matched(directory)
+    monkeypatch.setattr(fireworks, "firectl_version", lambda: (1, 8, 0))
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events))
+    endpoint = fireworks.FireworksProvider().deploy(
+        directory, "account-id", "model-id", "endpoint-id", "accounts/fireworks/deploymentShapes/base-1x-h100", confirm=True)
+    assert endpoint["deployment_shape"] == {"name": "accounts/fireworks/deploymentShapes/base-1x-h100", "source": "explicit"}
+    assert [e[0] for e in events].count("promote") == 1  # the saved promotion is reused
+
+
+def test_agent_block_hands_undeploy_to_the_user(monkeypatch):
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(block_agents=True))
+    with pytest.raises(PipelineError, match="smithtune undeploy --provider fireworks --account-id account-id "
+                                            "--deployment-id endpoint-id --confirm") as failure:
+        fireworks.FireworksProvider().undeploy("account-id", "endpoint-id", confirm=True)
+    assert "never lets agents" in str(failure.value) and "FIRECTL_AGENT_SAFE_ACCOUNTS" not in str(failure.value)
+
+
+def test_other_firectl_failures_are_summarized_without_the_raw_command(deployment, monkeypatch):
+    directory, events = deployment
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events, fail="Error: quota exceeded for NVIDIA_H100_80GB"))
+    with pytest.raises(PipelineError, match="could not create the deployment: Error: quota exceeded") as failure:
+        deploy(directory)
+    assert "['firectl'" not in str(failure.value)
+
+
+def test_existing_deployment_id_explains_the_next_step(deployment, monkeypatch):
+    directory, events = deployment
+    exists = ("Failed to execute: error creating deployment: rpc error: code = AlreadyExists desc = deployment "
+              "accounts/account-id/deployments/endpoint-id already exists")
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl(events=events, fail=exists))
+    with pytest.raises(PipelineError, match="already exists in Fireworks. Choose a new --deployment-id"):
+        deploy(directory)
+    assert not (directory / "endpoint.json").exists()

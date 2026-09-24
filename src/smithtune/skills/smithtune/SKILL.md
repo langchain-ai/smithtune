@@ -422,16 +422,27 @@ See the [deployment guide](https://github.com/langchain-ai/smithtune/blob/main/d
 for details.
 
 ```bash
-# Fireworks: registers (promotes) the best checkpoint as a model, then deploys it.
-# --account-id must own the training checkpoint; a saved promotion is reused.
+# Fireworks (firectl 1.8.5+): promotes the best checkpoint, matches a validated
+# deployment shape, and waits for a ready replica. --account-id must own the
+# checkpoint; a saved promotion is reused. Omit --confirm first to preview the shape.
 smithtune deploy --provider fireworks --run-dir "$run_dir" \
   --account-id "$account_id" --output-model-id my-tuned-model \
-  --deployment-id my-endpoint --deployment-shape "$deployment_shape" --confirm
+  --deployment-id my-endpoint --confirm
 
 # Baseten: needs the baseten-deploy extra; choose GPUs explicitly.
 smithtune deploy --provider baseten --run-dir "$run_dir" \
   --accelerator H200:1 --max-seq-len 32768 --confirm
 ```
+
+**Fireworks blocks agents from creating or deleting deployments.** firectl refuses
+mutating commands when it detects an AI agent, so `deploy --confirm` and
+`undeploy` stop with a message containing the exact `smithtune` command to run.
+As the agent: run the preview (no `--confirm`) to show the shape, run
+`--confirm` once (it promotes the checkpoint and then stops), and give the user
+the printed command to run in their own terminal. If the user confirms their
+team allows it, `FIRECTL_AGENT_SAFE_ACCOUNTS=<account>` (firectl's allowlist)
+lets you create the deployment; `undeploy` always needs the user. Never hide
+the agent environment to get past the block. Baseten deploys are not affected.
 
 Stop serving when the user is done:
 
@@ -486,6 +497,8 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | "Baseten workspace context limit is below N" | Sequence length above Baseten's limit | Lower `--max-seq-len` at prepare, or pick another model |
 | Train refuses the run directory | `--run-dir` not empty | New run directory; never clear an old one |
 | Evaluation stops before paid work on resume | Settings differ from the saved run | Re-run with the original settings |
+| "Fireworks blocks firectl from changing resources inside an AI agent" | firectl refuses deploy/undeploy under an agent | Give the user the printed `smithtune` command to run in their own terminal |
+| "automatic deployment shape selection needs firectl 1.8.5 or newer" | Old firectl | `firectl upgrade`, or pass `--deployment-shape` |
 | Process killed during Baseten evaluation or deploy | Samplers or endpoints may still be running | Cleanup commands in `sampler.json`, or `undeploy --provider baseten --run-dir DIR --confirm` |
 
 When reporting a failure, include the command, stage, directory, error text, and

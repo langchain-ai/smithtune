@@ -312,14 +312,23 @@ use `deploy`; Fireworks handles promotion automatically and reuses saved promoti
 Run the command for your training provider:
 
 **Fireworks**: install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl)
-and use the account owning your checkpoint:
+1.8.5 or newer and use the account owning your checkpoint. Preview first, then confirm:
 
 ```bash
 smithtune deploy --provider fireworks --run-dir "$run_dir" \
   --account-id '<fireworks-account>' --output-model-id my-tuned-model \
-  --deployment-id my-endpoint --deployment-shape '<compatible-deployment-shape>' \
-  --confirm
+  --deployment-id my-endpoint              # preview: model, promotion, and shape
+smithtune deploy --provider fireworks --run-dir "$run_dir" \
+  --account-id '<fireworks-account>' --output-model-id my-tuned-model \
+  --deployment-id my-endpoint --confirm
 ```
+
+`deploy` promotes the checkpoint, then picks the first validated deployment shape
+that `firectl deployment-shape-version match` returns for your account, and
+waits until a replica is ready before its smoke test. Pass `--deployment-shape`
+to choose one yourself (`default` lets Fireworks pick; needs firectl 1.8.8+).
+firectl blocks deployment changes from coding agents; when that happens, smithtune
+prints the exact command to run in your own terminal.
 
 **Baseten**: install the [deployment extra](https://github.com/langchain-ai/smithtune/blob/main/docs/deployment.md#deploy-a-baseten-checkpoint)
 first. Choose hardware and a context cap suitable for your model; these are example values:
