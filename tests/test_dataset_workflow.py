@@ -531,3 +531,16 @@ def test_staged_dataset_can_be_downloaded_and_prepared(tmp_path):
     assert sum(manifest["split"][key] for key in ("train", "validation", "test")) == 12
     rows = [json.loads(line) for line in (data_dir / "prepared" / "train.jsonl").read_text().splitlines()]
     assert rows and all(row["messages"] for row in rows)
+
+
+def test_runtime_council_settings_can_change_after_votes_start(tmp_path):
+    api = API()
+    def fail_one(judge, *args):
+        return {} if judge["name"] == "judge-2" else judge_call(judge, *args)
+    run(tmp_path, api, "pull")
+    run(tmp_path, api, "triage", confirm=True, judge=fail_one, attempts=1)
+    # Slower scheduling after rate limits keeps the saved votes and finishes the rest.
+    result = run(tmp_path, api, "triage", confirm=True, concurrency=1, attempts=3)
+    assert result["triage"]["status"] == "complete"
+    with pytest.raises(PipelineError, match="conflict with saved votes"):
+        run(tmp_path, api, "triage", confirm=True, judges=["glm-5.3-flash"])
