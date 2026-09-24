@@ -179,7 +179,9 @@ def _fetch_trajectory(
                         if isinstance(metadata := entry.get("metadata"), dict)
                         and isinstance(metadata.get("trace_id"), str) and metadata["trace_id"]})
     if item["key"] == "trace_id" and any(tid != item["id"] for tid in trace_ids):
-        raise PipelineError("trajectory evidence belongs to another trace")
+        # Never train on another trace's messages; exclude this trajectory, not the whole pull.
+        return {"messages": [], "source": None, "trace_ids": [item["id"]],
+                "training_error": f"{item['key']} {item['id']} includes evidence from traces outside its source; whole trajectory excluded"}
     source, error = None, None
     try:
         source = trajectory_bindings(items)
