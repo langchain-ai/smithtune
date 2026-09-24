@@ -62,7 +62,7 @@ class API:
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
         elif path == "/v1/trajectory":
-            assert body["include"] == {"system_messages": True}
+            assert body["include"] == {"system_messages": True, "tool_definitions": True}
             assert body["format"] == "ui"
             if "thread_id" in body:
                 value = self.trajectory_pages[body.get("cursor")]
