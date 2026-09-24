@@ -74,7 +74,7 @@ class API:
             result = copy.deepcopy(body)
             self.datasets[body["id"]] = result
         elif path == "/v1/trajectory":
-            assert body["format"] == "ui" and body["include"] == {"system_messages": True}
+            assert body["format"] == "ui" and body["include"] == {"system_messages": True, "tool_definitions": True}
             assert sum(key in body for key in curation.TRAJECTORY_KEYS) == 1
             result = {"items": items(self.messages, trace_id=body.get("trace_id", uid(1))), "next_cursor": None, "prev_cursor": None}
         elif path == "/api/v1/examples":
@@ -199,7 +199,7 @@ def test_oversized_page_narrows_same_cursor_without_partial_import(
             return api(command, **kwargs)
         body = json.loads(kwargs["input"])
         calls.append(body)
-        assert body["include"] == {"system_messages": True}
+        assert body["include"] == {"system_messages": True, "tool_definitions": True}
         assert body["format"] == "ui"
         assert body["thread_id"] == "a" and body["project_id"] == uid(101)
         assert api.examples == []

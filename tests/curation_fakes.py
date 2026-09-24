@@ -58,7 +58,7 @@ class API:
         elif route.startswith('/api/v1/sessions/'):
             value = {'id': PROJECT, 'start_time': '2026-08-01T00:00:00+00:00'}
         elif route == '/v1/trajectory':
-            assert body['include'] == {'system_messages': True}
+            assert body['include'] == {'system_messages': True, 'tool_definitions': True}
             self.trajectory_requests += 1
             offset = int(body.get('cursor', '0'))
             assert body['format'] == 'ui'

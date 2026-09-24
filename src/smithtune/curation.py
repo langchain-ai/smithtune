@@ -131,7 +131,8 @@ def _fetch_trajectory(
     from smithtune.bindings import trajectory_bindings
 
     body = {"project_id": project_id, item["key"]: item["id"],
-            "format": "ui", "include": {"system_messages": True}}
+            # Tool definitions are opt-in on /v1/trajectory; per-assistant tools depend on them.
+            "format": "ui", "include": {"system_messages": True, "tool_definitions": True}}
     items, cursors = [], set()
     while True:
         attempt = 1
