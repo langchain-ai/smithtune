@@ -44,7 +44,6 @@ from smithtune.rendering import SFT_TARGET_POLICY, load_training_renderer, resol
 DEPLOYMENT_TIMEOUT_SECONDS = 1800
 READY_POLL_SECONDS = 15
 
-
 TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
 FIREWORKS_BASE_URL = "https://api.fireworks.ai"
 INFERENCE_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
@@ -655,9 +654,6 @@ class FireworksProvider:
         )
 
 
-
-
-
 def _run_firectl_change(command: list[str], action: str, handoff: list[str], *, agent_safe_allowed: bool) -> None:
     """Run a mutating firectl command; hand it to the user when firectl refuses agents."""
     try:
@@ -752,6 +748,7 @@ def _wait_for_ready_replica(deployment: str, account_id: str, timeout: float) ->
             )
         print(f"Waiting for a ready replica (state {state.get('state')}, ready replicas {ready})...", file=sys.stderr)
         time.sleep(min(READY_POLL_SECONDS, max(0, deadline - time.monotonic())))
+
 
 def _validate_resource_id(value: str, label: str) -> None:
     if not RESOURCE_ID.fullmatch(value):

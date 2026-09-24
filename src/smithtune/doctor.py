@@ -28,7 +28,7 @@ MIN_FIRECTL_SHAPE_MATCH = (1, 8, 5)
 
 
 def firectl_version() -> tuple[int, int, int] | None:
-    """Installed firectl version, read offline from `firectl version`."""
+    """Installed firectl version, parsed from `firectl version`."""
     try:
         result = subprocess.run(["firectl", "version"], capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError):
