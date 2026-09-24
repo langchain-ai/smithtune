@@ -42,10 +42,43 @@ def test_ui_pages_preserve_messages_and_global_assistant_positions():
     assert [(b["message_index"], len(b["tools"])) for b in result["source"]["assistant_runs"]] == [(2, 1), (4, 0)]
     assert result["source"]["assistant_runs"][-1]["run_id"] == "second-run"
     assert requests == [
-        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True}},
-        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True}, "cursor": "page-2"},
+        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True, "tool_definitions": True}},
+        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True, "tool_definitions": True}, "cursor": "page-2"},
     ]
     assert wire == original
+
+
+def gated_trajectory_api(wire):
+    """Serve /v1/trajectory like LangSmith: tool definitions only when requested."""
+    def api(command, *, input, **kwargs):
+        body = json.loads(input)
+        page = copy.deepcopy(wire)
+        if not body.get("include", {}).get("tool_definitions"):
+            for entry in page:
+                entry["message"].pop("available_tools", None)
+        return SimpleNamespace(stdout=json.dumps({"items": page, "next_cursor": None}))
+    return api
+
+
+def test_tool_definitions_are_requested_from_a_gated_trajectory_api():
+    messages = [{"role": "human", "content": "Find a result."}, {"role": "ai", "content": "Answer."}]
+    api = gated_trajectory_api(items(messages, trace_id=uid(1), tools=[tool()]))
+    result = curation._fetch_trajectory(uid(100), uid(101), {"key": "trace_id", "id": uid(1)}, runner=api)
+    assert result["training_error"] is None
+    assert [len(b["tools"]) for b in result["source"]["assistant_runs"]] == [1]
+
+
+def test_a_response_without_tool_definitions_is_not_read_as_no_tools():
+    messages = [{"role": "human", "content": "Find a result."}, {"role": "ai", "content": "Answer."}]
+    wire = items(messages, trace_id=uid(1), tools=[tool()])
+    for entry in wire:
+        entry["message"].pop("available_tools", None)
+
+    def api(*args, **kwargs):
+        return SimpleNamespace(stdout=json.dumps({"items": wire, "next_cursor": None}))
+
+    result = curation._fetch_trajectory(uid(100), uid(101), {"key": "trace_id", "id": uid(1)}, runner=api)
+    assert "unknown tool availability" in (result["training_error"] or "")
 
 
 @pytest.mark.parametrize("retain_empty", [False, True])
