@@ -484,6 +484,10 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | Prepare: tool data missing for an older dataset | Examples uploaded before per-assistant tool capture | Re-pull and push a fresh dataset |
 | "Baseten workspace does not advertise MODEL" | Model not available to the Baseten workspace | Confirm model ID via `models list`; contact Baseten for access |
 | "Baseten workspace context limit is below N" | Sequence length above Baseten's limit | Lower `--max-seq-len` at prepare, or pick another model |
+| "Baseten workspace is enabled for N tokens of MODEL" | Workspace approval is below the model's catalog limit | Prepare again with the suggested `--max-seq-len N` |
+| Pull excludes "returned no messages" for fresh traces | LangSmith had not yet indexed the trajectories | Wait a minute, then pull into a new directory |
+| "Baseten has no capacity to provision this trainer (HTTP 429)" | No trainer capacity available now; nothing was provisioned | Retry later with a new `--run-dir`, or ask Baseten about capacity |
+| "Baseten refused to create the trainer (HTTP 403)" | Trainer GPU quota or access; Baseten's reason follows | Stop running trainers or ask Baseten to raise the limit |
 | Train refuses the run directory | `--run-dir` not empty | New run directory; never clear an old one |
 | Evaluation stops before paid work on resume | Settings differ from the saved run | Re-run with the original settings |
 | Process killed during Baseten evaluation or deploy | Samplers or endpoints may still be running | Cleanup commands in `sampler.json`, or `undeploy --provider baseten --run-dir DIR --confirm` |

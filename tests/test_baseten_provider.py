@@ -496,7 +496,8 @@ def test_enabled_sequence_length_below_the_request_is_refused():
     response = _capability_response(max_enabled_seq_len=65_536)
 
     with pytest.raises(
-        baseten.BasetenRuntimeError, match="enabled for 65,536 tokens"
+        baseten.BasetenRuntimeError,
+        match="enabled for 65,536 tokens.*pass --max-seq-len 65536 to prepare",
     ):
         _fetch_capability(response, required=131_072)
 
@@ -1365,6 +1366,64 @@ def test_provisioning_failure_cleans_every_run_under_the_recorded_session(tmp_pa
 
     assert management.session_lookups == ["session-1"]
     assert management.deactivated == ["session-run-1", "session-run-2"]
+
+
+def test_provisioning_failure_records_the_sessions_only_run(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    service = FakeService(FakeTrainer())
+
+    def fail_create(**kwargs):
+        raise RuntimeError("Trainer deployment d1 entered terminal-failure state 'FAILED'")
+
+    service.create_lora_training_client = fail_create
+    management = FakeManagement(session_runs=["session-run-1"], inactive=[True])
+
+    with pytest.raises(
+        baseten.BasetenRuntimeError,
+        match="provisioning failed: Trainer deployment d1 entered terminal-failure",
+    ):
+        _train(_provider(service, management), tmp_path)
+
+    state = json.loads((tmp_path / "run" / "run-state.json").read_text())
+    result = json.loads((tmp_path / "run" / "result.json").read_text())
+    assert state["baseten_run_id"] == result["baseten_run_id"] == "session-run-1"
+    assert state["active_seconds"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        (429, {"Retry-After": "30"}, "Baseten has no capacity to provision this trainer "
+         "(HTTP 429): no H100:4 capacity; retry after 30s"),
+        (429, {}, "Baseten has no capacity to provision this trainer "
+         "(HTTP 429): no H100:4 capacity; retry later"),
+        (403, {}, "Baseten refused to create the trainer (HTTP 403): no H100:4 capacity"),
+    ],
+)
+def test_trainer_creation_http_errors_repeat_basetens_reason(
+    tmp_path: Path, status, headers, expected
+):
+    import httpx
+
+    _write_prepared_dataset(tmp_path)
+    service = FakeService(FakeTrainer())
+    request = httpx.Request("POST", "https://api.baseten.co/v1/loops/trainers")
+    response = httpx.Response(
+        status, json={"detail": "no H100:4 capacity"}, headers=headers, request=request
+    )
+
+    def fail_create(**kwargs):
+        raise httpx.HTTPStatusError("HTTP error", request=request, response=response)
+
+    service.create_lora_training_client = fail_create
+    management = FakeManagement(session_runs=[], inactive=[])
+
+    with pytest.raises(baseten.BasetenRuntimeError) as failure:
+        _train(_provider(service, management), tmp_path)
+
+    assert str(failure.value) == expected
+    assert "api.baseten.co" not in str(failure.value)
+    assert isinstance(failure.value.__cause__, httpx.HTTPStatusError)
 
 
 def test_primary_and_cleanup_failures_remain_visible_together(tmp_path: Path):

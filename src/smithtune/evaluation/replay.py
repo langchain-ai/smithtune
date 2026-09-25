@@ -621,7 +621,7 @@ def run_replay_evaluation(
     | None = None,
 ) -> dict[str, Any]:
     """Score tuned next messages and optionally compare a base model."""
-    _require_confirm(confirm, "model and judge inference")
+    _require_confirm(confirm, "model and judge inference", provider="provider")
     if baseten_endpoint is not None:
         baseten_endpoint.validate()
         if replay_sampler is not None:

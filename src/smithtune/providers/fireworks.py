@@ -105,10 +105,10 @@ class SFTSettings(CommonSFTSettings):
             raise PipelineError("lora_alpha and pipeline_depth must be positive")
 
 
-def _require_confirm(value: bool, action: str) -> None:
+def _require_confirm(value: bool, action: str, provider: str = "Fireworks") -> None:
     if not value:
         raise PipelineError(
-            f"{action} changes Fireworks resources or incurs cost; rerun with --confirm"
+            f"{action} changes {provider} resources or incurs cost; rerun with --confirm"
         )
 
 
