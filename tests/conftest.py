@@ -4,7 +4,7 @@ from functools import wraps
 
 import pytest
 
-from smithtune import data_rights, dataset, triage
+from smithtune import curation, data_rights, dataset, triage
 from smithtune.artifacts import _json_dump
 from smithtune.evaluation import replay as evaluation
 from smithtune.providers import fireworks
@@ -49,6 +49,12 @@ def local_langsmith_defaults(monkeypatch, request):
             return {"comparison_url": "https://smith.langchain.com/test-comparison"}
 
     monkeypatch.setattr(evaluation.reporting, "BackgroundPublisher", LocalPublisher)
+
+
+@pytest.fixture(autouse=True)
+def immediate_trajectory_retries(monkeypatch):
+    """Fake trajectories are indexed at once; tests asserting delays patch this themselves."""
+    monkeypatch.setattr(curation, "_sleep", lambda _seconds: None)
 
 
 @pytest.fixture(autouse=True)

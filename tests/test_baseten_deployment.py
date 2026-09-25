@@ -94,7 +94,7 @@ def test_create_records_intent_before_provider_call_and_finishes_ready(run, back
 
 def test_confirmation_is_required_before_reading_or_provisioning(run, backend):
     (run / "plan.json").unlink()
-    with pytest.raises(PipelineError, match="confirm"):
+    with pytest.raises(PipelineError, match="changes Baseten resources.*--confirm"):
         deploy(run, confirm=False)
     backend.api.assert_not_called()
     backend.prepare.assert_not_called()

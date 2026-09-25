@@ -430,6 +430,45 @@ def retry_idempotent(operation: Any, *, sleeper: Any = time.sleep, attempts: int
     raise AssertionError("unreachable")
 
 
+def _trainer_creation_failure(failure: BaseException) -> BaseException:
+    """Repeat Baseten's reason when it refuses or cannot provision a trainer."""
+    try:
+        import httpx
+    except ImportError:
+        httpx = None
+    if httpx is not None and isinstance(failure, httpx.HTTPStatusError):
+        response = failure.response
+        detail = _response_detail(response)
+        status = response.status_code
+        if status == 429:
+            message = "Baseten has no capacity to provision this trainer (HTTP 429)"
+            retry_after = response.headers.get("Retry-After")
+            suffix = f"; retry after {retry_after}s" if retry_after and retry_after.isdigit() else "; retry later"
+        else:
+            message = f"Baseten refused to create the trainer (HTTP {status})"
+            suffix = ""
+        return BasetenRuntimeError(f"{message}: {detail}{suffix}" if detail else message + suffix)
+    # The Loops SDK raises plain RuntimeError when a trainer reaches a terminal
+    # state before becoming ready; its message names the deployment and link.
+    if type(failure) is RuntimeError:
+        return BasetenRuntimeError(f"Baseten trainer provisioning failed: {failure}")
+    return failure
+
+
+def _response_detail(response: Any) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        text = (response.text or "").strip()
+        return text[:500] or None
+    if isinstance(payload, dict):
+        for key in ("detail", "message", "error"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:500]
+    return None
+
+
 def _is_transient_remote_failure(failure: BaseException) -> bool:
     if isinstance(failure, urllib.error.HTTPError):
         return failure.code in _TRANSIENT_HTTP_STATUS
@@ -1036,15 +1075,21 @@ class BasetenProvider:
             session_id = validate_resource_id(service.session_id, kind="session")
             result["session_id"] = session_id
             update_state(baseten_session_id=session_id)
-            trainer = service.create_lora_training_client(
-                base_model=model.base_model,
-                rank=settings.lora_rank,
-                replicas=settings.replicas,
-                seed=settings.seed,
-                max_seq_len=max_seq_len,
-                with_sampler=False,
-                name=run_id,
-            )
+            try:
+                trainer = service.create_lora_training_client(
+                    base_model=model.base_model,
+                    rank=settings.lora_rank,
+                    replicas=settings.replicas,
+                    seed=settings.seed,
+                    max_seq_len=max_seq_len,
+                    with_sampler=False,
+                    name=run_id,
+                )
+            except Exception as exc:
+                failure = _trainer_creation_failure(exc)
+                if failure is exc:
+                    raise
+                raise failure from exc
             raw_run_id = getattr(trainer, "run_id", None)
             if not raw_run_id:
                 raise BasetenRuntimeError("Baseten trainer did not return a run ID")
@@ -1220,6 +1265,12 @@ class BasetenProvider:
                     )
                     result["cleanup"]["resources_deactivated"] = True
                     result["cleanup"]["deactivated_run_ids"] = deactivated
+                    # The SDK returns the run only once its trainer is ready, so a
+                    # provisioning failure leaves the session's single run unrecorded.
+                    if baseten_run_id is None and len(deactivated) == 1:
+                        baseten_run_id = deactivated[0]
+                        result["baseten_run_id"] = baseten_run_id
+                        update_state(baseten_run_id=baseten_run_id)
                 except BaseException as exc:
                     cleanup_errors.append(exc)
             if sigterm_handler_installed:
@@ -1264,7 +1315,10 @@ class BasetenProvider:
                 last_resumable_state_uri=last_state_uri,
                 best_sampler_weights_uri=best_sampler_uri,
                 best_epoch=best_epoch,
-                active_seconds=final_active_seconds,
+                # Active time is measured only by the optional spend guard.
+                active_seconds=(
+                    final_active_seconds if settings.max_spend_usd is not None else None
+                ),
                 budget_status=(
                     "reached"
                     if budget_stopped
@@ -1563,7 +1617,8 @@ def _validate_capability(capability: Any, expected_model: str, required_context:
         if enabled_limit < required_context:
             raise BasetenRuntimeError(
                 f"Baseten workspace is enabled for {enabled_limit:,} tokens of "
-                f"{expected_model}, below the required {required_context:,}"
+                f"{expected_model}, below the required {required_context:,}; "
+                f"pass --max-seq-len {enabled_limit} to prepare within the enabled limit"
             )
 
 

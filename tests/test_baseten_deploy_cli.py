@@ -445,3 +445,17 @@ def test_temporary_retry_uses_corrected_context_before_resume_validation(tmp_pat
     evaluate.side_effect = evaluate_lazily
     cli.main([*temporary_args(tmp_path), "--max-seq-len", "32768", "--confirm"])
     assert events[-1] == ("exit",)
+
+
+def test_runtime_errors_are_reported_without_the_usage_banner(monkeypatch, capsys):
+    def fail(*_args, **_kwargs):
+        raise cli.BasetenRuntimeError("Baseten deployment readiness timed out")
+
+    monkeypatch.setattr(cli.baseten_deployment, "deploy", fail)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["deploy", "--provider", "baseten", "--run-dir", "run",
+                  "--accelerator", "H100:4", "--max-seq-len", "32768", "--confirm"])
+    assert error.value.code == 2
+    err = capsys.readouterr().err
+    assert err.endswith("smithtune: error: Baseten deployment readiness timed out\n")
+    assert "usage:" not in err

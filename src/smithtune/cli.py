@@ -712,7 +712,8 @@ def main(argv: list[str] | None = None) -> None:
                 value = {"status": "deleted", "deployment_id": args.deployment_id}
     except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
         activity.close()
-        parser.error(str(exc))
+        # Runtime failures are not usage mistakes; keep argparse's status without its usage banner.
+        parser.exit(2, f"{parser.prog}: error: {exc}\n")
     finally:
         activity.close()
     print(json.dumps(value, indent=2, sort_keys=True))

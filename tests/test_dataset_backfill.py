@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from smithtune import cli, dataset_workflow, triage_source
+from smithtune import cli, curation, dataset_workflow, triage_source
 from smithtune.providers.base import PipelineError
 from test_dataset_workflow import SOURCE, no_judge, run
 from test_triage import API, uid
@@ -36,7 +36,12 @@ def test_backfill_reaches_target_without_extra_downloads(tmp_path, concurrency):
     summary = result["download_summary"]
     assert summary["examined"] == 5 and summary["usable"] == 3 and summary["excluded"] == 2
     assert summary["target_met"] and summary["stop_reason"] == "target_reached"
-    assert sorted(body["trace_id"] for body in api.reads("/v1/trajectory")) == [uid(n) for n in range(10, 15)]
+    # Empty trajectories are re-read in case indexing lags ingestion; no extra candidates are fetched.
+    reads = [body["trace_id"] for body in api.reads("/v1/trajectory")]
+    assert sorted(set(reads)) == [uid(n) for n in range(10, 15)]
+    assert {trace: reads.count(trace) for trace in (uid(10), uid(12))} == {
+        uid(10): curation.EMPTY_TRAJECTORY_ATTEMPTS, uid(12): curation.EMPTY_TRAJECTORY_ATTEMPTS}
+    assert all(reads.count(uid(n)) == 1 for n in (11, 13, 14))
     queries = api.reads("/api/v2/runs/query")
     assert [body.get("cursor") for body in queries] == [None, "1", "2"]
     assert all('eq(name,"reviewer")' in body["filter"] and
