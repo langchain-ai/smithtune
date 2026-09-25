@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from smithtune import curation, triage_source
+from smithtune import triage_source
 from smithtune.providers.base import PipelineError
 from test_dataset_backfill import Candidates
 from test_dataset_workflow import no_judge, run
@@ -89,10 +89,7 @@ def test_no_triage_stops_at_cumulative_structural_target(tmp_path):
     assert result["collection"]["eligible"] == 1 and result["collection"]["status"] == "needs_candidates"
     result = run(tmp_path, api, judge=no_judge)
     assert result["collection"]["round"] == 2 and result["collection"]["status"] == "target_reached"
-    reads = [body["trace_id"] for body in api.reads("/v1/trajectory")]
-    # The empty trajectory is re-read in case indexing lags ingestion.
-    assert list(dict.fromkeys(reads)) == [uid(10), uid(11), uid(12)]
-    assert reads.count(uid(10)) == curation.EMPTY_TRAJECTORY_ATTEMPTS
+    assert [body["trace_id"] for body in api.reads("/v1/trajectory")] == [uid(10), uid(11), uid(12)]
     assert "No council review was performed" in result["message"]
     run(tmp_path, api, "push", name="structural", confirm=True, judge=no_judge)
     assert len(api.imported) == 2

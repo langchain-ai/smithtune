@@ -23,8 +23,6 @@ DEFAULT_SOURCE_WINDOW = timedelta(days=1)
 # Trajectory reads are idempotent, so transient failures are retried; example writes are not.
 FETCH_ATTEMPTS = 3
 FETCH_BACKOFF_SECONDS = 1.0
-EMPTY_TRAJECTORY_ATTEMPTS = 4
-EMPTY_TRAJECTORY_BACKOFF_SECONDS = 10.0
 _sleep = time.sleep
 
 
@@ -126,9 +124,15 @@ def _matches(values: Any) -> dict[str, dict]:
     return matches
 
 
-def _trajectory_items(workspace_id: str, body: dict, item: dict[str, str], *,
-                      runner: Callable[..., Any]) -> tuple[list[dict] | None, dict | None]:
-    """Read every page of one trajectory, or return the whole-trajectory rejection."""
+def _fetch_trajectory(
+    workspace_id: str, project_id: str, item: dict[str, str], *,
+    runner: Callable[..., Any], retain_empty: bool = False,
+) -> dict:
+    from smithtune.bindings import trajectory_bindings
+
+    body = {"project_id": project_id, item["key"]: item["id"],
+            # Tool definitions are opt-in on /v1/trajectory; per-assistant tools depend on them.
+            "format": "ui", "include": {"system_messages": True, "tool_definitions": True}}
     items, cursors = [], set()
     while True:
         attempt = 1
@@ -139,9 +143,9 @@ def _trajectory_items(workspace_id: str, body: dict, item: dict[str, str], *,
             except _TrajectoryPageTooLarge:
                 if body.get("page_size") == 1:
                     # Keep only the rejection, never a prefix from earlier pages.
-                    return None, {"messages": [], "source": None, "trace_ids": [],
-                                  "training_error": f"{item['key']} {item['id']} exceeds the trajectory fetch limit "
-                                                    "even with page_size=1; whole trajectory excluded"}
+                    return {"messages": [], "source": None, "trace_ids": [],
+                            "training_error": f"{item['key']} {item['id']} exceeds the trajectory fetch limit "
+                                              "even with page_size=1; whole trajectory excluded"}
                 # Narrow only the transport page. Preserve the cursor, all saved
                 # messages, and system-message inclusion; never truncate a turn.
                 body["page_size"] = 1
@@ -163,27 +167,6 @@ def _trajectory_items(workspace_id: str, body: dict, item: dict[str, str], *,
             raise PipelineError(f"{item['key']} {item['id']} returned an invalid or repeated continuation cursor")
         cursors.add(cursor)
         body["cursor"] = cursor
-    return items, None
-
-
-def _fetch_trajectory(
-    workspace_id: str, project_id: str, item: dict[str, str], *,
-    runner: Callable[..., Any], retain_empty: bool = False,
-) -> dict:
-    from smithtune.bindings import trajectory_bindings
-
-    body = {"project_id": project_id, item["key"]: item["id"],
-            # Tool definitions are opt-in on /v1/trajectory; per-assistant tools depend on them.
-            "format": "ui", "include": {"system_messages": True, "tool_definitions": True}}
-    items: list[dict] = []
-    for empty_attempt in range(1, EMPTY_TRAJECTORY_ATTEMPTS + 1):
-        items, rejection = _trajectory_items(workspace_id, dict(body), item, runner=runner)
-        if rejection is not None:
-            return rejection
-        if items or empty_attempt == EMPTY_TRAJECTORY_ATTEMPTS:
-            break
-        # Newly ingested runs can be queryable before /v1/trajectory indexes them.
-        _sleep(EMPTY_TRAJECTORY_BACKOFF_SECONDS * empty_attempt)
     if not items:
         if not retain_empty:
             raise PipelineError(f"{item['key']} {item['id']} returned no messages")

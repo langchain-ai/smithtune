@@ -126,34 +126,12 @@ def test_snapshot_expands_to_earlier_turns_without_persisting_raw_trees(tmp_path
     assert api.calls == []
 
 
-def test_trajectory_indexing_lag_is_retried_before_exclusion(tmp_path, monkeypatch):
-    api = API()
-    indexed = api.trajectory_pages
-    api.trajectory_pages = {None: {"messages": [], "next_cursor": None}}
-    delays = []
-
-    def index_after_wait(seconds):
-        delays.append(seconds)
-        api.trajectory_pages = indexed
-
-    monkeypatch.setattr(curation, "_sleep", index_after_wait)
-    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
-    unit, = frozen["units"]
-    assert unit["training_error"] is None
-    assert unit["example"]["inputs"]["messages"] == SYSTEM + messages(1) + messages(2)
-    assert delays == [curation.EMPTY_TRAJECTORY_BACKOFF_SECONDS]
-
-
-def test_empty_trajectory_is_rejected_without_stopping_pull_or_resume(tmp_path, monkeypatch):
+def test_empty_trajectory_is_rejected_without_stopping_pull_or_resume(tmp_path):
     api = API()
     api.trajectory_pages = {None: {"messages": [], "next_cursor": None}}
     api.root_pages[0].append({"trace_id": uid(3), "thread_id": None,
                              "start_time": "2026-09-02T01:00:00Z"})
-    delays = []
-    monkeypatch.setattr(curation, "_sleep", delays.append)
     frozen = triage_source.snapshot(source(), tmp_path, runner=api)
-    backoff = curation.EMPTY_TRAJECTORY_BACKOFF_SECONDS
-    assert delays == [backoff * n for n in range(1, curation.EMPTY_TRAJECTORY_ATTEMPTS)]
     empty, valid = frozen["units"]
     assert empty["example"]["inputs"]["messages"] == []
     assert empty["example"]["metadata"]["source_scope_id"] == "conversation-a"

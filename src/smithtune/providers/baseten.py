@@ -430,14 +430,11 @@ def retry_idempotent(operation: Any, *, sleeper: Any = time.sleep, attempts: int
     raise AssertionError("unreachable")
 
 
-def _trainer_creation_failure(failure: BaseException) -> BaseException:
-    """Repeat Baseten's reason when it refuses or cannot provision a trainer."""
-    try:
-        import httpx
-    except ImportError:
-        httpx = None
-    if httpx is not None and isinstance(failure, httpx.HTTPStatusError):
-        response = failure.response
+def _explain_trainer_creation_failure(failure: BaseException) -> BaseException:
+    # The Loops SDK raises its HTTP errors with the response attached; reading it
+    # directly avoids depending on the SDK's HTTP client library.
+    response = getattr(failure, "response", None)
+    if isinstance(getattr(response, "status_code", None), int):
         detail = _response_detail(response)
         status = response.status_code
         if status == 429:
@@ -1086,7 +1083,7 @@ class BasetenProvider:
                     name=run_id,
                 )
             except Exception as exc:
-                failure = _trainer_creation_failure(exc)
+                failure = _explain_trainer_creation_failure(exc)
                 if failure is exc:
                     raise
                 raise failure from exc
