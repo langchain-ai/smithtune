@@ -1,5 +1,5 @@
 <h1 align="center">smithtune</h1>
-
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/langchain-ai/smithtune)
 Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
 recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
 in LangSmith, then optionally deploy an endpoint for your application.
