@@ -1,0 +1,37 @@
+tests/test_langsmith_evaluation.py
+  s_564db78674c117::t_37d611b0093f75 785-812,816-884
+  s_564db78674c117::t_bbb2a5d84104f3 885-915
+  s_564db78674c117::t_af84533c7dca6d 948,950-959,962,969-970,972,974-976,978-984,986-987,990-991
+  s_564db78674c117::t_85c20cbbcf3273 949,960-961,963-968,971,973,977,988-989
+  s_564db78674c117::t_9884f2eb5692c4 101-102,113,759-763,769,916,930,932,935,942,1010-1011,1062,1074,1077-1080,1082,1086
+  s_564db78674c117::t_2db1c990101a12 813-815,985
+README.md
+  s_564db78674c117::t_f9c2315bad2047 211-214
+CONTRIBUTING.md
+  s_564db78674c117::t_f9c2315bad2047 15-21
+AGENTS.md
+  s_564db78674c117::t_f9c2315bad2047 43
+src/smithtune/evaluation/langsmith.py
+  s_564db78674c117::t_4b006954aa9c71 441,508,511-515,518
+  s_564db78674c117::t_f9c2315bad2047 455
+  s_564db78674c117::t_e7ba8fbe2fce18 291,431-432,440,442-448,450-451
+  s_564db78674c117::t_f5b2dc551467fa 297-298,383-391,480-491,495
+docs/reference.md
+  s_564db78674c117::t_f9c2315bad2047 137-143,184-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "89bd5f770e08011d6d63f31698707c5094080bdf",
+  "prompts": {},
+  "sessions": {
+    "s_564db78674c117": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08daa-3ed4-7110-8724-0884c8783afd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": null
+    }
+  }
+}

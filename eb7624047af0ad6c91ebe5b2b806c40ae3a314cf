@@ -1,0 +1,23 @@
+docs/reference.md
+  s_564db78674c117::t_e091169bb2bbf6 142
+CONTRIBUTING.md
+  s_564db78674c117::t_e091169bb2bbf6 16-17
+AGENTS.md
+  s_564db78674c117::t_e091169bb2bbf6 43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "eb7624047af0ad6c91ebe5b2b806c40ae3a314cf",
+  "prompts": {},
+  "sessions": {
+    "s_564db78674c117": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08daa-3ed4-7110-8724-0884c8783afd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Avi Kumar <avirath.kmr@gmail.com>"
+    }
+  }
+}
