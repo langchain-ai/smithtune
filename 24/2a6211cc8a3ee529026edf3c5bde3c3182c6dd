@@ -1,0 +1,19 @@
+README.md
+  s_47724934b0aa9f::t_49dbf59d740030 146-164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "242a6211cc8a3ee529026edf3c5bde3c3182c6dd",
+  "prompts": {},
+  "sessions": {
+    "s_47724934b0aa9f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e8c7-c32c-78a0-aa0e-88c2d8386386",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "j-broekhuizen <jb@langchain.dev>"
+    }
+  }
+}
