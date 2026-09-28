@@ -143,6 +143,25 @@ smithtune models list --provider "$provider"
 `qwen3p8-27b` works with both providers. Choose another supported model from the list;
 preparation selects its tokenizer and formatting.
 
+### Supported Models
+
+The following models are supported for fine-tuning:
+
+| Model | Fireworks training | Baseten training |
+| --- | --- | --- |
+| Qwen3.8 27B | ✓ | ✓ |
+| Kimi K3 | ✓ | ✓ |
+| DeepSeek V4 Flash 0731 | ✓ | — |
+| Muse Glimmer 30B | ✓ | — |
+| Qwen3.5 9B | — | ✓ |
+| GLM-5.3 Flash | — | ✓ |
+
+Run `smithtune models list --provider fireworks` or
+`smithtune models list --provider baseten` for the aliases and IDs supported by
+your installed version. See [Supported models](docs/reference.md#supported-models)
+for provider access requirements and the [deployment guide](docs/deployment.md)
+for serving options. Training support does not imply serverless inference availability.
+
 ## Create a dataset from trajectories
 
 Skip this step if you already have a LangSmith trajectory dataset. Otherwise,
