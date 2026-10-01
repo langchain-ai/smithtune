@@ -1146,16 +1146,23 @@ def test_growing_thread_with_incomplete_tool_exchange_is_filtered_before_judging
     assert result["filtered_training"] == 1 and result["kept"] == 1
 
 
-@pytest.mark.parametrize("foreign_source", ["trace", "thread"])
-def test_snapshot_still_rejects_foreign_source_evidence(tmp_path, foreign_source):
+def test_foreign_trace_evidence_excludes_only_that_trajectory(tmp_path):
     api = API()
-    if foreign_source == "trace":
-        api.trajectory_pages["next"]["messages"] += messages(3)
-        error = "trajectory evidence belongs to another trace"
-    else:
-        api.thread_roots[0]["thread_id"] = "another-thread"
-        error = "thread source query returned another thread"
-    with pytest.raises(PipelineError, match=error):
+    api.trajectory_pages["next"]["messages"] += messages(3)
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    assert (tmp_path / "snapshot.json").exists()
+    excluded = [u for u in frozen["units"] if u["training_error"]]
+    assert excluded and all("outside its source" in u["training_error"] for u in excluded)
+    assert all(u["example"]["metadata"].get("smithtune_source") is None for u in excluded)
+    assert all(u["example"]["inputs"]["messages"] == [] for u in excluded)
+    summary = dataset_workflow._download_summary(frozen)
+    assert summary["exclusion_reasons"].get("foreign_trace_evidence") == len(excluded)
+
+
+def test_snapshot_still_rejects_a_thread_query_for_another_thread(tmp_path):
+    api = API()
+    api.thread_roots[0]["thread_id"] = "another-thread"
+    with pytest.raises(PipelineError, match="thread source query returned another thread"):
         triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()
 

@@ -142,6 +142,8 @@ def _download_summary(frozen):
                     reason = "missing_tool_availability"
                 elif "unsupported available_tools" in error:
                     reason = "unsupported_tool_definitions"
+                elif "evidence from traces outside its source" in error:
+                    reason = "foreign_trace_evidence"
                 else:
                     reason = "other_structural_or_tool_error"
             reasons[reason] += 1

@@ -301,7 +301,11 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1, exte
             raise PipelineError("selected root was not found in its conversation")
         downloaded_traces = set(trajectory["trace_ids"])
         if not downloaded_traces <= set(source_traces):
-            raise PipelineError("trajectory evidence belongs to another trace")
+            # LangSmith can attribute runs to a thread whose root is outside this project.
+            # Never train on that evidence; exclude this trajectory, not the whole pull.
+            trajectory = {**trajectory, "messages": [], "source": None,
+                          "training_error": f"thread {thread} includes evidence from traces outside its source; whole trajectory excluded"}
+            downloaded_traces &= set(source_traces)
         # Empty/rejected payloads retain the selected root for recovery metadata.
         unit_traces = [trace_id for trace_id in source_traces if trace_id in downloaded_traces] or [tid]
         unit_records = [{"trace_id": trace_id, "thread_id": thread, "project_id": project} for trace_id in unit_traces]
