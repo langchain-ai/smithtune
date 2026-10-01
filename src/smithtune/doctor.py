@@ -1,7 +1,9 @@
 """Offline installation diagnostics. Never read or display credential values."""
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
@@ -19,6 +21,20 @@ CREDENTIALS = {
     "ANTHROPIC_API_KEY": "anthropic/<model> evaluation judges",
     "OPENAI_API_KEY": "the optional gpt-5.6-terra triage judge",
 }
+
+
+# `firectl deployment-shape-version match` first shipped in firectl 1.8.5.
+MIN_FIRECTL_SHAPE_MATCH = (1, 8, 5)
+
+
+def firectl_version() -> tuple[int, int, int] | None:
+    """Installed firectl version, parsed from `firectl version`."""
+    try:
+        result = subprocess.run(["firectl", "version"], capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    versions = re.findall(r"^\s*(\d+)\.(\d+)\.(\d+)\s*$", f"{result.stdout}\n{result.stderr}", re.M)
+    return tuple(int(part) for part in versions[-1]) if versions else None
 
 
 def diagnose() -> dict:
@@ -40,6 +56,10 @@ def diagnose() -> dict:
         tools[name] = {"available": available, "required_for": operations}
         if not available:
             tools[name]["help"] = INSTALL_HELP[name]
+    if tools["firectl"]["available"]:
+        installed = firectl_version()
+        tools["firectl"]["version"] = ".".join(map(str, installed)) if installed else None
+        tools["firectl"]["automatic_deployment_shapes"] = bool(installed and installed >= MIN_FIRECTL_SHAPE_MATCH)
     return {
         "python": sys.version.split()[0],
         "packages": packages,

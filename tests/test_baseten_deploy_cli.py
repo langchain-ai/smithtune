@@ -62,7 +62,6 @@ def test_baseten_deploy_rejects_missing_and_foreign_options(monkeypatch, capsys,
 
 @pytest.mark.parametrize("extra", [
     ["--accelerator", "H200:1"], ["--max-seq-len", "32768"],
-    ["--deployment-timeout", "1800"],
 ])
 def test_fireworks_rejects_baseten_deployment_options(capsys, extra):
     with pytest.raises(SystemExit):
@@ -78,7 +77,7 @@ def test_fireworks_deploy_and_undeploy_defaults_unchanged(monkeypatch):
               "--output-model-id", "model", "--deployment-id", "deployment",
               "--deployment-shape", "shape", "--confirm"])
     provider.deploy.assert_called_once_with(
-        Path("run"), "account", "model", "deployment", "shape", confirm=True,
+        Path("run"), "account", "model", "deployment", "shape", confirm=True, timeout=1800,
     )
     cli.main(["undeploy", "--account-id", "account", "--deployment-id", "deployment", "--confirm"])
     provider.undeploy.assert_called_once_with("account", "deployment", confirm=True)
