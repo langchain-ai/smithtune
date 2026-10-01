@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -32,6 +33,48 @@ def judge_endpoint(judge_model: str) -> str | None:
 
 
 REQUEST_TIMEOUT_SECONDS = 300
+
+
+def safe_inference_error(failure: BaseException) -> str:
+    """Describe request failures without echoing provider messages, URLs, or inputs."""
+    descriptions = {
+        "insufficient_quota": "provider quota or credit exhausted",
+        "rate_limit_exceeded": "provider rate limit exceeded",
+    }
+    seen = set()
+    error = failure
+    kind = type(failure).__name__
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        kind = type(error).__name__
+        status = getattr(error, "status_code", None)
+        body = getattr(error, "body", None)
+        if isinstance(error, urllib.error.HTTPError):
+            status = error.code
+            try:
+                # HTTPError retains the response stream even through a chained PipelineError.
+                with error:
+                    body = json.loads(error.read(8192))
+            except (OSError, ValueError, http.client.HTTPException):
+                body = None
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            detail = body.get("error", body) if isinstance(body, dict) else None
+            code = detail.get("code") if isinstance(detail, dict) else None
+            description = descriptions.get(code) if isinstance(code, str) else None
+            if description is None:
+                description = {
+                    401: "authentication failed", 402: "payment required", 403: "access denied",
+                    429: "provider rate or quota limit exceeded",
+                }.get(status, "provider request failed")
+            return f"{type(error).__name__}: {description} (HTTP {status})"
+        if isinstance(error, TimeoutError) or (
+            isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
+        ):
+            return "TimeoutError: provider request timed out"
+        if isinstance(error, urllib.error.URLError):
+            return "URLError: provider connection failed"
+        error = error.__cause__
+    return kind
 
 
 @dataclass(frozen=True)

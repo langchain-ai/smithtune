@@ -1,7 +1,9 @@
 
 from binding_fixtures import bound_row
 import copy
+import io
 import json
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -170,14 +172,22 @@ def test_saved_generations_resume_judging_without_reopening_session(tmp_path, mo
     def score(*args):
         nonlocal fail
         if calls and fail:
-            raise PipelineError("judge unavailable")
+            error = urllib.error.HTTPError(
+                "https://example.invalid/private", 429, "private provider message", {},
+                io.BytesIO(b'{"error":{"code":"insufficient_quota","message":"private prompt"}}'),
+            )
+            raise PipelineError("judge unavailable") from error
         return original_judge(*args)
 
     monkeypatch.setattr(evaluation, "judge_replay_candidate", score)
     options = dict(data_dir=data, output_dir=tmp_path / "replay", tuned_model=CHECKPOINT,
                    judge_model="judge", chat=judge, replay_sampler=Sampler(), confirm=True)
-    with pytest.raises(PipelineError, match="interrupted"):
+    with pytest.raises(PipelineError, match="interrupted") as failure:
         evaluation.run_replay_evaluation(**options)
+    assert "1 cases failed; 0/1 saved" in str(failure.value)
+    assert "provider quota or credit exhausted (HTTP 429)" in str(failure.value)
+    assert "same settings to resume" in str(failure.value)
+    assert "private" not in str(failure.value)
     assert calls == ["open", "generate", "close"]
     assert len(json.loads((tmp_path / "replay/generations.jsonl").read_text())["candidate"]) == 2
     fail = False

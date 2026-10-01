@@ -1051,7 +1051,8 @@ def test_replay_context_counts_tool_declarations(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("system_prompt", [None, "a different recorded policy"])
-def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy, system_prompt):
+@pytest.mark.parametrize("parsed_arguments", [False, True])
+def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy, system_prompt, parsed_arguments):
     data_dir = tmp_path / "data"
     contract = loaded_contract(tmp_path, legacy=legacy)
     write_manifest(data_dir, contract=contract)
@@ -1089,11 +1090,18 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
             evidence = json.loads(messages[1]["content"])
             candidate = evidence["candidate_next_action"]["tool_calls"][0]["function"]
             reference = evidence["untrusted_trajectory"]["reference_next_action"]["tool_calls"][0]["function"]
-            passed = candidate["name"] == reference["name"] and candidate["arguments"] == reference["arguments"]
+            arguments = candidate["arguments"]
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            passed = candidate["name"] == reference["name"] and arguments == json.loads(reference["arguments"])
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "tool check"})}
         assert messages == expected_prefix
         candidate_contracts.append(request_contract)
-        return tool_call("lookup" if model == "tuned-model" else "wrong")
+        candidate = tool_call("lookup" if model == "tuned-model" else "wrong")
+        if parsed_arguments:
+            function = candidate["tool_calls"][0]["function"]
+            function["arguments"] = json.loads(function["arguments"])
+        return candidate
 
     summary = replay.run_replay_evaluation(
         data_dir,
@@ -1203,7 +1211,8 @@ def test_replay_resume_rejects_a_different_model_set(
         )
 
 
-def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_path: Path):
+@pytest.mark.parametrize("parsed_arguments", [False, True])
+def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_path: Path, parsed_arguments):
     contract = loaded_contract(tmp_path)
     reference = tool_call("lookup")
     case = {
@@ -1211,13 +1220,17 @@ def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_pat
         "reference": reference,
     }
 
-    exact = replay.score_replay_candidate(case, copy.deepcopy(reference), contract)
+    candidate = copy.deepcopy(reference)
+    if parsed_arguments:
+        function = candidate["tool_calls"][0]["function"]
+        function["arguments"] = json.loads(function["arguments"])
+    exact = replay.score_replay_candidate(case, candidate, contract)
     wrong_name = replay.score_replay_candidate(case, tool_call("missing"), contract)
     malformed = tool_call("lookup")
     malformed["tool_calls"][0]["function"]["arguments"] = "not-json"
     malformed_score = replay.score_replay_candidate(case, malformed, contract)
     wrong_type = tool_call("lookup")
-    wrong_type["tool_calls"][0]["function"]["arguments"] = '{"query":1}'
+    wrong_type["tool_calls"][0]["function"]["arguments"] = {"query": 1} if parsed_arguments else '{"query":1}'
     wrong_type_score = replay.score_replay_candidate(case, wrong_type, contract)
     text_score = replay.score_replay_candidate(
         case,
