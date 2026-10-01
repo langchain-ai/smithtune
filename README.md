@@ -14,8 +14,8 @@ Install the CLI with [uv](https://docs.astral.sh/uv/getting-started/installation
 
 ```bash
 uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.1/overrides.txt \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.1'
 ```
 
 Install the smithtune skill so your coding agent (Claude Code, Codex, Cursor, and
