@@ -20,8 +20,8 @@ Add the deployment tools, keeping the council support from the README installati
 
 ```bash
 uv tool install --force --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
-  'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.1/overrides.txt \
+  'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.1'
 ```
 
 Set `BASETEN_API_KEY`; the default judge also uses it. Evaluation also requires

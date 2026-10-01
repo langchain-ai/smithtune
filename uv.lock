@@ -2484,7 +2484,7 @@ wheels = [
 
 [[package]]
 name = "smithtune"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "baseten-loops" },

@@ -171,13 +171,13 @@ the smithtune artifacts and matching `overrides.txt` for inspection.
 ## Releases from GitHub
 
 Merge the changes and let CI pass. Set the version in `pyproject.toml`, regenerate
-`uv.lock`, and tag the tested commit (for example, `v0.1.0`). Customers install that
+`uv.lock`, and tag the tested commit (for example, `v0.1.1`). Customers install that
 tag directly, and the README quickstart pins the same tag (update both URLs there when releasing):
 
 ```bash
 uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.1/overrides.txt \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.1'
 ```
 
 The example tag must be created before this command works. Repeat the command with
