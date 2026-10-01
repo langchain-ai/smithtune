@@ -1,9 +1,12 @@
 """Deployment composes checkpoint promotion without repeating successful writes."""
 import json
+import subprocess
+import sys
 
 import pytest
 
 from firectl_fakes import FakeFirectl, shape
+from smithtune.artifacts import _run
 from smithtune.providers import fireworks
 from smithtune.providers.base import PipelineError
 
@@ -167,6 +170,7 @@ def test_deploy_matches_a_validated_shape_after_promotion(deployment, monkeypatc
     endpoint = deploy_matched(directory)
     match = next(c for c in firectl.commands if c[1:3] == ["deployment-shape-version", "match"])
     assert match[-4:] == ["--model", "accounts/account-id/models/model-id", "-o", "json"]
+    assert match[match.index("--account-id") + 1] == "account-id"
     # The model is promoted before matching, and the first validated shape is used.
     assert [e[0] for e in events] == ["promote", "close", "deploy"]
     create = events[-1][1]
@@ -217,6 +221,61 @@ def test_deploy_preview_shows_the_shape_without_creating_resources(deployment, m
     preview = fireworks.FireworksProvider().deploy(directory, "account-id", "model-id", "endpoint-id", confirm=False)
     assert preview["promotion"] == "saved" and preview["deployment_shape"]["display_name"] == "Base 1x H100"
     assert events == [] and not any(c[1:3] == ["deployment", "create"] for c in firectl.commands)
+    match = next(c for c in firectl.commands if c[1:3] == ["deployment-shape-version", "match"])
+    assert match[match.index("--account-id") + 1] == "account-id"
+
+
+def test_creation_and_polling_share_timeout_and_save_receipt_before_polling(deployment, monkeypatch):
+    directory, _ = deployment
+    now = [0.0]
+    firectl = FakeFirectl()
+    monkeypatch.setattr(fireworks.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(fireworks.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    budgets = []
+
+    def run(command, **kwargs):
+        budgets.append(kwargs["timeout"])
+        if command[1:3] == ["deployment", "create"]:
+            assert "--wait" not in command
+            now[0] += 40
+            return firectl(command, **kwargs)
+        assert command[1:3] == ["deployment", "get"]
+        assert json.loads((directory / "endpoint.json").read_text())["smoke_test"]["status"] == "pending"
+        # A blocked status request consumes only the remainder of the shared budget.
+        now[0] += kwargs["timeout"]
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(fireworks, "_run", run)
+    monkeypatch.setattr(fireworks, "_inference_smoke_test", lambda _: pytest.fail("must not smoke test after timeout"))
+    with pytest.raises(PipelineError, match="within 60s of creation.*smithtune undeploy"):
+        deploy(directory, timeout=60)
+    assert budgets == [60, 20]
+    assert now[0] == 60
+
+
+def test_creation_timeout_records_unknown_outcome_without_retry(deployment, monkeypatch):
+    directory, _ = deployment
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[1:3] == ["deployment", "create"]
+        assert kwargs["timeout"] == 60
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(fireworks, "_run", run)
+    monkeypatch.setattr(fireworks, "_inference_smoke_test", lambda _: pytest.fail("must not smoke test after timeout"))
+    with pytest.raises(PipelineError, match="outcome is unknown.*Inspect.*before retrying.*smithtune undeploy"):
+        deploy(directory, timeout=60)
+    receipt = json.loads((directory / "endpoint.json").read_text())
+    assert receipt["creation_status"] == "unknown"
+    assert receipt["deployment"] == "accounts/account-id/deployments/endpoint-id"
+    assert len(calls) == 1
+
+
+def test_subprocess_runner_enforces_timeout():
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run([sys.executable, "-c", "import time; time.sleep(30)"], capture=True, timeout=0.1)
 
 
 def test_agent_block_hands_the_exact_deploy_command_to_the_user(deployment, monkeypatch):

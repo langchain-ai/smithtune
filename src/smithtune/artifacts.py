@@ -105,7 +105,8 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         raise PipelineError(f"cannot read valid JSONL from {path}: {exc}") from exc
 
 
-def _run(command: list[str], *, capture: bool = False, input: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(command: list[str], *, capture: bool = False, input: str | None = None,
+         timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             command,
@@ -113,6 +114,7 @@ def _run(command: list[str], *, capture: bool = False, input: str | None = None)
             text=True,
             capture_output=capture,
             input=input,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         help_text = INSTALL_HELP.get(command[0], f"Install {command[0]} and ensure it is on PATH")

@@ -133,7 +133,7 @@ smithtune deploy --provider fireworks \
 **Deployment shape.** A shape fixes the hardware and serving configuration. By
 default, `deploy` promotes the checkpoint first (the model must exist before
 Fireworks can match shapes for it), then runs
-`firectl deployment-shape-version match --model accounts/<account>/models/<output-model-id>`
+`firectl deployment-shape-version match --account-id <account> --model accounts/<account>/models/<output-model-id>`
 and uses the first validated shape it returns. That list is already restricted to
 shapes your account can deploy and excludes Multi-LoRA-only shapes, so it fits a
 live-merge deployment. The chosen shape and the alternatives are saved in
@@ -153,9 +153,11 @@ lets agents delete deployments, even on agent-safe accounts, so `undeploy`
 always needs a person.
 
 **Readiness.** A deployment can report `READY` while still waiting for capacity.
-`deploy` waits until `replica_stats.ready_replica_count > 0` (up to
-`--deployment-timeout`, default 1800 seconds) before its smoke test. If no replica
-becomes ready in time, it stops and prints the `undeploy` command.
+`deploy` waits until `replica_stats.ready_replica_count > 0` before its smoke test.
+`--deployment-timeout` (default 1800 seconds) covers deployment creation and
+readiness polling together, after promotion and shape selection. If startup times
+out, it saves the endpoint details and prints cleanup guidance. A creation timeout
+has an unknown outcome: inspect the deployment before retrying.
 
 `--account-id` must be the account that owns the training checkpoint. A matching
 saved promotion is reused. If deployment creation fails after promotion
