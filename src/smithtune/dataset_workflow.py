@@ -17,6 +17,12 @@ from smithtune.providers.base import PipelineError
 STAGES = ("pull", "triage", "push")
 SOURCE_FLAGS = ("workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates")
 COUNCIL_FLAGS = ("judges", "rules", "config_path", "rubric_path", "runner_mode", "concurrency", "attempts", "max_output_tokens")
+# Scheduling only: changing these never changes what a vote means, so saved votes stay valid.
+RUNTIME_COUNCIL_SETTINGS = ("concurrency", "attempts")
+
+
+def _vote_settings(settings):
+    return {key: value for key, value in settings.items() if key not in RUNTIME_COUNCIL_SETTINGS}
 
 
 def _open(directory, command, options):
@@ -92,7 +98,8 @@ def _settings(directory, checkpoint, command, options):
     if "triage" in stages:
         if state["council"] is None or has_council_options:
             settings = triage.council_settings(directory, saved_settings=state["council"], **({key: options.get(key) for key in COUNCIL_FLAGS} if command == "triage" else {}))
-            if state["council"] is not None and settings != state["council"] and (directory / "triage-config.json").exists():
+            if (state["council"] is not None and _vote_settings(settings) != _vote_settings(state["council"])
+                    and (directory / "triage-config.json").exists()):
                 raise PipelineError("council settings conflict with saved votes; use a new directory")
             state["council"] = settings
         state["selection"] = {"mode": "council", "reason": "Filters select candidates; the council applies the judging criteria."}
