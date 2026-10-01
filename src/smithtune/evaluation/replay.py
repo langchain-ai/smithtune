@@ -25,7 +25,7 @@ from smithtune.dataset import (
 )
 from smithtune.artifacts import exclusive_output
 from smithtune.inference import (
-    ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection, judge_endpoint,
+    ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection, judge_endpoint, safe_inference_error,
     _baseten_chat_completion, _chat_completion, _inference_messages,
 )
 from smithtune.inference_contract import ContractError, InferenceContract
@@ -384,7 +384,10 @@ def _tool_call_details(message: dict[str, Any]) -> tuple[bool, list[dict[str, An
         raw_arguments = function.get("arguments") if isinstance(function, dict) else None
         parsed_arguments: Any = None
         arguments_json_valid = False
-        if isinstance(raw_arguments, str):
+        if isinstance(raw_arguments, dict):
+            parsed_arguments = raw_arguments
+            arguments_json_valid = True
+        elif isinstance(raw_arguments, str):
             try:
                 parsed_arguments = json.loads(raw_arguments)
                 arguments_json_valid = True
@@ -838,7 +841,11 @@ def run_replay_evaluation(
                     for future in futures:
                         future.cancel()
                 if errors:
-                    raise PipelineError(f"evaluation interrupted: {len(errors)} cases failed; {len(results)}/{len(cases)} saved; rerun to resume") from errors[0]
+                    raise PipelineError(
+                        f"evaluation interrupted: {len(errors)} cases failed; {len(results)}/{len(cases)} saved.\n"
+                        f"First failure: {safe_inference_error(errors[0])}.\n"
+                        "Resolve the error, then rerun with the same settings to resume."
+                    ) from errors[0]
         except BaseException:
             _json_dump(state_path, {"status": "interrupted", "completed": len(results), "total": len(cases)})
             raise
