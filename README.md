@@ -1,7 +1,7 @@
 <h1 align="center">smithtune</h1>
 
 <div align="center">
-<a  href="https://deepwiki.com/langchain-ai/smithtune"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+<a href="https://deepwiki.com/langchain-ai/smithtune"><img src="docs/assets/deepwiki-badge.svg" alt="Ask DeepWiki"></a>
 </div>
 
 Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
