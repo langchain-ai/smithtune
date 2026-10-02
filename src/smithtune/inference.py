@@ -13,7 +13,7 @@ from typing import Any
 
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.capabilities import open_without_redirects
-from smithtune.providers.base import PipelineError
+from smithtune.providers.base import PipelineError, require_baseten_key
 from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
 
 
@@ -197,9 +197,7 @@ def _baseten_chat_completion(
     endpoint: BasetenEndpoint,
 ) -> dict[str, Any]:
     endpoint.validate()
-    key = os.environ.get("BASETEN_API_KEY")
-    if not key or not key.strip():
-        raise PipelineError("BASETEN_API_KEY is not set")
+    key = require_baseten_key()
     body = _chat_request_body(model, messages, max_tokens, json_mode, request_contract)
     request = urllib.request.Request(
         endpoint.url, data=json.dumps(body).encode(), method="POST",
@@ -215,9 +213,7 @@ def _baseten_model_api_completion(
     max_tokens: int,
     json_mode: bool = False,
 ) -> dict[str, Any]:
-    key = os.environ.get("BASETEN_API_KEY")
-    if not key or not key.strip():
-        raise PipelineError("BASETEN_API_KEY is not set for the judge")
+    key = require_baseten_key(purpose="judge")
     body = _chat_request_body(model, messages, max_tokens, json_mode, None)
     request = urllib.request.Request(
         BASETEN_MODEL_API_URL + "/chat/completions", data=json.dumps(body).encode(), method="POST",
