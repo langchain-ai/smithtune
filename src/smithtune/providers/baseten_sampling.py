@@ -16,7 +16,7 @@ from typing import Any
 from smithtune.artifacts import _json_dump, _load_json, _utc_now
 from smithtune.capabilities import open_without_redirects
 from smithtune.dataset import _model_from_manifest, _require_prepared_provider
-from smithtune.providers.base import PipelineError
+from smithtune.providers.base import PipelineError, require_baseten_key
 from smithtune.rendering import load_training_renderer
 
 
@@ -51,9 +51,7 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, str]:
 
 def _request(method: str, path: str, body: dict | None = None) -> dict:
     """Control-plane writes are attempted once; ambiguous outcomes need reconciliation."""
-    key = os.environ.get("BASETEN_API_KEY", "").strip()
-    if not key:
-        raise PipelineError("BASETEN_API_KEY is not set")
+    key = require_baseten_key()
     request = urllib.request.Request(
         API_ROOT + path, method=method,
         data=json.dumps(body).encode() if body is not None else None,
@@ -74,8 +72,7 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
 
 class _SamplerService:
     def __init__(self):
-        if not os.environ.get("BASETEN_API_KEY", "").strip():
-            raise PipelineError("BASETEN_API_KEY is not set")
+        require_baseten_key()
         if any(name.startswith("LOOPS_REUSE_") for name in os.environ):
             raise PipelineError("Baseten replay rejects Loops resource-reuse overrides")
         if os.environ.get("LOOPS_BASE_URL", API_ROOT).rstrip("/") != API_ROOT:

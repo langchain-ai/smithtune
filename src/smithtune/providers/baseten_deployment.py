@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import shlex
 import time
@@ -20,7 +19,7 @@ from smithtune.providers.baseten_truss import prepare_deployment
 from smithtune.capabilities import open_without_redirects
 from smithtune.inference import BasetenEndpoint, _baseten_chat_completion
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
-from smithtune.providers.base import PipelineError
+from smithtune.providers.base import PipelineError, require_baseten_key
 from smithtune.providers.fireworks import _require_confirm
 
 
@@ -32,9 +31,7 @@ class ControlError(PipelineError):
 
 
 def _request(method: str, path: str, *, endpoint: BasetenEndpoint | None = None) -> dict:
-    key = os.environ.get("BASETEN_API_KEY", "").strip()
-    if not key:
-        raise PipelineError("BASETEN_API_KEY is not set")
+    key = require_baseten_key()
     origin = "https://api.baseten.co" if endpoint is None else endpoint.url.removesuffix("/chat/completions")
     request = urllib.request.Request(origin + path, method=method,
                                     headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
