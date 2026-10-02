@@ -9,7 +9,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 import urllib.error
@@ -420,15 +419,11 @@ class FireworksProvider:
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
         if replay is not None:
-            from smithtune.evaluation.replay import prepare_replay_evaluation
+            from smithtune.evaluation.replay import preview_replay_for_plan
 
-            if replay["concurrency"] < 1:
-                raise PipelineError("evaluation concurrency must be positive")
-            with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
-                preview = prepare_replay_evaluation(
-                    data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
-                )
-            value["replay"] = {**preview, **replay, "serving_mode": "serverless", "evaluated_models": 2}
+            value["replay"] = preview_replay_for_plan(
+                data_dir, replay, {"serving_mode": "serverless", "evaluated_models": 2},
+            )
         return value
 
     def train(
