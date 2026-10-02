@@ -9,7 +9,6 @@ import os
 import random
 import re
 import signal
-import tempfile
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
@@ -833,18 +832,14 @@ class BasetenProvider:
         }
 
         if replay is not None:
-            from smithtune.evaluation.replay import prepare_replay_evaluation
+            from smithtune.evaluation.replay import preview_replay_for_plan
 
-            if replay["concurrency"] < 1:
-                raise PipelineError("evaluation concurrency must be positive")
-            with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
-                preview = prepare_replay_evaluation(
-                    data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
-                )
-            value["replay"] = {**preview, **replay, "serving_mode": "sampler", "evaluated_models": 2,
-                               "capacity": "dedicated", "timing": "after trainer shutdown",
-                               "cleanup": "deactivate both sampler deployments on exit",
-                               "budget": "sampler and judge costs are separate from the training budget"}
+            value["replay"] = preview_replay_for_plan(
+                data_dir, replay, {"serving_mode": "sampler", "evaluated_models": 2,
+                                   "capacity": "dedicated", "timing": "after trainer shutdown",
+                                   "cleanup": "deactivate both sampler deployments on exit",
+                                   "budget": "sampler and judge costs are separate from the training budget"},
+            )
         return value
 
     def train(
