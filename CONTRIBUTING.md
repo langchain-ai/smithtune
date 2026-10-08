@@ -102,6 +102,25 @@ JSONL dataset and batching; changing only preparation masks is insufficient.
 Regression coverage includes actual loader masks, tool additions/removals/schema
 changes, local upload/prepare roundtrips, and capture checkpoint recovery.
 
+## Vertex / Hugging Face implementation structure
+
+Vertex support is an internal scaffold and is not registered as a supported CLI
+provider. `providers/vertex.py` composes a cloud-independent `SFTJobSpec` from
+`training/spec.py` with a concrete `VertexExecutionSpec` from
+`execution/vertex.py`. The latter describes one multi-GPU machine; it does not
+submit jobs or establish model/hardware compatibility.
+
+`training/hf_sft.py` converts the existing HF renderer's token IDs and binary
+weights into unshifted trainer labels, excluding context from loss. Keep model
+loading and optimization in the recipe, cloud lifecycle operations in the
+executor, and replay integration in `providers/vertex_sampling.py`. Preserve
+shared target construction and rendering rather than introducing a separate
+Vertex data format. No training loop or inference runtime is implemented yet.
+
+Qualify a model/runtime configuration and implement the provider lifecycle before
+adding Vertex to the provider registry. Keep cloud SDK and GPU runtime imports
+out of the shared contracts and preserve the existing managed-provider behavior.
+
 ## Dependency compatibility
 
 Transformers is pinned to the patched `5.10.4`. The upstream Fireworks cookbook
