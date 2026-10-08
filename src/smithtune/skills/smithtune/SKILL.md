@@ -120,11 +120,37 @@ From the output, write down what actually exists:
   `user_thumbs` 0/1) and how many roots have each key;
 - how many roots errored.
 
+**Inspect relevant online evaluators when they exist.** Before treating their
+feedback as a trusted selection signal, inspect:
+- the evaluation criteria, output schema, emitted feedback key, and score
+  direction—what constitutes a pass or failure;
+- what is evaluated: an input, output, individual run or action, tool behavior,
+  complete trace, or conversation/thread;
+- configured sampling and filters, and observed feedback coverage within the
+  requested time window; distinguish root feedback from child-run feedback;
+- whether the signal measures correctness or another task requirement, or
+  infers quality indirectly, such as from apparent user satisfaction.
+
+Check a few high/low or pass/fail scored examples against the criteria. If a
+signal's meaning cannot be established, or its definition conflicts with
+recorded scores, explain the uncertainty before recommending it as a selection
+condition. Assess whether the signal covers the behavior the model will learn;
+a positive score on one output or action does not validate the whole training
+trajectory.
+
+Present the relevant signals, their meaning and coverage, and any uncertainty
+before recommending selection conditions or council review. These checks apply
+to both conversational projects and mechanical workflows; use the project's
+actual task requirements rather than assuming dialogue or user reactions.
+
 **1c. Agree with the user what "good training data" means**, then map it to
 those fields. Ask:
-- Which agent (root name) should the model imitate?
-- Is there feedback that means the run was good? Which key, and what score
-  counts as good? What fraction of traces have it?
+- Which agent, workflow, or task (root name) should the model imitate?
+- Is there feedback that means the run was good? Which keys and values or
+  thresholds indicate good examples? What fraction of traces have each signal?
+- If combining feedback conditions, must all or any positive conditions match?
+  Which failure signals exclude candidates, and how should missing scores be
+  handled? Treat missing scores as unknown until that choice is agreed.
 - Any environment, version, or tag restrictions (e.g. production only, after a
   prompt change)?
 - What time window?
@@ -144,6 +170,13 @@ Common building blocks:
 | Good feedback | `and(eq(feedback_key, "correctness"), gte(feedback_score, 0.9))` |
 | One known root | `eq(id, "<root-run-id>")` (time bounds must include it) |
 | Combine | `and(eq(name, "support-agent"), has(tags, "production"))` |
+
+Feedback conditions may combine several keys: require multiple positive
+signals, accept alternative positive signals, or exclude known failures.
+Keep each feedback key paired with its own value or threshold, then test the
+combined filter against actual returned scores. Measure how the combination
+changes coverage; multiple matching roots in one thread may still produce only
+one training trajectory.
 
 **1e. Test the filter before pulling.** `langsmith trace list --filter` takes
 the same syntax and costs nothing. Use the same window you will pull:
@@ -181,8 +214,15 @@ fixed for the directory, so settle it now. Explain both options:
 
 Recommend one based on what you found in step 1: if the user's quality signal
 is real and well covered, suggest no review; if not, suggest council review.
-An agent-name filter or "no errors" alone is not a quality signal. Let the user
-decide, and record the choice.
+An agent-name filter or "no errors" alone is not a quality signal.
+
+Existing quality proxies can also prefilter candidates before council review,
+even when they are insufficient to justify skipping review. Explain this option
+when relevant, including how unscored candidates would be handled. The source
+selection can therefore use trusted feedback without council review, feedback
+prefiltering plus council review, or council review without a feedback
+prefilter. Let the user decide, and record both the selection conditions and
+the review choice.
 
 Because omitting the flag means council review, always pass `--no-triage`
 explicitly when the user chose no review.
