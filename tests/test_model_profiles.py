@@ -5,7 +5,8 @@ from dataclasses import asdict, replace
 import pytest
 
 from smithtune.models import resolve_prepared_model
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 from smithtune.rendering import validate_model_context
 

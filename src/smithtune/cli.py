@@ -20,18 +20,19 @@ from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
 from smithtune.inference import ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection
-from smithtune.providers.baseten import (
+from smithtune.providers.baseten.provider import (
     MODEL_SPECS as BASETEN_MODEL_SPECS,
     BasetenRuntimeError,
     BasetenSFTSettings,
 )
-from smithtune.providers.fireworks import (
+from smithtune.providers.fireworks.provider import (
     MODEL_SPECS as FIREWORKS_MODEL_SPECS,
     FireworksProvider,
     SFTSettings as FireworksSFTSettings,
 )
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
-from smithtune.providers import PROVIDERS, baseten_deployment, get_provider
+from smithtune.providers import PROVIDERS, get_provider
+from smithtune.providers.baseten import deployment as baseten_deployment
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
@@ -439,7 +440,7 @@ def _run_temporary_evaluation(args, temporary_plan: dict) -> dict:
 
 
 def _run_fireworks_evaluation(args):
-    from smithtune.providers.fireworks_sampling import FireworksReplaySampler, checkpoint_from_run
+    from smithtune.providers.fireworks.sampling import FireworksReplaySampler, checkpoint_from_run
 
     if args.serving_mode not in (None, "existing", "sampler") or any(value is not None for value in (
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
@@ -480,7 +481,7 @@ def _run_fireworks_evaluation(args):
 
 
 def _run_baseten_sampler_evaluation(args):
-    from smithtune.providers.baseten_sampling import BasetenReplaySampler, checkpoint_from_run
+    from smithtune.providers.baseten.sampling import BasetenReplaySampler, checkpoint_from_run
 
     if any(value is not None for value in (
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,

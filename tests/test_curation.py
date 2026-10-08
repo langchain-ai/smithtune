@@ -16,7 +16,7 @@ from smithtune import dataset
 from smithtune.dataset_artifacts import load_conversation
 from smithtune import cli as pipeline
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import DEFAULT_MODEL
+from smithtune.providers.fireworks.provider import DEFAULT_MODEL
 from trajectory_fixtures import items
 from smithtune.bindings import trajectory_bindings
 

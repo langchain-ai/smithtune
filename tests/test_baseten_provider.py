@@ -13,7 +13,7 @@ import urllib.error
 import pytest
 
 from smithtune import dataset
-from smithtune.providers import baseten
+from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
 
 

@@ -8,7 +8,7 @@ their existing TrainingProvider implementations.
 
 from dataclasses import dataclass, field
 
-from smithtune.execution.vertex import VertexExecutionSpec
+from smithtune.providers.vertex.execution import VertexExecutionSpec
 from smithtune.training.spec import SFTJobSpec
 
 

@@ -21,7 +21,8 @@ from smithtune import inference as inference_transport
 from smithtune import inference_contract
 from smithtune import cli as pipeline
 from smithtune import rendering
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import ModelSpec, PipelineError
 
 
@@ -1880,7 +1881,7 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
 
 
 def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import smithtune.providers.fireworks_training as runtime
+    import smithtune.providers.fireworks.training as runtime
 
     metadata_calls = []
     renderer_calls = []

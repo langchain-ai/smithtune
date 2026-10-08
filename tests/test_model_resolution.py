@@ -10,7 +10,8 @@ import pytest
 
 from smithtune import capabilities, cli
 from smithtune.models import resolve_model_options
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import ModelOptions, PipelineError
 
 

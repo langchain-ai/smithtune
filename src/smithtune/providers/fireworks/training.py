@@ -16,7 +16,7 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _utc_now
-from smithtune.providers.fireworks_sampling import create_service
+from smithtune.providers.fireworks.sampling import create_service
 from smithtune.providers.base import PipelineError
 
 
@@ -83,7 +83,7 @@ class ServerlessTraining:
         from training.utils.checkpoints import TrainingCheckpoints
         from training.utils.serverless import ServerlessCheckpointClient
         from training.utils.runner_state import start_running
-        from smithtune.providers.fireworks import CLIENT_SOURCE, FIREWORKS_BASE_URL
+        from smithtune.providers.fireworks.provider import CLIENT_SOURCE, FIREWORKS_BASE_URL
 
         try:
             self.runner = self._stack.enter_context(RunnerIO(self.cfg.runner))
@@ -138,7 +138,7 @@ class ServerlessTraining:
         from training.utils import DEFAULT_ADAM
         from training.utils.client import DEFAULT_TIMEOUT_S
         from training.utils.runner_state import write_running_step
-        from smithtune.providers.fireworks import _epoch_checkpoints
+        from smithtune.providers.fireworks.provider import _epoch_checkpoints
 
         self.generator.manual_seed(self.cfg.seed + epoch - 1)
         pending = deque()

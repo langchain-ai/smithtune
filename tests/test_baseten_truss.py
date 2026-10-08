@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from smithtune.providers import baseten_truss
+from smithtune.providers.baseten import truss as baseten_truss
 from smithtune.providers.base import PipelineError
 
 

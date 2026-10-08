@@ -56,11 +56,12 @@ def test_roundtrip_bindings_and_replay_original_positions():
 
 @pytest.mark.parametrize('provider', ['fireworks', 'baseten'])
 def test_actual_provider_training_and_validation_targets(provider, monkeypatch):
-    from smithtune.providers import fireworks, baseten
+    from smithtune.providers.fireworks import provider as fireworks
+    from smithtune.providers.baseten import provider as baseten
     from smithtune.hf_rendering import HFRenderer
     from training.renderer import get_renderer
     from training.recipes import sft_loop
-    from smithtune.providers.fireworks_training import _render_conversation
+    from smithtune.providers.fireworks.training import _render_conversation
 
     row, = prepare_sft_rows([example()[0]])
     model = fireworks.DEFAULT_MODEL if provider == 'fireworks' else baseten.DEFAULT_MODEL
@@ -137,8 +138,8 @@ def test_fireworks_real_loader_and_eager_validation_share_target_masks(tmp_path,
     from training.renderer import get_renderer
     from training.recipes import sft_loop
     from training.utils import resource_autosizing
-    from smithtune.providers.fireworks import DEFAULT_MODEL
-    from smithtune.providers.fireworks_training import ServerlessTraining
+    from smithtune.providers.fireworks.provider import DEFAULT_MODEL
+    from smithtune.providers.fireworks.training import ServerlessTraining
     row, = prepare_sft_rows([example()[0]])
     tokenizer = CharacterTokenizer()
     renderer = get_renderer(DEFAULT_MODEL.renderer, tokenizer)

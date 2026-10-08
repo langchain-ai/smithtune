@@ -15,7 +15,7 @@ from smithtune.bindings import evidence_hash, read_bindings, tool_contract
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import DEFAULT_MODEL
+from smithtune.providers.fireworks.provider import DEFAULT_MODEL
 from trajectory_fixtures import items
 
 

@@ -12,7 +12,8 @@ import pytest
 
 from smithtune import dataset, hf_rendering, rendering
 from smithtune.native_rendering import NativePrefixRenderer
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 from test_hf_rendering import MESSAGES, TOOLS, _loss_spans, _tokenizer
 

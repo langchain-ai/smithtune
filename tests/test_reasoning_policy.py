@@ -11,7 +11,8 @@ from smithtune.evaluation import replay as evaluation
 from smithtune import inference
 from smithtune import cli as pipeline
 from smithtune.models import resolve_prepared_model
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 from test_pipeline import example, loaded_contract, message, write_raw
 

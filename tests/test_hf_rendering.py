@@ -17,7 +17,8 @@ from transformers import PreTrainedTokenizerFast
 
 from smithtune import hf_rendering, rendering
 from smithtune.hf_rendering import HFRenderer, template_sha256
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 
 

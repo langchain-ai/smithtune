@@ -13,7 +13,7 @@ from typing import Any
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.capabilities import open_without_redirects
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL
+from smithtune.providers.fireworks.provider import CLIENT_SOURCE, INFERENCE_URL
 
 
 ANTHROPIC_ENDPOINTS = {

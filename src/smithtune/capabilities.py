@@ -165,7 +165,7 @@ def preflight_model(
     if not _positive_integer(context) or context > model.training_context_limit:
         raise PipelineError("required training context is outside the selected model limit")
     if model.provider == "baseten":
-        from smithtune.providers.baseten import _validate_capability, fetch_model_capability
+        from smithtune.providers.baseten.provider import _validate_capability, fetch_model_capability
 
         if model.base_model not in BASETEN_CROSS_ENTROPY_MODELS:
             raise PipelineError("Baseten cross-entropy training compatibility is unverified for this model")

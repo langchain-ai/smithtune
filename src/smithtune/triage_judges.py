@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 
 from smithtune.inference import ANTHROPIC_ENDPOINTS, _anthropic_chat_completion, _post_json
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import CLIENT_SOURCE, INFERENCE_URL, _set_skill_session
+from smithtune.providers.fireworks.provider import CLIENT_SOURCE, INFERENCE_URL, _set_skill_session
 
 
 PROVIDERS = ("fireworks", "baseten", "openai", "anthropic", "anthropic-gateway")

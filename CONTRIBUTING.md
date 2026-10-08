@@ -5,7 +5,11 @@ pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
 is maintained here, and there is no bootstrap step.
 
 Provider-specific training, sampling, and deployment modules live under
-`src/smithtune/providers/`. Shared rendering stays in `src/smithtune/`; replay orchestration lives in
+`src/smithtune/providers/<provider>/`. Each provider package has a lightweight
+`__init__.py` and a `provider.py` implementation selected by the lazy registry.
+Provider-specific execution and serving helpers stay in the same package;
+cloud-independent HF recipes stay in `src/smithtune/training/`.
+Shared rendering stays in `src/smithtune/`; replay orchestration lives in
 `src/smithtune/evaluation/replay.py`.
 
 `evaluation/langsmith.py` publishes versioned splits, saved replay predictions,
@@ -22,17 +26,17 @@ evaluation always verifies its dataset snapshot and publishes results.
 Cover both sampler providers, endpoint cleanup, and saved-generation recovery
 when changing this integration.
 
-`providers/fireworks_training.py` keeps one serverless session across epochs and optional
+`providers/fireworks/training.py` keeps one serverless session across epochs and optional
 replay. It uses the pinned cookbook's rendering, data loader, validation,
-optimizer, and checkpoint helpers. `providers/fireworks_sampling.py` uses the official
+optimizer, and checkpoint helpers. `providers/fireworks/sampling.py` uses the official
 Training API sampler and the same renderer for replay. When changing these
 adapters, check checkpoint selection, session cleanup, tool parsing, and replay
 recovery from saved generations.
 
-`providers/baseten_sampling.py` uses the Loops sampler REST endpoint to save resource IDs
+`providers/baseten/sampling.py` uses the Loops sampler REST endpoint to save resource IDs
 before the SDK readiness wait, then samples through `baseten-loops`. Closing the
 SDK client does not release GPUs: deactivate each owned deployment explicitly.
-`providers/baseten_sampling_formats.py` parses the pinned official model formats without a
+`providers/baseten/sampling_formats.py` parses the pinned official model formats without a
 Fireworks renderer dependency. Test native-tokenizer roundtrips, malformed tool
 calls, best-checkpoint identity, cleanup failures, and cached-generation resume
 when changing either adapter. These offline checks do not replace a paid sampler
@@ -105,15 +109,15 @@ changes, local upload/prepare roundtrips, and capture checkpoint recovery.
 ## Vertex / Hugging Face implementation structure
 
 Vertex support is an internal scaffold and is not registered as a supported CLI
-provider. `providers/vertex.py` composes a cloud-independent `SFTJobSpec` from
+provider. `providers/vertex/provider.py` composes a cloud-independent `SFTJobSpec` from
 `training/spec.py` with a concrete `VertexExecutionSpec` from
-`execution/vertex.py`. The latter describes one multi-GPU machine; it does not
+`providers/vertex/execution.py`. The latter describes one multi-GPU machine; it does not
 submit jobs or establish model/hardware compatibility.
 
 `training/hf_sft.py` converts the existing HF renderer's token IDs and binary
 weights into unshifted trainer labels, excluding context from loss. Keep model
 loading and optimization in the recipe, cloud lifecycle operations in the
-executor, and replay integration in `providers/vertex_sampling.py`. Preserve
+executor, and replay integration in `providers/vertex/sampling.py`. Preserve
 shared target construction and rendering rather than introducing a separate
 Vertex data format. No training loop or inference runtime is implemented yet.
 

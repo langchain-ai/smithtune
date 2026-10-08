@@ -23,7 +23,7 @@ def _model(judge: dict, max_tokens: int):
     from langchain_openai import ChatOpenAI
 
     from smithtune.inference import anthropic_connection
-    from smithtune.providers.fireworks import CLIENT_SOURCE, _set_skill_session
+    from smithtune.providers.fireworks.provider import CLIENT_SOURCE, _set_skill_session
 
     provider = judge["provider"]
     if provider in {"anthropic", "anthropic-gateway"}:

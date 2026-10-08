@@ -8,9 +8,9 @@ import pytest
 
 from smithtune import cli
 from smithtune.evaluation import replay as evaluation
-from smithtune.providers import fireworks_sampling as sampling
+from smithtune.providers.fireworks import sampling as sampling
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import DEFAULT_MODEL
+from smithtune.providers.fireworks.provider import DEFAULT_MODEL
 from test_pipeline import write_manifest
 
 
@@ -213,7 +213,7 @@ def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypa
 
 
 def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
-    from smithtune.providers.baseten import DEFAULT_MODEL as BASETEN_MODEL
+    from smithtune.providers.baseten.provider import DEFAULT_MODEL as BASETEN_MODEL
 
     write_manifest(tmp_path / "data", model=BASETEN_MODEL)
     with pytest.raises(SystemExit):
@@ -224,8 +224,8 @@ def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
 
 @pytest.mark.parametrize("failure", ["calibration", "replay", "langsmith"])
 def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_path, monkeypatch, failure):
-    from smithtune.providers import fireworks_training as runtime
-    from smithtune.providers import fireworks
+    from smithtune.providers.fireworks import training as runtime
+    from smithtune.providers.fireworks import provider as fireworks
 
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"

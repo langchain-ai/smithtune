@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune.providers.baseten_sampling_formats import parse_completion, stop_sequences
-from smithtune.providers.baseten import MODEL_SPECS
+from smithtune.providers.baseten.sampling_formats import parse_completion, stop_sequences
+from smithtune.providers.baseten.provider import MODEL_SPECS
 
 
 class Tokenizer:

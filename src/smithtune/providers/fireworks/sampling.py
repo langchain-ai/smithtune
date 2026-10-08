@@ -13,7 +13,7 @@ from typing import Any
 from smithtune.artifacts import _json_dump, _load_json, _utc_now
 from smithtune.dataset import _model_from_manifest, _require_prepared_provider
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
+from smithtune.providers.fireworks.provider import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
 from smithtune.rendering import load_training_renderer, replay_prompt
 
 

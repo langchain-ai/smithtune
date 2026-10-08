@@ -11,7 +11,8 @@ import pytest
 
 from smithtune import capabilities, dataset
 from smithtune import cli as pipeline
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 from smithtune.providers import get_provider
 

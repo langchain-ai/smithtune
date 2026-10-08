@@ -7,7 +7,7 @@ import pytest
 from smithtune import dataset
 from smithtune.artifacts import _json_dump, _load_jsonl
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import DEFAULT_MODEL
+from smithtune.providers.fireworks.provider import DEFAULT_MODEL
 from binding_fixtures import bound_example
 from test_assistant_bindings import example as changing_example
 

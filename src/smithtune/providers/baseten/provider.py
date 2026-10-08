@@ -1217,7 +1217,7 @@ class BasetenProvider:
         if cleanup_error is not None:
             raise cleanup_error
         if replay is not None:
-            from smithtune.providers.baseten_sampling import BasetenReplaySampler
+            from smithtune.providers.baseten.sampling import BasetenReplaySampler
             from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
 
             try:

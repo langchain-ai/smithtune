@@ -7,7 +7,7 @@ import pytest
 from smithtune import data_rights, dataset
 from smithtune.artifacts import _json_dump
 from smithtune.evaluation import replay as evaluation
-from smithtune.providers import fireworks
+from smithtune.providers.fireworks import provider as fireworks
 
 
 @pytest.fixture(autouse=True)

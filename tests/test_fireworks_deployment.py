@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from smithtune.providers import fireworks
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 
 
