@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -212,6 +213,21 @@ def _case_contract(
     if example_id not in example_contracts:
         raise PipelineError(f"replay example {example_id} has no captured tool schemas")
     return example_contracts[example_id]
+
+
+def preview_replay_for_plan(
+    data_dir: Path,
+    replay: dict[str, Any],
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the replay preview embedded in training plans without provisioning resources."""
+    if replay["concurrency"] < 1:
+        raise PipelineError("evaluation concurrency must be positive")
+    with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
+        preview = prepare_replay_evaluation(
+            data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
+        )
+    return {**preview, **replay, **extra}
 
 
 def prepare_replay_evaluation(
