@@ -15,7 +15,7 @@ from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _utc_now
 from smithtune.capabilities import open_without_redirects
-from smithtune.dataset import _model_from_manifest, _require_prepared_provider
+from smithtune.dataset import load_checkpoint_context
 from smithtune.providers.base import PipelineError
 from smithtune.rendering import load_training_renderer
 
@@ -31,11 +31,7 @@ def _resource_id(value: Any) -> str:
 
 
 def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, str]:
-    manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    _require_prepared_provider(manifest, "baseten")
-    model = _model_from_manifest(manifest)
-    plan = _load_json(run_dir / "plan.json")
-    result = _load_json(run_dir / "result.json")
+    model, plan, result = load_checkpoint_context(data_dir, run_dir, "baseten")
     if not isinstance(plan, dict) or not isinstance(result, dict) or any(
         item.get("provider") != "baseten" for item in (plan, result)
     ):

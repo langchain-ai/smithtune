@@ -1193,6 +1193,19 @@ def _require_prepared_provider(
     return model
 
 
+def load_checkpoint_context(
+    data_dir: Path,
+    run_dir: Path,
+    expected_provider: str,
+) -> tuple[ModelSpec, Any, Any]:
+    """Load the prepared model and saved plan/result for replay or deployment checks."""
+    manifest = _load_json(Path(data_dir) / "prepared" / "manifest.json")
+    model = _require_prepared_provider(manifest, expected_provider)
+    plan = _load_json(Path(run_dir) / "plan.json")
+    result = _load_json(Path(run_dir) / "result.json")
+    return model, plan, result
+
+
 def _prepared_inference_contract(
     data_dir: Path,
     manifest: dict[str, Any],

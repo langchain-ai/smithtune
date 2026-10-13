@@ -10,8 +10,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
-from smithtune.artifacts import _json_dump, _load_json, _utc_now
-from smithtune.dataset import _model_from_manifest, _require_prepared_provider
+from smithtune.artifacts import _json_dump, _utc_now
+from smithtune.dataset import load_checkpoint_context
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
 from smithtune.rendering import load_training_renderer, replay_prompt
@@ -31,11 +31,7 @@ def create_service():
 
 
 def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, Any]]:
-    manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    _require_prepared_provider(manifest, "fireworks")
-    model = _model_from_manifest(manifest)
-    plan = _load_json(run_dir / "plan.json")
-    result = _load_json(run_dir / "result.json")
+    model, plan, result = load_checkpoint_context(data_dir, run_dir, "fireworks")
     best = result.get("best") if isinstance(result, dict) else None
     checkpoint = best.get("resume_checkpoint") if isinstance(best, dict) else None
     if not isinstance(checkpoint, str) or re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", checkpoint) is None:
