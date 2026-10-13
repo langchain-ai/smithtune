@@ -38,6 +38,7 @@ from smithtune.providers.base import (
     PipelineError,
     ReasoningPolicy,
     TrainingOptions,
+    require_fireworks_key,
 )
 from smithtune.rendering import SFT_TARGET_POLICY, load_training_renderer, resolve_rendering_model
 
@@ -440,8 +441,7 @@ class FireworksProvider:
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
         plan = self.plan(data_dir, run_id, settings, replay=replay)
-        if not os.environ.get("FIREWORKS_API_KEY"):
-            raise PipelineError("FIREWORKS_API_KEY is not set")
+        require_fireworks_key()
         if replay is not None:
             from smithtune.evaluation.replay import validate_judge_credentials
 
@@ -521,8 +521,7 @@ class FireworksProvider:
     def promote(self, run_dir: Path, output_model_id: str, *, confirm: bool, account_id: str | None = None) -> None:
         _require_confirm(confirm, "checkpoint promotion")
         _validate_resource_id(output_model_id, "output model id")
-        if not os.environ.get("FIREWORKS_API_KEY"):
-            raise PipelineError("FIREWORKS_API_KEY is not set")
+        require_fireworks_key()
         result = _load_json(run_dir / "result.json")
         best = result.get("best")
         job_id = best.get("job_id") if isinstance(best, dict) else None
@@ -593,8 +592,7 @@ class FireworksProvider:
         deployment = f"accounts/{account_id}/deployments/{deployment_id}"
         if not confirm:
             return self._deploy_preview(run_dir, account_id, model, deployment, output_model_id, deployment_shape)
-        if not os.environ.get("FIREWORKS_API_KEY"):
-            raise PipelineError("FIREWORKS_API_KEY is not set")
+        require_fireworks_key()
         if deployment_shape is None:
             _require_shape_matching()
         self.promote(run_dir, output_model_id, confirm=confirm, account_id=account_id)

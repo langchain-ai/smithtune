@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import re
 from typing import Any, Literal, Protocol
 
@@ -12,6 +13,24 @@ from smithtune.inference_contract import InferenceContract
 
 class PipelineError(ValueError):
     """A local input or state error shared across provider adapters."""
+
+
+def require_baseten_key(*, purpose: str = "") -> str:
+    """Return the Baseten API key or raise the established missing-key error."""
+    key = os.environ.get("BASETEN_API_KEY", "").strip()
+    if not key:
+        suffix = " for the judge" if purpose == "judge" else ""
+        raise PipelineError(f"BASETEN_API_KEY is not set{suffix}")
+    return key
+
+
+def require_fireworks_key(*, purpose: str = "") -> str:
+    """Return the Fireworks API key or raise the established missing-key error."""
+    key = os.environ.get("FIREWORKS_API_KEY", "").strip()
+    if not key:
+        suffix = " for the judge" if purpose == "judge" else ""
+        raise PipelineError(f"FIREWORKS_API_KEY is not set{suffix}")
+    return key
 
 
 ReasoningPolicy = Literal["omit", "preserve"]

@@ -12,7 +12,7 @@ from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _utc_now
 from smithtune.dataset import _model_from_manifest, _require_prepared_provider
-from smithtune.providers.base import PipelineError
+from smithtune.providers.base import PipelineError, require_fireworks_key
 from smithtune.providers.fireworks import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
 from smithtune.rendering import load_training_renderer, replay_prompt
 
@@ -20,8 +20,7 @@ from smithtune.rendering import load_training_renderer, replay_prompt
 def create_service():
     from fireworks.training.sdk import FiretitanServiceClient
 
-    if not os.environ.get("FIREWORKS_API_KEY", "").strip():
-        raise PipelineError("FIREWORKS_API_KEY is not set")
+    require_fireworks_key()
     _set_skill_session()
     return FiretitanServiceClient(
         api_key=os.environ["FIREWORKS_API_KEY"], base_url=TRAINING_BASE_URL,

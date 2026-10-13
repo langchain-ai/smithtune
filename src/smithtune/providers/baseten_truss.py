@@ -13,11 +13,10 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 import logging
-import os
 import threading
 from typing import Any
 
-from smithtune.providers.base import PipelineError
+from smithtune.providers.base import PipelineError, require_baseten_key
 
 
 TRUSS_VERSION = "0.18.30"
@@ -70,9 +69,7 @@ automatically. Credentials are read from BASETEN_API_KEY without using .trussrc.
             f"Baseten deployment requires truss=={TRUSS_VERSION}; "
             "install the baseten-deploy extra."
         )
-    api_key = os.environ.get("BASETEN_API_KEY")
-    if not api_key:
-        raise PipelineError("BASETEN_API_KEY is not set")
+    api_key = require_baseten_key()
     if not all(value.strip() for value in (checkpoint_id, model_name, accelerator)):
         raise PipelineError("Checkpoint, model name, and accelerator are required")
     parts = accelerator.split(":")

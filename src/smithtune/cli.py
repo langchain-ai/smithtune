@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -30,7 +29,7 @@ from smithtune.providers.fireworks import (
     FireworksProvider,
     SFTSettings as FireworksSFTSettings,
 )
-from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
+from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions, require_baseten_key
 from smithtune.providers import PROVIDERS, baseten_deployment, get_provider
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
@@ -347,8 +346,7 @@ def _temporary_baseten_plan(args) -> dict | None:
             raise PipelineError("evaluation concurrency must be positive")
         if args.max_output_tokens < 1:
             raise PipelineError("--max-output-tokens must be positive")
-        if not os.environ.get("BASETEN_API_KEY", "").strip():
-            raise PipelineError("BASETEN_API_KEY is not set")
+        require_baseten_key()
         replay_evaluation.validate_judge_credentials(args.judge_model)
     return baseten_deployment.plan(
         args.run_dir, accelerator=args.accelerator, max_seq_len=args.max_seq_len,
