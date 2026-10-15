@@ -400,6 +400,11 @@ Re-running with `--no-fetch` reuses the downloaded data (splits still sync).
 
 ## 6. Plan
 
+Before choosing training settings, consult the
+[training optimizations](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#training-optimizations)
+for the selected workflow. Use its context and batching guidance to propose
+settings and any budgeted comparison runs.
+
 ```bash
 smithtune plan \
   --provider "$provider" --data-dir "$data_dir" \
