@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -1817,23 +1818,28 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
     assert result["promotable_checkpoint"].endswith(f"{run_id}-step-4-abcd1234")
 
 
-def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("model", [
+    fireworks.DEFAULT_MODEL,
+    *[replace(fireworks.MODEL_SPECS["glm-5p3-flash"], reasoning_effort=effort) for effort in ("low", "high", "max")],
+], ids=lambda model: f"{model.name}-{model.reasoning_effort}")
+def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model):
     import smithtune.providers.fireworks_training as runtime
 
     metadata_calls = []
     renderer_calls = []
-    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", lambda model, context: (
-        metadata_calls.append((model, context)) or
-        capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
+    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", lambda base_model, context: (
+        metadata_calls.append((base_model, context)) or
+        capabilities.FireworksModelCapability(base_model, model.tokenizer_model, model.max_seq_len, True)
     ))
     monkeypatch.setattr(fireworks, "load_training_renderer", lambda model: renderer_calls.append(model))
     data_dir = tmp_path / "data"
-    write_manifest(data_dir)
+    write_manifest(data_dir, model=model)
     events = []
 
     class Session:
-        def __init__(self, config, run_dir):
+        def __init__(self, config, run_dir, *, reasoning_effort=None):
             self.config = config
+            assert reasoning_effort == model.reasoning_effort
             assert config.epochs == 5
             assert config.seed == 42
             assert config.pipeline_depth == 4
@@ -1864,8 +1870,8 @@ def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monke
     assert events == ["open", 1, 2, 3, "complete", "close"]
     assert result["best"]["epoch"] == 2
     assert len({epoch["job_id"] for epoch in result["epochs"]}) == 1
-    assert metadata_calls == [(fireworks.DEFAULT_MODEL.base_model, 131_072)]
-    assert renderer_calls == [fireworks.DEFAULT_MODEL]
+    assert metadata_calls == [(model.base_model, model.max_seq_len)]
+    assert renderer_calls == [model]
 
 
 def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

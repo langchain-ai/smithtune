@@ -14,8 +14,8 @@ Install the CLI with [uv](https://docs.astral.sh/uv/getting-started/installation
 
 ```bash
 uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.1/overrides.txt \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.1'
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.2/overrides.txt \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.2'
 ```
 
 Install the smithtune skill so your coding agent (Claude Code, Codex, Cursor, and
@@ -150,13 +150,35 @@ The following models are supported for fine-tuning:
 | DeepSeek V4 Flash 0731 | ✓ | — |
 | Muse Glimmer 30B | ✓ | — |
 | Qwen3.5 9B | — | ✓ |
-| GLM-5.3 Flash | — | ✓ |
+| GLM-5.3 Flash | ✓ | ✓ |
 
 Run `smithtune models list --provider fireworks` or
 `smithtune models list --provider baseten` for the aliases and IDs supported by
 your installed version. See [Supported models](docs/reference.md#supported-models)
 for provider access requirements and the [deployment guide](docs/deployment.md)
 for serving options. Training support does not imply serverless inference availability.
+
+For GLM-5.3-Flash, set `model=glm-5p3-flash` in the workflow above with either
+provider. Fireworks supports serverless LoRA training with a maximum context of
+200,064 tokens. Smithtune supports text and tool trajectories; images are excluded.
+Reasoning is omitted by default; add `--reasoning-policy preserve` to `prepare`
+to retain recorded reasoning in training targets and history. This controls source
+data, not whether the model thinks when generating a response.
+
+For Fireworks GLM-5.3-Flash, choose thinking effort during preparation:
+
+```bash
+smithtune prepare \
+  --provider fireworks --model glm-5p3-flash --reasoning-effort low \
+  --workspace-id "$workspace_id" --dataset-id "$dataset_id" \
+  --data-dir "$data_dir"
+```
+
+Choose `low`, `high`, or `max` (default). Smithtune saves the choice and uses it
+for training and base-versus-tuned replay; it is independent of
+`--reasoning-policy`. These modes keep thinking enabled. To change effort,
+prepare a new data directory. When calling a deployed model through Fireworks'
+chat API, pass the matching `reasoning_effort` in your requests.
 
 ## Create a dataset from trajectories
 

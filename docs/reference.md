@@ -28,6 +28,18 @@ remediation instead of reporting the model as unavailable.
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; lower the limit with `--max-seq-len`, for example `--max-seq-len 32768`
 
+For Fireworks GLM-5.3-Flash, `prepare --reasoning-effort low|high|max` selects
+the native thinking-effort prompt used by training and replay. The default is
+`max`; all three choices keep thinking enabled. The saved model configuration
+and training plan record this choice. Training and evaluation reuse it without
+additional flags; changing it requires preparing a new data directory. For a
+deployed model, pass the matching `reasoning_effort` to Fireworks' chat API.
+Other training models currently reject this flag.
+
+`--reasoning-policy` is separate: it controls whether recorded reasoning is
+included in the source examples. Omitting recorded reasoning does not disable
+the model's thinking mode.
+
 ## Splits and dataset versions
 
 Preparation saves trajectory assignments in `prepared/split_assignments.json`

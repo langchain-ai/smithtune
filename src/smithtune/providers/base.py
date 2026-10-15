@@ -36,6 +36,7 @@ class ModelSpec:
     supports_reasoning_content: bool = False
     template_sha256: str = ""
     rendering_version: str = ""
+    reasoning_effort: str | None = None
 
     @property
     def training_context_limit(self) -> int:
@@ -76,6 +77,11 @@ class ModelSpec:
             raise PipelineError("template_sha256 must be empty or a lowercase SHA-256 digest")
         if not isinstance(self.rendering_version, str):
             raise PipelineError("rendering_version must be a string")
+        if self.reasoning_effort is not None:
+            if not isinstance(self.reasoning_effort, str) or self.reasoning_effort not in {"low", "high", "max"}:
+                raise PipelineError("reasoning_effort must be low, high, or max")
+            if self.provider != "fireworks" or self.renderer != "glm53_flash_preserve_thinking":
+                raise PipelineError("--reasoning-effort is supported only for Fireworks GLM-5.3-Flash")
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,7 @@ class ModelOptions:
 
     model: str | None = None
     max_seq_len: int | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)

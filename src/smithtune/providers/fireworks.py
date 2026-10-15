@@ -93,6 +93,18 @@ MODEL_SPECS = {
         supports_reasoning_content=True,
         requires_tool_declarations=True,
     ),
+    "glm-5p3-flash": ModelSpec(
+        name="glm-5p3-flash",
+        base_model="accounts/fireworks/models/glm-5p3-flash",
+        tokenizer_model="zai-org/GLM-5.3-Flash",
+        tokenizer_revision="eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+        renderer="glm53_flash_preserve_thinking",
+        reasoning_effort="max",
+        max_seq_len=200_064,
+        thinking_trace_history_mode="preserved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+    ),
 }
 
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]
@@ -398,6 +410,7 @@ class FireworksProvider:
                 "tokenizer_revision": model.tokenizer_revision,
                 "renderer": model.renderer,
                 "thinking_trace_history_mode": model.thinking_trace_history_mode,
+                "reasoning_effort": model.reasoning_effort,
                 "loss_target": "each assistant target once, with zero loss on history",
                 "max_seq_len": model.max_seq_len,
                 "lora_rank": lora_rank,
@@ -488,7 +501,7 @@ class FireworksProvider:
         _write_run_md(run_dir / "run.md", plan, "job_running", "wait for training and replay")
         result = None
         try:
-            with ServerlessTraining(cfg, run_dir) as session:
+            with ServerlessTraining(cfg, run_dir, reasoning_effort=model.reasoning_effort) as session:
                 result = run_early_stopping(settings, session.run_epoch, init_from_checkpoint)
                 _json_dump(run_dir / "epochs.json", result["epochs"])
                 _json_dump(run_dir / "result.json", result)

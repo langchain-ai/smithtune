@@ -154,6 +154,10 @@ def _parser() -> argparse.ArgumentParser:
         help="omit source reasoning from SFT and replay (default), or explicitly preserve readable reasoning",
     )
     prep.add_argument(
+        "--reasoning-effort", choices=["low", "high", "max"],
+        help="Fireworks GLM-5.3-Flash thinking effort (default: max); saved for training and replay, separate from source --reasoning-policy",
+    )
+    prep.add_argument(
         "--validation-fraction", type=float,
         help=f"validation fraction for either provider (default: {dataset.DEFAULT_VALIDATION_FRACTION})",
     )
