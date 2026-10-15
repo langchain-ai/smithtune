@@ -133,10 +133,11 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
 
 @pytest.mark.parametrize("tool_call", [False, True])
 @pytest.mark.parametrize("stop_reason", ["stop", "length"])
-def test_fireworks_glm_replay_uses_native_prompts_and_parses_completions(tmp_path, tool_call, stop_reason):
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
+def test_fireworks_glm_replay_uses_native_prompts_and_parses_completions(tmp_path, tool_call, stop_reason, effort):
     from smithtune.providers.fireworks_sampling import FireworksReplaySampler
 
-    model = fireworks.MODEL_SPECS["glm-5p3-flash"]
+    model = replace(fireworks.MODEL_SPECS["glm-5p3-flash"], reasoning_effort=effort)
     renderer = load_training_renderer(model)
     tools = [{"type": "function", "function": {
         "name": "weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
@@ -150,6 +151,7 @@ def test_fireworks_glm_replay_uses_native_prompts_and_parses_completions(tmp_pat
     native_prompt = renderer.tokenizer.apply_chat_template(
         messages, tools=tools, tokenize=True, return_dict=False,
         add_generation_prompt=True, clear_thinking=False,
+        reasoning_effort=effort,
     )
     assert prompt == native_prompt
     text = "Consider café 🐢 東京</think>Checking."

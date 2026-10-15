@@ -29,6 +29,8 @@ def resolve_model_options(
             "Provider training availability is checked separately."
         )
     model = matches[0]
+    if options.reasoning_effort is not None:
+        model = replace(model, reasoning_effort=options.reasoning_effort)
     if options.max_seq_len is not None:
         if (
             isinstance(options.max_seq_len, bool)

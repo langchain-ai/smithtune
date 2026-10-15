@@ -43,6 +43,10 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, A
     if plan.get("base_model") != model.base_model:
         raise PipelineError("prepared data base model differs from the Fireworks training run")
     config = plan.get("config", {})
+    if model.renderer == "glm53_flash_preserve_thinking" and (
+        (config.get("reasoning_effort") or "max") != (model.reasoning_effort or "max")
+    ):
+        raise PipelineError("prepared data reasoning effort differs from the Fireworks training run")
     return model, {**best, "lora_rank": config.get("lora_rank", model.default_lora_rank),
                    "lora_alpha": config.get("lora_alpha", 32)}
 
@@ -95,6 +99,9 @@ class FireworksReplaySampler:
         self.config = {"provider": "fireworks", "serving_mode": "serverless",
                        "checkpoint": checkpoint, "base_model": model.base_model,
                        "lora_rank": self.lora_rank, "lora_alpha": self.lora_alpha}
+        # Missing effort in older replay configurations means the native Max default.
+        if model.reasoning_effort not in (None, "max"):
+            self.config["reasoning_effort"] = model.reasoning_effort
 
     def __enter__(self):
         try:

@@ -36,6 +36,8 @@ def rendering_version(model: ModelSpec) -> str:
             if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
                 raise PipelineError("the Fireworks cookbook installation has no pinned source revision")
             implementation = f"smithtune-target-v2;fireworks-cookbook@{commit}"
+            if model.reasoning_effort is not None:
+                implementation += f";reasoning_effort={model.reasoning_effort}"
     except metadata.PackageNotFoundError as exc:
         raise PipelineError("training dependencies are missing; run smithtune doctor") from exc
     return f"{implementation};transformers={transformers_version}"
@@ -63,7 +65,24 @@ def load_training_renderer(model: ModelSpec) -> Any:
     )
     if model.template_sha256 and _tokenizer_template_hash(tokenizer) != model.template_sha256:
         raise PipelineError("tokenizer chat template differs from the prepared manifest; prepare again")
-    return get_renderer(renderer_name, tokenizer)
+    renderer = get_renderer(renderer_name, tokenizer)
+    return configure_reasoning_effort(renderer, model.reasoning_effort)
+
+
+def configure_reasoning_effort(renderer: Any, effort: str | None) -> Any:
+    """Apply GLM's native effort preamble in preparation, training, and replay."""
+    if effort is None:
+        return renderer
+    from training.renderer.glm5 import GLM53FlashRenderer
+
+    if not isinstance(effort, str) or effort not in {"low", "high", "max"}:
+        raise PipelineError("reasoning_effort must be low, high, or max")
+    if not isinstance(renderer, GLM53FlashRenderer):
+        raise PipelineError("--reasoning-effort is supported only for Fireworks GLM-5.3-Flash")
+    # The pinned cookbook exposes the native preamble through this field,
+    # while its renderer factory accepts no reasoning-effort argument.
+    renderer._initial_prompt_text = f"<|system|>Reasoning Effort: {effort.capitalize()}"
+    return renderer
 
 
 def _tokenizer_template_hash(tokenizer: Any, *, allow_missing: bool = False) -> str:

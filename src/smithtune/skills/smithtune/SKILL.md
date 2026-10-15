@@ -379,6 +379,14 @@ model's tokenizer and per-assistant tools, splits about 80/10/10 into
 train/validation/test (a whole trajectory stays in one split), and publishes the
 splits to the LangSmith dataset.
 
+For Fireworks GLM-5.3-Flash, choose `--reasoning-effort low`, `high`, or `max`
+(default) on `prepare`. Training and replay reuse the saved effort; use a new
+data directory to change it. This keeps thinking enabled and is separate from
+`--reasoning-policy omit|preserve`, which controls recorded reasoning in the
+training examples. Other training models currently reject `--reasoning-effort`.
+When calling a deployed GLM model through Fireworks' chat API, pass the matching
+`reasoning_effort` in the request.
+
 Check:
 - Split counts. Validation and test must be non-empty for training and
   evaluation to mean anything; tiny datasets can produce empty splits.

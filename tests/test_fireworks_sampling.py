@@ -288,7 +288,7 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
     class Session:
         service = object()
 
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             events.append("create")
 
         def __enter__(self):

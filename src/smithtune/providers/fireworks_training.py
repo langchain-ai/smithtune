@@ -35,8 +35,17 @@ def _render_conversation(row):
     return [d.datum for d in rendered]
 
 
+def _init_render_worker(init_args, reasoning_effort, worker_id=None):
+    """Initialize both eager validation and spawned training workers identically."""
+    from training.recipes import sft_loop
+    from smithtune.rendering import configure_reasoning_effort
+
+    sft_loop._init_render_worker(*init_args, _worker_id=worker_id)
+    configure_reasoning_effort(sft_loop._worker_state["renderer"], reasoning_effort)
+
+
 class ServerlessTraining:
-    def __init__(self, config, run_dir: Path):
+    def __init__(self, config, run_dir: Path, *, reasoning_effort: str | None = None):
         from training.recipes import sft_loop
         from training.utils import make_render_dataloader
         from training.utils.resource_autosizing import select_render_worker_count
@@ -54,7 +63,8 @@ class ServerlessTraining:
             config.max_seq_len, config.tokenizer_revision,
             config.thinking_trace_history_mode, config.tokenizer_trust_remote_code,
         )
-        sft_loop._init_render_worker(*self.init_args)
+        initialize_worker = functools.partial(_init_render_worker, self.init_args, reasoning_effort)
+        initialize_worker()
         from training.utils import JsonlRenderDataset
 
         self.dataset = JsonlRenderDataset(config.dataset, _render_conversation,
@@ -70,7 +80,7 @@ class ServerlessTraining:
         self.loader = make_render_dataloader(
             self.dataset, batch_size=self.batch_size, num_workers=workers,
             shuffle=True, generator=self.generator,
-            worker_init_fn=functools.partial(sft_loop._init_render_worker, *self.init_args),
+            worker_init_fn=initialize_worker,
             group_by_length=config.group_by_length,
             length_group_factor=config.length_group_factor,
             sizes=self.dataset.approx_row_sizes() if config.group_by_length else None,
