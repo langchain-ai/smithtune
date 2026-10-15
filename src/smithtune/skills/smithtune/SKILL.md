@@ -418,6 +418,11 @@ Check:
   test trajectory; omitting it evaluates every action.
 - Show the user these numbers and get authorization for the spend.
 
+For faster or cheaper dedicated training, read the
+[throughput tuning reference](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#dedicated-training-throughput).
+Inspect rendered sequence lengths and propose budgeted comparison runs using
+the workflow's batching controls; compare throughput, cost, and validation quality.
+
 ### Fireworks capacity
 
 Serverless is the default. For dedicated LoRA, pass `--training-mode dedicated`
