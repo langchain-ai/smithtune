@@ -285,7 +285,9 @@ Use a new or empty run directory. Repeat custom settings on both commands;
 
 The CLI selects the saved model checkpoint with the lowest validation loss and
 compares it with the base model on held-out test data. Evaluation uses provider
-samplers to generate responses. Fireworks reuses its training session; Baseten starts temporary paid
+samplers to generate responses. Fireworks defaults to serverless and also supports
+[dedicated LoRA capacity with automatic shape selection](docs/reference.md#fireworks-dedicated-lora-training).
+Fireworks reuses its training session; Baseten starts temporary paid
 samplers and deactivates them on exit. You do not need to run `deploy` for this step.
 Omit `--evaluate` and its replay options to train only.
 

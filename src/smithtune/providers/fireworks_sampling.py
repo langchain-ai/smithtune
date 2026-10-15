@@ -38,8 +38,15 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, A
     result = _load_json(run_dir / "result.json")
     best = result.get("best") if isinstance(result, dict) else None
     checkpoint = best.get("resume_checkpoint") if isinstance(best, dict) else None
-    if not isinstance(checkpoint, str) or re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", checkpoint) is None:
-        raise PipelineError("Fireworks evaluation requires a saved serverless training checkpoint in --run-dir")
+    mode = plan.get("training_mode", "serverless")
+    if mode not in ("serverless", "dedicated"):
+        raise PipelineError("saved Fireworks training mode is invalid")
+    if mode == "dedicated":
+        from smithtune.providers.fireworks_dedicated import checkpoint_parts
+
+        checkpoint_parts(checkpoint)
+    elif not isinstance(checkpoint, str) or re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", checkpoint) is None:
+        raise PipelineError("Fireworks evaluation requires a saved training checkpoint in --run-dir")
     if plan.get("base_model") != model.base_model:
         raise PipelineError("prepared data base model differs from the Fireworks training run")
     config = plan.get("config", {})
@@ -47,7 +54,13 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, A
         (config.get("reasoning_effort") or "max") != (model.reasoning_effort or "max")
     ):
         raise PipelineError("prepared data reasoning effort differs from the Fireworks training run")
-    return model, {**best, "lora_rank": config.get("lora_rank", model.default_lora_rank),
+    extra = {}
+    if mode == "dedicated":
+        from smithtune.providers.fireworks_dedicated import validate_saved_shape
+
+        validate_saved_shape(plan.get("dedicated"), model.max_seq_len)
+        extra = {"training_mode": mode, "dedicated": plan["dedicated"]}
+    return model, {**best, **extra, "lora_rank": config.get("lora_rank", model.default_lora_rank),
                    "lora_alpha": config.get("lora_alpha", 32)}
 
 
@@ -142,7 +155,7 @@ class FireworksReplaySampler:
         from tinker import SamplingParams
 
         if model not in self._samplers or json_mode:
-            raise PipelineError("serverless replay can sample only its checkpoint and matching base model")
+            raise PipelineError("Fireworks replay can sample only its checkpoint and matching base model")
         tools = list(request_contract.tools) if request_contract is not None else []
         prompt = replay_prompt(messages, tools, self.model, self.renderer)
         if len(prompt.to_ints()) + max_tokens > self.model.max_seq_len:
@@ -152,7 +165,7 @@ class FireworksReplaySampler:
             sampling_params=SamplingParams(max_tokens=max_tokens, temperature=0, stop=self.renderer.get_stop_sequences()),
         ).result()
         if len(response.sequences or []) != 1:
-            raise PipelineError("serverless sampler returned no unique completion")
+            raise PipelineError("Fireworks sampler returned no unique completion")
         sequence = response.sequences[0]
         tokens = list(sequence.tokens or [])
         parse_tokens = restore_stop_suffix(tokens, self.renderer, sequence.stop_reason)

@@ -180,7 +180,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     plan.add_argument("--run-id", default="langsmith-sft", help="label for this preview (default: %(default)s); not reserved for training")
 
-    training = sub.add_parser("train", help="run paid serverless SFT after plan approval")
+    training = sub.add_parser("train", help="run paid SFT after plan approval")
     training.add_argument(
         "--provider", choices=tuple(PROVIDERS), default="fireworks",
         help="training provider (default: %(default)s)",
@@ -238,6 +238,18 @@ def _parser() -> argparse.ArgumentParser:
         fireworks.add_argument(
             "--pipeline-depth", type=int,
             help=f"training pipeline depth (default: {fireworks_defaults.pipeline_depth})",
+        )
+        fireworks.add_argument(
+            "--training-mode", choices=("serverless", "dedicated"),
+            help="Fireworks capacity mode (default: serverless)",
+        )
+        fireworks.add_argument(
+            "--training-shape",
+            help="dedicated shape resource, optionally versioned (default: automatically select a compatible LoRA shape)",
+        )
+        fireworks.add_argument(
+            "--provisioning-timeout", type=float,
+            help="dedicated placement/readiness budget in seconds per stage (default: 1800)",
         )
         baseten = command.add_argument_group(
             "Baseten-only options", "Require --provider baseten; rejected by Fireworks.",
@@ -437,7 +449,7 @@ def _run_fireworks_evaluation(args):
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
         args.accelerator,
     )) or args.deployment_timeout != 600:
-        raise PipelineError("Fireworks evaluation uses the serverless sampler and --run-dir; omit endpoint and deployment options")
+        raise PipelineError("Fireworks evaluation uses the saved training mode and --run-dir; omit endpoint and deployment options")
     model = best = None
     if args.run_dir is not None:
         if args.run_dir.resolve() == args.output_dir.resolve():
@@ -449,7 +461,10 @@ def _run_fireworks_evaluation(args):
             value = replay_evaluation.prepare_replay_evaluation(
                 args.data_dir, args.output_dir, args.max_points_per_trajectory, args.max_output_tokens,
             )
-            value["serving_mode"] = "serverless"
+            value["serving_mode"] = best.get("training_mode", "serverless") if best else "serverless"
+            if best and best.get("dedicated"):
+                value["dedicated"] = best["dedicated"]
+                value["cost"] = "temporary dedicated trainer plus separate base and tuned inference deployments; time-billed until cleanup"
             if best is not None:
                 value["checkpoint"] = best["resume_checkpoint"]
             _json_dump(args.output_dir / "plan.json", value)
@@ -457,12 +472,19 @@ def _run_fireworks_evaluation(args):
     if best is None:
         raise PipelineError("Fireworks evaluate requires --run-dir containing the saved training result")
     if args.base_model not in (None, model.base_model):
-        raise PipelineError("serverless replay compares the checkpoint with its own base model")
+        raise PipelineError("Fireworks replay compares the checkpoint with its own base model")
     if not args.confirm:
         raise PipelineError("model and judge inference require --confirm")
     replay_evaluation.validate_judge_credentials(args.judge_model)
-    sampler = FireworksReplaySampler(model, best["resume_checkpoint"], args.output_dir,
-                                     lora_rank=best["lora_rank"], lora_alpha=best["lora_alpha"])
+    sampler_class = FireworksReplaySampler
+    sampler_options = {}
+    if best.get("training_mode") == "dedicated":
+        from smithtune.providers.fireworks_dedicated import DedicatedReplaySampler
+
+        sampler_class = DedicatedReplaySampler
+        sampler_options["dedicated"] = best["dedicated"]
+    sampler = sampler_class(model, best["resume_checkpoint"], args.output_dir,
+                            lora_rank=best["lora_rank"], lora_alpha=best["lora_alpha"], **sampler_options)
     return replay_evaluation.run_replay_evaluation(
         args.data_dir, args.output_dir, best["resume_checkpoint"], args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,

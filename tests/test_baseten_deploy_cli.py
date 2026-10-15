@@ -328,7 +328,7 @@ def test_temporary_evaluation_checks_selected_judge_credential(tmp_path, tempora
 def test_temporary_mode_rejects_missing_run_or_wrong_provider(tmp_path, capsys, command, provider):
     with pytest.raises(SystemExit):
         cli.main([command, "--provider", provider, "--serving-mode", "temporary", "--output-dir", str(tmp_path)])
-    assert ("requires --run-dir" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
+    assert ("requires --run-dir" if provider == "baseten" else "uses the saved training mode") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("mode", ["existing", "temporary"])
@@ -343,7 +343,7 @@ def test_baseten_evaluation_requires_separate_training_and_output_directories(tm
 def test_existing_mode_rejects_temporary_baseten_settings(tmp_path, capsys, provider):
     with pytest.raises(SystemExit):
         cli.main(["eval-plan", "--provider", provider, "--serving-mode", "existing", "--output-dir", str(tmp_path), "--accelerator", "H200:1"])
-    assert ("requires --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
+    assert ("requires --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the saved training mode") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("filename", ["evaluation-config.json", "results.jsonl"])

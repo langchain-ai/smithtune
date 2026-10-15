@@ -408,6 +408,28 @@ smithtune plan \
   --evaluate --judge-model "$judge_model" --max-points-per-trajectory 2
 ```
 
+Fireworks defaults to serverless. For dedicated LoRA capacity, use
+`--training-mode dedicated` on both `plan` and `train`. Leave `--training-shape`
+omitted to select a validated compatible LoRA shape automatically. Review the
+resolved hardware, context limit, exact version, and separate time-based trainer
+and replay serving charges. To override or pin the reviewed version, pass
+`--training-shape accounts/<account>/trainingShapes/<shape>[/versions/<version>]`.
+Dedicated planning requires `FIREWORKS_API_KEY` but provisions nothing. Shape
+selection may change between commands unless the version is explicitly pinned;
+`train` saves its resolved shape in `plan.json`. No compatible shape is an error.
+This mode supports the existing prepared models and contexts, with LoRA only.
+`--provisioning-timeout` bounds each placement/readiness stage (default 1800 seconds).
+
+Dedicated replay uses separate temporary base and tuned deployments. Standalone
+`evaluate --run-dir` restores the selected checkpoint on temporary dedicated
+capacity using the saved shape versions. Owned resource IDs are saved before
+creation in `session.json` and replay `resources.json`; deletion is requested on
+exit, startup failure, Ctrl-C, and SIGTERM. On cleanup failure or an abruptly
+killed process, inspect the receipts and remove remaining capacity in Fireworks.
+Checkpoint retention is provider-controlled; promote before expiration.
+Resume a new dedicated run with `--init-from-checkpoint <trainer-job>:<checkpoint>`;
+this restores optimizer state and starts a new epoch/data schedule.
+
 `plan` is free and saves nothing for `train`. `--judge-model` accepts
 `baseten/<model-id>` (default `baseten/zai-org/GLM-5.3-Flash`), a Fireworks model
 ID such as `accounts/fireworks/models/deepseek-v4p1-flash`, or
@@ -458,7 +480,7 @@ smithtune evaluate --provider "$provider" --data-dir "$data_dir" --run-dir "$run
 ```
 
 Rerunning reuses completed predictions and judgments. Fireworks samples the
-saved serverless training checkpoint (a promoted model ID alone cannot be
+saved training checkpoint (a promoted model ID alone cannot be
 sampled); Baseten starts temporary samplers and deactivates them on exit. To change the judge, cap,
 or sampling settings, pass a fresh `--output-dir` to both commands.
 

@@ -148,7 +148,6 @@ class ServerlessTraining:
         from training.utils import DEFAULT_ADAM
         from training.utils.client import DEFAULT_TIMEOUT_S
         from training.utils.runner_state import write_running_step
-        from smithtune.providers.fireworks import _epoch_checkpoints
 
         self.generator.manual_seed(self.cfg.seed + epoch - 1)
         pending = deque()
@@ -206,10 +205,15 @@ class ServerlessTraining:
         self.runner.append_metrics(self.step, {"eval/loss": loss, "eval/epoch": epoch})
         self.checkpoints.save(f"epoch-{epoch}", resumable=True, promotable=True, data_consumed=self.consumed)
         result = {"job_id": self.job_id, "steps": self.step, "eval_loss": loss,
-                  **_epoch_checkpoints(self.job_id)}
+                  **self.epoch_checkpoints()}
         self.history.append({**result, "epoch": epoch})
         _json_dump(self.run_dir / "epochs.json", self.history)
         return result
+
+    def epoch_checkpoints(self):
+        from smithtune.providers.fireworks import _epoch_checkpoints
+
+        return _epoch_checkpoints(self.job_id)
 
     def snapshot(self, checkpoint: str) -> str:
         """Restore the selected epoch in this session before publishing weights."""
