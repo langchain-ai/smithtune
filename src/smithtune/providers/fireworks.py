@@ -93,6 +93,17 @@ MODEL_SPECS = {
         supports_reasoning_content=True,
         requires_tool_declarations=True,
     ),
+    "glm-5p3-flash": ModelSpec(
+        name="glm-5p3-flash",
+        base_model="accounts/fireworks/models/glm-5p3-flash",
+        tokenizer_model="zai-org/GLM-5.3-Flash",
+        tokenizer_revision="eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+        renderer="glm53_flash_preserve_thinking",
+        max_seq_len=200_064,
+        thinking_trace_history_mode="preserved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+    ),
 }
 
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]

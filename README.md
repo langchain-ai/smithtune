@@ -150,13 +150,19 @@ The following models are supported for fine-tuning:
 | DeepSeek V4 Flash 0731 | ✓ | — |
 | Muse Glimmer 30B | ✓ | — |
 | Qwen3.5 9B | — | ✓ |
-| GLM-5.3 Flash | — | ✓ |
+| GLM-5.3 Flash | ✓ | ✓ |
 
 Run `smithtune models list --provider fireworks` or
 `smithtune models list --provider baseten` for the aliases and IDs supported by
 your installed version. See [Supported models](docs/reference.md#supported-models)
 for provider access requirements and the [deployment guide](docs/deployment.md)
 for serving options. Training support does not imply serverless inference availability.
+
+For GLM-5.3-Flash, set `model=glm-5p3-flash` in the workflow above with either
+provider. Fireworks supports serverless LoRA training with a maximum context of
+200,064 tokens. Smithtune supports text and tool trajectories; images are excluded.
+Reasoning is omitted by default; add `--reasoning-policy preserve` to `prepare`
+to retain recorded reasoning in training targets and history.
 
 ## Create a dataset from trajectories
 

@@ -150,6 +150,7 @@ def validate_reasoning_support(model: ModelSpec) -> None:
     if resolved_renderer_name(model) not in {
         "qwen3_8_preserved", "kimi_k3", "hf_assistant", "deepseek_v4", "muse_glimmer",
         "hf_prefix_kimi_k3", "hf_prefix_qwen3_5", "hf_prefix_glm53_flash",
+        "glm53_flash_preserve_thinking",
     }:
         raise PipelineError(
             f"renderer {model.renderer} has no verified reasoning-content adapter; "

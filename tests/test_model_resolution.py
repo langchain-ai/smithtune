@@ -156,7 +156,7 @@ def test_fireworks_rejects_invalid_managed_lora_metadata(value):
         _fetch_document(_fireworks_document(supervisedLoraTunable=value, supportsServerless=True))
 
 
-@pytest.mark.parametrize("alias", ["deepseek-v4-flash-0731", "muse-glimmer-30b"])
+@pytest.mark.parametrize("alias", ["deepseek-v4-flash-0731", "muse-glimmer-30b", "glm-5p3-flash"])
 @pytest.mark.parametrize("managed_flag", [False, True, "absent"])
 def test_serverless_training_does_not_require_managed_sft_support(alias, managed_flag):
     model = fireworks.MODEL_SPECS[alias]
@@ -260,9 +260,10 @@ def test_kimi_uses_documented_shared_pool_context_instead_of_generic_model_conte
     assert capabilities.preflight_model(model, capability_resolver=lambda *args: capability) is model
 
 
-def test_shared_pool_limit_is_enforced_before_metadata_fetch():
-    model = replace(fireworks.DEFAULT_MODEL, max_seq_len=262_144)
-    with pytest.raises(PipelineError, match="serverless training context limit is 131,072"):
+@pytest.mark.parametrize("alias,limit", [("qwen3p8-27b", 131_072), ("glm-5p3-flash", 200_064)])
+def test_shared_pool_limit_is_enforced_before_metadata_fetch(alias, limit):
+    model = replace(fireworks.MODEL_SPECS[alias], max_seq_len=limit + 1)
+    with pytest.raises(PipelineError, match=f"serverless training context limit is {limit:,}"):
         capabilities.preflight_model(model)
 
 

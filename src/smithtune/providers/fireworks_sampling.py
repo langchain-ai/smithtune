@@ -151,6 +151,13 @@ class FireworksReplaySampler:
         parse_tokens = restore_stop_suffix(tokens, self.renderer, sequence.stop_reason)
         parsed, termination = self.renderer.parse_response(parse_tokens)
         candidate = self.renderer.to_openai_message(copy.deepcopy(parsed))
+        if self.model.renderer == "glm53_flash_preserve_thinking" and isinstance(parsed.get("content"), list):
+            # The cookbook's GLM conversion embeds thinking tags in visible
+            # content; replay keeps reasoning separate from the scored answer.
+            candidate["content"] = "".join(part["text"] for part in parsed["content"] if part["type"] == "text")
+            candidate["reasoning_content"] = "".join(
+                part["thinking"] for part in parsed["content"] if part["type"] == "thinking"
+            )
         unparsed = parsed.get("unparsed_tool_calls", [])
         candidate["sampling"] = {
             "session_id": self.service.training_session_id,

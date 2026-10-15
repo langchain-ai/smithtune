@@ -128,6 +128,35 @@ def test_partial_sampler_startup_closes_resources(tmp_path, monkeypatch):
     assert events == ["closed"]
 
 
+def test_glm_sampler_keeps_reasoning_separate_from_visible_answer_and_tools(tmp_path, monkeypatch):
+    from training.renderer import get_renderer
+    from smithtune.providers.fireworks import MODEL_SPECS
+    from test_hf_rendering import _tokenizer
+
+    model = MODEL_SPECS["glm-5p3-flash"]
+    tokenizer = _tokenizer()
+    tokenizer.add_special_tokens({"additional_special_tokens": [
+        "[gMASK]", "[sop]", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+    ]})
+    renderer = get_renderer(model.renderer, tokenizer)
+    monkeypatch.setattr(sampling, "load_training_renderer", lambda _: renderer)
+    completion = ('Consider café 🐢 東京</think>Checking.'
+                  '<tool_call>weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call><|observation|>')
+    sequence = SimpleNamespace(tokens=tokenizer.encode(completion, add_special_tokens=False), stop_reason="stop")
+    sampler = SimpleNamespace(
+        sample=lambda **kwargs: Future(SimpleNamespace(sequences=[sequence])), close=lambda: None,
+    )
+    service = SimpleNamespace(training_session_id="glm-session", create_sampling_client=lambda **kwargs: sampler)
+    adapter = sampling.FireworksReplaySampler(model, CHECKPOINT, tmp_path, service=service, snapshot="snapshot")
+    with adapter:
+        candidate = adapter.generate(CHECKPOINT, [{"role": "user", "content": "Paris weather?"}], 256)
+    assert candidate["content"] == "Checking."
+    assert candidate["reasoning_content"] == "Consider café 🐢 東京"
+    assert candidate["tool_calls"][0]["function"]["name"] == "weather"
+    assert json.loads(candidate["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+    assert candidate["sampling"]["format_valid"] is True
+
+
 def replay_data(tmp_path, monkeypatch):
     data = tmp_path / "data"
     write_manifest(data)
