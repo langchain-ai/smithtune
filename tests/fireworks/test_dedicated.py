@@ -9,10 +9,12 @@ import httpx
 import pytest
 
 from smithtune import cli
-from smithtune.providers import fireworks, fireworks_dedicated as dedicated, fireworks_sampling
+from smithtune.providers.fireworks import provider as fireworks
+from smithtune.providers.fireworks import dedicated
+from smithtune.providers.fireworks import sampling as fireworks_sampling
 from smithtune.providers.base import PipelineError, TrainingOptions
-from test_fireworks_sampling import Future, fake_renderer
-from test_pipeline import write_manifest
+from tests.fireworks.test_sampling import Future, fake_renderer
+from tests.test_pipeline import write_manifest
 
 SHAPE = "accounts/fireworks/trainingShapes/lora-qwen"
 VERSION = SHAPE + "/versions/test-v1"

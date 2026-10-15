@@ -18,8 +18,8 @@ from smithtune.evaluation import langsmith as reporting
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl
 from smithtune.inference_contract import json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import DEFAULT_MODEL
-from test_pipeline import example, write_raw
+from smithtune.providers.fireworks.provider import DEFAULT_MODEL
+from tests.test_pipeline import example, write_raw
 
 
 pytestmark = pytest.mark.sdk_integration
@@ -177,7 +177,7 @@ def prepared(tmp_path, monkeypatch, request):
     monkeypatch.setattr(reporting.time, "sleep", lambda _: None)
     model = DEFAULT_MODEL
     if getattr(request, "param", None) == "baseten":
-        from smithtune.providers.baseten import DEFAULT_MODEL as model
+        from smithtune.providers.baseten.provider import DEFAULT_MODEL as model
     manifest = dataset.prepare_dataset(WORKSPACE, DATASET, model, data, fetch=False,
         inference_contract=empty_contract(), check_render=False, validation_fraction=.2, test_fraction=.3)
     monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *_args, **_kwargs: ([{**case, "prompt_tokens": 8} for case in cases], []))
@@ -1097,7 +1097,7 @@ def test_lost_final_average_response_resumes_without_duplicate_feedback(prepared
 
 @pytest.mark.parametrize("prepared", ["baseten"], indirect=True)
 def test_completed_resume_cleans_up_before_experiment_setup(prepared, tmp_path, monkeypatch):
-    from test_baseten_evaluation import endpoint
+    from tests.baseten.test_evaluation import endpoint
 
     data, _, _ = prepared
     output = tmp_path / "completed"

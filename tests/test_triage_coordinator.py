@@ -13,8 +13,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from smithtune import triage, triage_agent, triage_coordinator
 from smithtune.triage_coordinator import JudgeTasks, coordinate, run_code
-from test_triage import API, SYSTEM, messages, source
-from test_triage_agent import JudgeModel
+from tests.test_triage import API, SYSTEM, messages, source
+from tests.test_triage_agent import JudgeModel
 
 
 JUDGE = {"name": "judge-1", "provider": "fireworks", "model": "test"}

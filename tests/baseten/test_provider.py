@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -13,7 +13,7 @@ import urllib.error
 import pytest
 
 from smithtune import dataset
-from smithtune.providers import baseten
+from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
 
 
@@ -2060,7 +2060,7 @@ def _write_raw_dataset(root: Path, *, count: int) -> None:
         "id": "dataset-id", "name": "alternate-model-test", "example_count": count,
     }))
 
-    from test_example_tools import write_empty_tool_snapshot
+    from tests.test_example_tools import write_empty_tool_snapshot
     write_empty_tool_snapshot(root, examples)
 
 

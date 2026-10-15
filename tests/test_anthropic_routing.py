@@ -1,5 +1,5 @@
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 import json
 
 import pytest
@@ -64,7 +64,7 @@ def test_doctor_reports_only_credential_presence(monkeypatch):
 
 @pytest.mark.parametrize("previous", ["missing_endpoint", "changed_endpoint", "missing_config"])
 def test_replay_rejects_results_with_unverified_or_changed_judge_endpoint(tmp_path, monkeypatch, previous):
-    from test_pipeline import write_manifest
+    from tests.test_pipeline import write_manifest
 
     data_dir, output = tmp_path / "data", tmp_path / "evaluation"
     write_manifest(data_dir)

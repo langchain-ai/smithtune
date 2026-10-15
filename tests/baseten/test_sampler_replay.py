@@ -1,6 +1,6 @@
 """Sampler routing, training handoff, and durable replay integration."""
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 import json
 from types import SimpleNamespace
@@ -10,10 +10,11 @@ import pytest
 
 from smithtune import cli, rendering
 from smithtune.evaluation import replay as evaluation
-from smithtune.providers import baseten, baseten_sampling
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.baseten import sampling as baseten_sampling
 from smithtune.providers.base import PipelineError
-from test_baseten_evaluation import replay_data
-from test_baseten_provider import FakeManagement, FakeService, FakeTrainer, _provider, _write_prepared_dataset
+from tests.baseten.test_evaluation import replay_data
+from tests.baseten.test_provider import FakeManagement, FakeService, FakeTrainer, _provider, _write_prepared_dataset
 
 
 CHECKPOINT = "bt://loops:run123/sampler_weights/best-epoch-2"

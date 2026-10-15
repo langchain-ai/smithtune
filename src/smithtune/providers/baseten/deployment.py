@@ -16,12 +16,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from smithtune.artifacts import _json_dump, _load_json, exclusive_output, output_lock
-from smithtune.providers.baseten_truss import prepare_deployment
+from smithtune.providers.baseten.truss import prepare_deployment
 from smithtune.capabilities import open_without_redirects
 from smithtune.inference import BasetenEndpoint, _baseten_chat_completion
 from smithtune.inference_contract import ContractError, json_sha256, parse_inference_contract
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import _require_confirm
+from smithtune.providers.fireworks.provider import _require_confirm
 
 
 class ControlError(PipelineError):

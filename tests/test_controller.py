@@ -273,7 +273,7 @@ def test_dash_prefixed_values_reach_the_worker(local_trainer):
 
 
 def test_baseten_termination_is_an_interruption(tmp_path, monkeypatch):
-    from smithtune.providers.baseten import TerminationRequested
+    from smithtune.providers.baseten.provider import TerminationRequested
 
     run = tmp_path / "run"
     control = controller.directory(run)

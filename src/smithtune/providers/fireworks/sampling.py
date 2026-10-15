@@ -13,7 +13,7 @@ from typing import Any
 from smithtune.artifacts import _json_dump, _load_json, _utc_now
 from smithtune.dataset import _model_from_manifest, _require_prepared_provider
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
+from smithtune.providers.fireworks.provider import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
 from smithtune.rendering import load_training_renderer, replay_prompt
 
 
@@ -42,7 +42,7 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, A
     if mode not in ("serverless", "dedicated"):
         raise PipelineError("saved Fireworks training mode is invalid")
     if mode == "dedicated":
-        from smithtune.providers.fireworks_dedicated import checkpoint_parts
+        from smithtune.providers.fireworks.dedicated import checkpoint_parts
 
         checkpoint_parts(checkpoint)
     elif not isinstance(checkpoint, str) or re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", checkpoint) is None:
@@ -56,7 +56,7 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, A
         raise PipelineError("prepared data reasoning effort differs from the Fireworks training run")
     extra = {}
     if mode == "dedicated":
-        from smithtune.providers.fireworks_dedicated import validate_saved_shape
+        from smithtune.providers.fireworks.dedicated import validate_saved_shape
 
         validate_saved_shape(plan.get("dedicated"), model.max_seq_len)
         extra = {"training_mode": mode, "dedicated": plan["dedicated"]}

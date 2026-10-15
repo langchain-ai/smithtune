@@ -5,9 +5,9 @@ import sys
 
 import pytest
 
-from firectl_fakes import FakeFirectl, shape
+from tests.fireworks.fakes import FakeFirectl, shape
 from smithtune.artifacts import _run
-from smithtune.providers import fireworks
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 
 

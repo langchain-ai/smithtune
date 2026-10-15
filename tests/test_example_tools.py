@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from binding_fixtures import bound_example
+from tests.binding_fixtures import bound_example
 from smithtune import dataset
 from smithtune.artifacts import _json_dump
 from smithtune.inference_contract import json_sha256

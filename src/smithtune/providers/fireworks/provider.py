@@ -129,7 +129,7 @@ class SFTSettings(CommonSFTSettings):
         if not math.isfinite(self.provisioning_timeout) or not 1 <= self.provisioning_timeout <= 7200:
             raise PipelineError("provisioning_timeout must be between 1 and 7200 seconds")
         if self.training_shape is not None:
-            from smithtune.providers.fireworks_dedicated import validate_shape_name
+            from smithtune.providers.fireworks.dedicated import validate_shape_name
 
             validate_shape_name(self.training_shape)
         if self.lora_rank is not None and self.lora_rank < 1:
@@ -428,7 +428,7 @@ class FireworksProvider:
             },
             "cookbook": {
                 "commit": COOKBOOK_COMMIT,
-                "recipe": "smithtune.providers.fireworks_training (uses the pinned SFT runtime helpers)",
+                "recipe": "smithtune.providers.fireworks.training (uses the pinned SFT runtime helpers)",
             },
             "config": {
                 "tokenizer_model": model.tokenizer_model,
@@ -469,7 +469,7 @@ class FireworksProvider:
             value["evaluation"] = (f"cross-entropy loss and perplexity on validation every {settings.validation_every_steps} optimizer steps "
                                    "and at each epoch end, without duplicate checks; test is reserved for replay")
         if settings.training_mode == "dedicated":
-            from smithtune.providers.fireworks_dedicated import resolve_shape
+            from smithtune.providers.fireworks.dedicated import resolve_shape
 
             value.update(
                 training_mode="dedicated",
@@ -503,7 +503,7 @@ class FireworksProvider:
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
         if settings.training_mode == "dedicated" and init_from_checkpoint is not None:
-            from smithtune.providers.fireworks_dedicated import checkpoint_parts
+            from smithtune.providers.fireworks.dedicated import checkpoint_parts
 
             checkpoint_parts(init_from_checkpoint)
         plan = self.plan(data_dir, run_id, settings, replay=replay)
@@ -520,7 +520,7 @@ class FireworksProvider:
         load_training_renderer(model)
         from training.recipes import sft_loop
         from training.utils import RunnerConfig, WandBConfig
-        from smithtune.providers.fireworks_training import ServerlessTraining
+        from smithtune.providers.fireworks.training import ServerlessTraining
 
         run_dir.mkdir(parents=True, exist_ok=True)
         _set_skill_session()
@@ -561,7 +561,7 @@ class FireworksProvider:
             if settings.validation_every_steps is not None:
                 session_options["validation_every_steps"] = settings.validation_every_steps
             if settings.training_mode == "dedicated":
-                from smithtune.providers.fireworks_dedicated import DedicatedTraining
+                from smithtune.providers.fireworks.dedicated import DedicatedTraining
 
                 session_class = DedicatedTraining
                 session_options["dedicated"] = plan["dedicated"]
@@ -572,13 +572,13 @@ class FireworksProvider:
                 session.complete()
                 if replay is not None:
                     from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
-                    from smithtune.providers.fireworks_sampling import FireworksReplaySampler
+                    from smithtune.providers.fireworks.sampling import FireworksReplaySampler
 
                     checkpoint = result["best"]["resume_checkpoint"]
                     sampler_class = FireworksReplaySampler
                     sampler_options = {}
                     if settings.training_mode == "dedicated":
-                        from smithtune.providers.fireworks_dedicated import DedicatedReplaySampler
+                        from smithtune.providers.fireworks.dedicated import DedicatedReplaySampler
 
                         sampler_class = DedicatedReplaySampler
                         sampler_options["dedicated"] = plan["dedicated"]

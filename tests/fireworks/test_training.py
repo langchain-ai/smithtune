@@ -7,7 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from smithtune.providers import fireworks, fireworks_dedicated, fireworks_training
+from smithtune.providers.fireworks import provider as fireworks
+from smithtune.providers.fireworks import dedicated as fireworks_dedicated
+from smithtune.providers.fireworks import training as fireworks_training
 from smithtune.providers.base import PipelineError
 
 
@@ -229,7 +231,7 @@ def test_exact_saved_identity_beats_timestamps_and_other_runs(tmp_path, monkeypa
 
 def test_plan_and_options_use_trajectory_optimizer_schedule(tmp_path):
     from smithtune.providers.base import TrainingOptions
-    from test_pipeline import write_manifest
+    from tests.test_pipeline import write_manifest
 
     write_manifest(tmp_path)
     provider = fireworks.FireworksProvider()
@@ -253,8 +255,8 @@ def test_plan_and_options_use_trajectory_optimizer_schedule(tmp_path):
 def test_train_replay_and_promotion_use_the_selected_mid_epoch_identity(tmp_path, monkeypatch, dedicated):
     import fireworks.training.sdk as sdk
     from smithtune.evaluation import replay
-    from smithtune.providers import fireworks_sampling
-    from test_pipeline import write_manifest
+    from smithtune.providers.fireworks import sampling as fireworks_sampling
+    from tests.test_pipeline import write_manifest
 
     data, run = tmp_path / "data", tmp_path / "run"
     write_manifest(data)

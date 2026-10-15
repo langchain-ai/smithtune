@@ -113,7 +113,7 @@ def test_dataset_publish_splits_dispatches_without_preparation(tmp_path, monkeyp
 
 def test_default_pull_directory_is_in_working_directory(tmp_path, monkeypatch):
     from smithtune import dataset_workflow
-    from test_triage import API, source
+    from tests.test_triage import API, source
 
     monkeypatch.chdir(tmp_path)
     result = dataset_workflow.run("pull", runner=API(),

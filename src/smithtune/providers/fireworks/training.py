@@ -16,7 +16,7 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _utc_now
-from smithtune.providers.fireworks_sampling import create_service
+from smithtune.providers.fireworks.sampling import create_service
 from smithtune.providers.base import PipelineError
 
 
@@ -129,7 +129,7 @@ class ServerlessTraining:
         from training.utils.checkpoints import TrainingCheckpoints
         from training.utils.serverless import ServerlessCheckpointClient
         from training.utils.runner_state import start_running
-        from smithtune.providers.fireworks import CLIENT_SOURCE, FIREWORKS_BASE_URL
+        from smithtune.providers.fireworks.provider import CLIENT_SOURCE, FIREWORKS_BASE_URL
 
         try:
             self.runner = self._stack.enter_context(RunnerIO(self.cfg.runner))
@@ -275,7 +275,7 @@ class ServerlessTraining:
         return result
 
     def epoch_checkpoints(self, checkpoint_name, *, state_path):
-        from smithtune.providers.fireworks import _epoch_checkpoints
+        from smithtune.providers.fireworks.provider import _epoch_checkpoints
 
         return _epoch_checkpoints(self.job_id, checkpoint_name, run_id=self.training_run_id, state_path=state_path)
 

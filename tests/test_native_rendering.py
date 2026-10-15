@@ -1,6 +1,6 @@
 """Native prefix masks, changing history, and provider datum boundaries."""
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 import copy
 from dataclasses import replace
@@ -12,9 +12,10 @@ import pytest
 
 from smithtune import dataset, hf_rendering, rendering
 from smithtune.native_rendering import NativePrefixRenderer
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
-from test_hf_rendering import MESSAGES, TOOLS, _loss_spans, _tokenizer
+from tests.test_hf_rendering import MESSAGES, TOOLS, _loss_spans, _tokenizer
 
 
 MODEL = baseten.MODEL_SPECS["qwen3p5-9b"]
@@ -163,7 +164,7 @@ def test_muse_rejects_shapes_the_cookbook_cannot_preserve(monkeypatch, stage, sh
 
 
 def test_actual_native_boundary_masks_each_target_with_changing_tools():
-    from test_assistant_bindings import example
+    from tests.test_assistant_bindings import example
     row, = dataset.prepare_sft_rows([example()[0]])
     renderer = _renderer()
     rows = rendering.render_row_tokens(row, MODEL, renderer=renderer)
@@ -181,7 +182,7 @@ def test_actual_native_boundary_masks_each_target_with_changing_tools():
 def test_fireworks_glm_masks_each_assistant_target_and_preserves_replay_history(monkeypatch, policy):
     import training.utils.tokenizers
     from smithtune.bindings import training_targets
-    from test_reasoning_policy import trajectory
+    from tests.test_reasoning_policy import trajectory
 
     tokenizer = _tokenizer()
     tokenizer.add_special_tokens({"additional_special_tokens": [

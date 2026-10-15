@@ -14,9 +14,9 @@ from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import CLIENT_SOURCE, FIREWORKS_BASE_URL, _promotable_checkpoint, _set_skill_session
-from smithtune.providers.fireworks_sampling import FireworksReplaySampler
-from smithtune.providers.fireworks_training import ServerlessTraining, _CheckpointSaveClient
+from smithtune.providers.fireworks.provider import CLIENT_SOURCE, FIREWORKS_BASE_URL, _promotable_checkpoint, _set_skill_session
+from smithtune.providers.fireworks.sampling import FireworksReplaySampler
+from smithtune.providers.fireworks.training import ServerlessTraining, _CheckpointSaveClient
 
 _SHAPE = re.compile(r"accounts/[a-zA-Z0-9_-]+/trainingShapes/[a-zA-Z0-9_-]+(?:/versions/[a-zA-Z0-9_-]+)?")
 _DEPLOYMENT_SHAPE = re.compile(r"accounts/[a-zA-Z0-9_-]+/deploymentShapes/[a-zA-Z0-9_-]+/versions/[a-zA-Z0-9_-]+")

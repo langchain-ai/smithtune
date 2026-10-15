@@ -1,5 +1,5 @@
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 import copy
 import io
 import json
@@ -11,9 +11,10 @@ import pytest
 
 from smithtune import cli, inference, rendering
 from smithtune.evaluation import replay as evaluation
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
-from test_pipeline import loaded_contract, tool_call, write_manifest
+from tests.test_pipeline import loaded_contract, tool_call, write_manifest
 
 
 def endpoint():
@@ -333,7 +334,7 @@ def test_temporary_replay_validates_resume_and_skips_compute_when_complete(tmp_p
 
 
 def test_run_bound_replay_rejects_another_models_prepared_data(tmp_path, monkeypatch):
-    from smithtune.providers.baseten_deployment import validate_evaluation_model
+    from smithtune.providers.baseten.deployment import validate_evaluation_model
 
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"

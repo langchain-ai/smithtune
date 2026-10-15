@@ -7,9 +7,9 @@ import pytest
 from smithtune import checkpoint, cli, curation, dataset, dataset_import, dataset_workflow, triage, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
-from test_dataset_workflow import run as workflow
-from test_dataset_import import API, example, receipt, uid, update
-from test_triage import API as TriageAPI, judge_call, source
+from tests.test_dataset_workflow import run as workflow
+from tests.test_dataset_import import API, example, receipt, uid, update
+from tests.test_triage import API as TriageAPI, judge_call, source
 
 
 def test_completed_stages_resume_without_source_or_destination_calls(tmp_path):

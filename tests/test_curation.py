@@ -11,7 +11,7 @@ import pytest
 from smithtune import artifacts
 from smithtune import curation
 from smithtune.providers.base import PipelineError
-from trajectory_fixtures import items
+from tests.trajectory_fixtures import items
 
 
 def uid(number):

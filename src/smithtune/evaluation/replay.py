@@ -30,7 +30,7 @@ from smithtune.inference import (
 )
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import _require_confirm, _set_skill_session
+from smithtune.providers.fireworks.provider import _require_confirm, _set_skill_session
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS, validate_reasoning_support, validate_replay_context
 
 

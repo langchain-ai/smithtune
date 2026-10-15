@@ -9,11 +9,11 @@ import pytest
 from smithtune import dataset, dataset_import, dataset_workflow, triage_source
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
-from test_curation import API as CurationAPI, COMMON_METADATA, root, uid
-from test_dataset_import import API as DestinationAPI, example, update
-from test_tool_capture import tool
-from binding_fixtures import bound_example
-from trajectory_fixtures import items
+from tests.test_curation import API as CurationAPI, COMMON_METADATA, root, uid
+from tests.test_dataset_import import API as DestinationAPI, example, update
+from tests.test_tool_capture import tool
+from tests.binding_fixtures import bound_example
+from tests.trajectory_fixtures import items
 
 
 def tool_turn(name="search", args=None):
