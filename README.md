@@ -291,28 +291,22 @@ Omit `--evaluate` and its replay options to train only.
 
 ### Run on a remote machine
 
-Check `execution.requires_active_client` in the selected workflow's `plan`.
-When it is `true`, Smithtune must keep running to drive training. Use the
-workflow below to run that controller on a machine that stays available.
-`train --detach` checks this plan field before launching.
+When the selected workflow's `plan` reports `execution.requires_active_client: true`,
+run Smithtune on an existing Linux VM to keep training independent of your local
+machine. Use a persistent disk and keep the VM running.
 
-To keep training independent of your laptop, use an existing Linux VM with a
-persistent disk, provisioned through your usual infrastructure tooling. Choose
-its resources and network access for the selected workflow. For the Fireworks
-Training API and Baseten Loops integrations, GPU operations run at the provider;
-the controller VM needs CPU, memory for tokenization and data loading, and
-outbound access to the providers and LangSmith, with no local GPU.
+For the Fireworks Training API and Baseten Loops integrations, GPUs run at the
+provider. The controller VM needs CPU and memory for tokenization and data loading,
+plus outbound access to the providers and LangSmith; it needs no local GPU.
 
 1. Connect to the VM with SSH. Install the same Smithtune version using the
    [quickstart](#quickstart), configure credentials for the remote user, run
    `smithtune acknowledge-data-rights` interactively there, and run `smithtune doctor`.
-2. Prepare the dataset on the VM, or copy the complete existing data directory
-   there. Keep compatible dependencies: preparation records tokenizer and renderer
-   versions. Use directories on the persistent disk.
-3. On the VM, preview the work and launch a detached controller:
+2. Prepare the dataset on the VM, or copy the complete data directory there with
+   compatible tokenizer and renderer dependencies. Use directories on the persistent disk.
+3. On the VM, preview the work and launch with the same training and evaluation settings:
 
 ```bash
-# Run these commands on the VM; paths refer to its filesystem.
 provider=baseten # or fireworks
 data_dir="$HOME/smithtune/data/my-sft"
 run_dir="$HOME/smithtune/runs/my-sft"
@@ -325,30 +319,19 @@ smithtune status --run-dir "$run_dir"
 smithtune logs --run-dir "$run_dir" --tail 100 --follow
 ```
 
-Repeat custom training and evaluation flags from your preview on `train`.
-`--detach` starts a separate process **on the machine running the command**.
-Launch it on the VM to obtain laptop independence. It inherits that user's
-credentials; Smithtune does not copy credentials from your laptop.
+`--detach` starts the controller **on the machine running the command**. Check
+`status` and the log to verify startup; you can then disconnect SSH and shut down
+your local machine. Reconnect to the same VM and user to inspect the run. Ctrl-C
+while following logs stops observation only. `status` reports controller health
+and artifact paths; it does not check provider resources or billing.
 
-After launch, you can disconnect SSH and close your laptop. Reconnect to the
-same VM and user to run `status` or `logs`. Ctrl-C while following logs stops
-observation only. `status` reports controller health and local artifact paths;
-it does not query provider resources or confirm that paid capacity was released.
-The launch response means the worker was spawned; check `status` and the log
-to verify startup. `logs` prints text; other commands return JSON.
+Use a new run directory for each launch, and retain both `"$run_dir"` and its
+sibling `"$run_dir.controller"` directory.
 
-Keep both `"$run_dir"` and its sibling `"$run_dir.controller"` directory. The
-sibling holds the launch request, controller receipt, lock, and combined log.
-Use one new run directory per launch. A recorded launch is never automatically
-submitted again, even if startup failed or its outcome is uncertain.
-
-**Your run continues when you close your laptop. If the remote controller
-fails, Smithtune preserves available progress and provides instructions for
-manual recovery.** The VM must stay on; controller crashes and VM reboots require
-manual recovery. There is no automatic restart. Provider resources may remain
-allocated after a failure. See [remote controller recovery](docs/reference.md#remote-controller-recovery)
-before retrying. A VM managed by a scheduler must allow the detached process to
-outlive the SSH session and must not automatically restart the training command.
+If the remote controller fails, Smithtune preserves available progress for
+[manual recovery](docs/reference.md#remote-controller-recovery). There is no
+automatic restart, and paid provider resources may remain allocated. Read the
+recovery guide before retrying or recovering from a VM reboot.
 
 ## Review results in LangSmith
 

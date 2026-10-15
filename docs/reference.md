@@ -121,7 +121,9 @@ Use the [remote machine workflow](../README.md#run-on-a-remote-machine) to launc
 `train --detach` on an existing VM when the selected workflow's plan reports
 `execution.requires_active_client: true`. Detachment keeps the controller alive
 independently of the launching terminal. It does not restart a failed controller
-or resume the same logical training run.
+or resume the same logical training run. The VM must allow the detached process
+to outlive its SSH session, and any supervisor must leave automatic restarts of
+the training command disabled.
 
 On the VM, inspect the original run:
 
