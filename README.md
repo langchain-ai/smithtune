@@ -289,6 +289,64 @@ samplers to generate responses. Fireworks reuses its training session; Baseten s
 samplers and deactivates them on exit. You do not need to run `deploy` for this step.
 Omit `--evaluate` and its replay options to train only.
 
+### Run on a remote machine
+
+Both Fireworks and Baseten require the Smithtune client to remain active: the
+client sends training batches, runs validation, and selects checkpoints. GPU
+operations run at the provider. `plan` reports `execution.requires_active_client`.
+
+To keep training independent of your laptop, use an existing Linux VM with a
+persistent disk. The controller needs CPU, memory for tokenization and data
+loading, and outbound access to your providers and LangSmith; it needs no GPU.
+Provision the machine through your usual cloud or infrastructure tooling.
+
+1. Connect to the VM with SSH. Install the same Smithtune version using the
+   [quickstart](#quickstart), configure credentials for the remote user, run
+   `smithtune acknowledge-data-rights` interactively there, and run `smithtune doctor`.
+2. Prepare the dataset on the VM, or copy the complete existing data directory
+   there. Keep compatible dependencies: preparation records tokenizer and renderer
+   versions. Use directories on the persistent disk.
+3. On the VM, preview the work and launch a detached controller:
+
+```bash
+# Run these commands on the VM; paths refer to its filesystem.
+provider=baseten # or fireworks
+data_dir="$HOME/smithtune/data/my-sft"
+run_dir="$HOME/smithtune/runs/my-sft"
+
+smithtune plan --provider "$provider" --data-dir "$data_dir" --evaluate
+smithtune train --provider "$provider" --data-dir "$data_dir" \
+  --run-dir "$run_dir" --evaluate --detach --confirm
+
+smithtune status --run-dir "$run_dir"
+smithtune logs --run-dir "$run_dir" --tail 100 --follow
+```
+
+Repeat custom training and evaluation flags from your preview on `train`.
+`--detach` starts a separate process **on the machine running the command**.
+Launch it on the VM to obtain laptop independence. It inherits that user's
+credentials; Smithtune does not copy credentials from your laptop.
+
+After launch, you can disconnect SSH and close your laptop. Reconnect to the
+same VM and user to run `status` or `logs`. Ctrl-C while following logs stops
+observation only. `status` reports controller health and local artifact paths;
+it does not query provider resources or confirm that paid capacity was released.
+The launch response means the worker was spawned; check `status` and the log
+to verify startup. `logs` prints text; other commands return JSON.
+
+Keep both `"$run_dir"` and its sibling `"$run_dir.controller"` directory. The
+sibling holds the launch request, controller receipt, lock, and combined log.
+Use one new run directory per launch. A recorded launch is never automatically
+submitted again, even if startup failed or its outcome is uncertain.
+
+**Your run continues when you close your laptop. If the remote controller
+fails, Smithtune preserves available progress and provides instructions for
+manual recovery.** The VM must stay on; controller crashes and VM reboots require
+manual recovery. There is no automatic restart. Provider resources may remain
+allocated after a failure. See [remote controller recovery](docs/reference.md#remote-controller-recovery)
+before retrying. A VM managed by a scheduler must allow the detached process to
+outlive the SSH session and must not automatically restart the training command.
+
 ## Review results in LangSmith
 
 The CLI prints **one comparison link** for the base and tuned experiments when

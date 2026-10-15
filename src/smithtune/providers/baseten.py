@@ -688,6 +688,7 @@ class BasetenProvider:
     """Train canonical LangSmith trajectories with Baseten Loops."""
 
     name = "baseten"
+    requires_active_client = True
 
     def __init__(
         self,
@@ -793,6 +794,7 @@ class BasetenProvider:
             "run_id": run_id,
             "provider": self.name,
             "method": "Baseten Loops LoRA SFT",
+            "execution": {"requires_active_client": self.requires_active_client},
             "base_model": model.base_model,
             "model": asdict(model),
             "dataset": {

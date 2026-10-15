@@ -22,7 +22,7 @@ def _utc_now() -> str:
 
 
 @contextmanager
-def output_lock(directory: Path):
+def output_lock(directory: Path, *, wait: bool = False):
     """Prevent concurrent CLI runs from replacing each other's receipts and votes."""
     import fcntl
 
@@ -30,7 +30,7 @@ def output_lock(directory: Path):
     # Keep the inode: unlinking this file can let a third process bypass the lock.
     with (directory / ".smithtune.lock").open("a") as handle:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError:
             raise PipelineError(f"another smithtune operation is using {directory}") from None
         try:

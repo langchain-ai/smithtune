@@ -300,6 +300,7 @@ class FireworksProvider:
     """Own the Fireworks training and deployment lifecycle."""
 
     name = "fireworks"
+    requires_active_client = True
 
     def model_from_options(self, options: ModelOptions) -> ModelSpec:
         model = resolve_model_options(options, MODEL_SPECS, provider=self.name)
@@ -393,6 +394,7 @@ class FireworksProvider:
             "run_id": run_id,
             "method": "Fireworks Training API serverless LoRA SFT",
             "training_api": TRAINING_BASE_URL,
+            "execution": {"requires_active_client": self.requires_active_client},
             "base_model": model.base_model,
             "source_examples_sha256": manifest.get("source_examples_sha256"),
             "dataset": {

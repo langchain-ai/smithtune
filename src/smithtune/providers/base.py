@@ -136,6 +136,7 @@ class TrainingProvider(Protocol):
     """Plan and execute one provider's training lifecycle."""
 
     name: str
+    requires_active_client: bool
 
     def model_from_options(self, options: ModelOptions) -> ModelSpec:
         """Resolve the provider's model profile and reject unsupported options."""

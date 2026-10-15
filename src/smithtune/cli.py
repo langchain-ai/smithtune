@@ -15,7 +15,7 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smithtune import data_rights, dataset, dataset_workflow
+from smithtune import controller, data_rights, dataset, dataset_workflow
 from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
@@ -190,6 +190,14 @@ def _parser() -> argparse.ArgumentParser:
     training.add_argument("--run-id", help="run name (default: generated from the UTC timestamp and a random suffix)")
     training.add_argument("--init-from-checkpoint")
     training.add_argument("--confirm", action="store_true")
+    training.add_argument("--detach", action="store_true", help="run independently of this terminal on the current machine; inspect with status/logs")
+
+    observation = sub.add_parser("status", help="inspect a detached controller on this machine; provider resources are not queried")
+    observation.add_argument("--run-dir", type=Path, required=True)
+    log = sub.add_parser("logs", help="print a detached controller's log on this machine")
+    log.add_argument("--run-dir", type=Path, required=True)
+    log.add_argument("--tail", type=int, default=100, help="last N lines (default: %(default)s)")
+    log.add_argument("--follow", action="store_true", help="stream until the controller exits; Ctrl-C stops observation only")
 
     common_defaults = CommonSFTSettings()
     fireworks_defaults = FireworksSFTSettings()
@@ -545,14 +553,19 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(arguments)
     activity = ExitStack()
     try:
-        if args.command not in {"doctor", "models"}:
+        if args.command not in {"doctor", "models", "status", "logs"}:
             receipt = data_rights.require_acknowledgment()
             if args.command == "acknowledge-data-rights":
                 print(json.dumps(receipt, indent=2, sort_keys=True))
                 return
         command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
         activity.enter_context(command_status(f"Running {command}"))
-        if args.command == "doctor":
+        if args.command == "status":
+            value = controller.status(args.run_dir)
+        elif args.command == "logs":
+            controller.logs(args.run_dir, tail=args.tail, follow=args.follow)
+            return
+        elif args.command == "doctor":
             value = diagnose()
         elif args.command == "models":
             profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
@@ -621,15 +634,26 @@ def main(argv: list[str] | None = None) -> None:
                     raise PipelineError("run ID must be a single directory name when --run-dir is omitted")
                 run_dir = Path.cwd() / "runs" / run_id
             print(f"Run ID: {run_id}\nRun directory: {run_dir.resolve()}", file=sys.stderr)
-            result = provider.train(
-                args.data_dir,
-                run_dir,
-                run_id,
-                _settings_from_args(args),
-                confirm=args.confirm,
-                init_from_checkpoint=args.init_from_checkpoint,
-                **_training_replay(args),
-            )
+            settings, replay = _settings_from_args(args), _training_replay(args)
+            if args.detach:
+                if not args.confirm:
+                    raise PipelineError("detached training requires --confirm")
+                if not provider.requires_active_client:
+                    raise PipelineError("this training provider does not require a detached controller")
+                provider.plan(args.data_dir, run_id, settings, **replay)
+                values = {**vars(args), "data_dir": args.data_dir.resolve(), "run_dir": run_dir.resolve(), "run_id": run_id}
+                worker_arguments = ["train"]
+                for name, value in values.items():
+                    if name in {"command", "detach"} or value is None or value is False:
+                        continue
+                    flag = f"--{name.replace('_', '-')}"
+                    worker_arguments.append(flag if value is True else f"{flag}={value}")
+                result = controller.launch(worker_arguments, run_dir, run_id, args.provider)
+            else:
+                result = provider.train(
+                    args.data_dir, run_dir, run_id, settings, confirm=args.confirm,
+                    init_from_checkpoint=args.init_from_checkpoint, **replay,
+                )
             value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
         elif args.command == "deploy":
             fireworks_options = (args.account_id, args.output_model_id, args.deployment_id, args.deployment_shape)
