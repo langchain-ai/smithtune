@@ -115,34 +115,6 @@ Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json`
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
-### Dedicated training throughput
-
-Size `prepare --max-seq-len` to cover `prepared/manifest.json`'s
-`audit.max_context_tokens`, the largest rendered sequence across accepted splits,
-including history and tools. Re-prepare to change the cap and inspect
-`prepared/rejected.json` for exclusions; over-limit trajectories are excluded,
-never truncated. Fireworks uses the prepared cap for trainer context and dedicated
-shape selection. Baseten Loops already sizes trainer context to the measured
-maximum, bounded by its training limit. A lower cap alone does not guarantee
-higher throughput.
-
-Review capacity in `plan`; pin Fireworks' versioned `--training-shape` for
-comparisons. Automatic shape selection checks compatibility, without benchmarking
-throughput or cost.
-
-| Workflow | Tuning controls |
-| --- | --- |
-| Fireworks dedicated | Increase `--batch-size` gradually, then tune `--pipeline-depth` separately to overlap more submitted training steps. Batches count trajectories, each potentially producing multiple assistant targets. |
-| Baseten Loops | Increase `--microbatch-token-budget` to fit more tokens per forward/backward call; keep it large enough for the longest sequence. `--batch-size` controls the effective batch through gradient accumulation; increasing it alone can just add accumulation work. |
-
-Use short trials on representative data within authorized spend, each in a new
-run directory. Change one setting at a time, holding data, model, capacity, LoRA
-rank, learning rate, and seed fixed. Compare rendered tokens per second and total
-capacity cost, including provisioning and validation. Stop increasing a setting
-when throughput plateaus or memory/provider limits are reached; keep a stable
-setting with headroom. Larger batches also change optimization, so check
-validation quality before committing to a full run.
-
 ### Remote controller recovery
 
 Use the [remote machine workflow](../README.md#run-on-a-remote-machine) to launch
@@ -227,6 +199,36 @@ Back up the complete data directory, run directory, and `.controller` sibling
 if the VM or its disk might be deleted. Atomic local artifact writes protect
 against interrupted process writes; preserving a remote provider checkpoint
 does not preserve the local configuration, tool evidence, or evaluation results.
+
+## Training optimizations
+
+### Dedicated training throughput
+
+Size `prepare --max-seq-len` to cover `prepared/manifest.json`'s
+`audit.max_context_tokens`, the largest rendered sequence across accepted splits,
+including history and tools. Re-prepare to change the cap and inspect
+`prepared/rejected.json` for exclusions; over-limit trajectories are excluded,
+never truncated. Fireworks uses the prepared cap for trainer context and dedicated
+shape selection. Baseten Loops already sizes trainer context to the measured
+maximum, bounded by its training limit. A lower cap alone does not guarantee
+higher throughput.
+
+Review capacity in `plan`; pin Fireworks' versioned `--training-shape` for
+comparisons. Automatic shape selection checks compatibility, without benchmarking
+throughput or cost.
+
+| Workflow | Tuning controls |
+| --- | --- |
+| Fireworks dedicated | Increase `--batch-size` gradually, then tune `--pipeline-depth` separately to overlap more submitted training steps. Batches count trajectories, each potentially producing multiple assistant targets. |
+| Baseten Loops | Increase `--microbatch-token-budget` to fit more tokens per forward/backward call; keep it large enough for the longest sequence. `--batch-size` controls the effective batch through gradient accumulation; increasing it alone can just add accumulation work. |
+
+Use short trials on representative data within authorized spend, each in a new
+run directory. Change one setting at a time, holding data, model, capacity, LoRA
+rank, learning rate, and seed fixed. Compare rendered tokens per second and total
+capacity cost, including provisioning and validation. Stop increasing a setting
+when throughput plateaus or memory/provider limits are reached; keep a stable
+setting with headroom. Larger batches also change optimization, so check
+validation quality before committing to a full run.
 
 ## Sampler behavior
 

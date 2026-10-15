@@ -400,6 +400,11 @@ Re-running with `--no-fetch` reuses the downloaded data (splits still sync).
 
 ## 6. Plan
 
+Before choosing training settings, consult the
+[training optimizations](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#training-optimizations)
+for the selected workflow. Use its context and batching guidance to propose
+settings and any budgeted comparison runs.
+
 ```bash
 smithtune plan \
   --provider "$provider" --data-dir "$data_dir" \
@@ -417,11 +422,6 @@ Check:
   action, plus calibration). `--max-points-per-trajectory` caps actions per
   test trajectory; omitting it evaluates every action.
 - Show the user these numbers and get authorization for the spend.
-
-For faster or cheaper dedicated training, read the
-[throughput tuning reference](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#dedicated-training-throughput).
-Inspect rendered sequence lengths and propose budgeted comparison runs using
-the workflow's batching controls; compare throughput, cost, and validation quality.
 
 ### Fireworks capacity
 
