@@ -115,6 +115,91 @@ Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json`
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
+### Remote controller recovery
+
+Use the [remote machine workflow](../README.md#run-on-a-remote-machine) to launch
+`train --detach` on an existing VM when the selected workflow's plan reports
+`execution.requires_active_client: true`. Detachment keeps the controller alive
+independently of the launching terminal. It does not restart a failed controller
+or resume the same logical training run. The VM must allow the detached process
+to outlive its SSH session, and any supervisor must leave automatic restarts of
+the training command disabled.
+
+On the VM, inspect the original run:
+
+```bash
+smithtune status --run-dir /persistent/runs/my-sft
+smithtune logs --run-dir /persistent/runs/my-sft --tail 200
+```
+
+`controller_active` uses the worker's local process lock, so a stale or reused
+PID cannot make a dead controller appear alive. `running` means the worker
+holds that lock, not that the provider is making progress. `completed` means
+the training command returned successfully, including evaluation if requested.
+`failed` records a command error. `interrupted` means the worker received an
+interruption or disappeared after starting. `unknown` means it has not recorded
+startup and holds no lock; it may still be starting, or may have died before its
+first receipt. Inspect the log before deciding to recover. `launch_failed`
+means the launcher could not start the process. These states do not establish
+whether provider resources are still running or billing.
+
+Preserve the data directory, run directory, and `.controller` sibling before
+retrying. `status` lists the available top-level run artifacts without assuming
+provider-specific filenames. Inspect those artifacts and the log, then confirm
+remote state with the recorded provider before submitting more work. Remote
+operations may have succeeded before their IDs or checkpoints were saved locally.
+Recovery options depend on the provider and training workflow; use the matching
+procedure below rather than inferring them from controller health.
+
+#### Fireworks Training API and Baseten Loops
+
+These integrations recover unfinished training by initializing a new run from a
+saved training-state checkpoint. They do not resume the same logical Smithtune
+run. Sampler-only weights cannot initialize training.
+
+1. **Reconcile paid resources first.** Inspect the saved session/run IDs,
+   `run-state.json` (Baseten), `session.json` (Fireworks), and any
+   `replay/sampler.json` receipt. Confirm resource state with the provider and
+   stop remaining owned training/sampling capacity. An interrupted creation
+   can have succeeded before its ID was saved; inspect the provider's console
+   or management API when receipts are incomplete. Closing a client or deleting
+   a VM does not establish that GPU capacity was released. Baseten's local spend
+   guard cannot enforce a limit after the controller dies; sampler and judge
+   costs are separate from its training budget.
+2. **If training is unfinished, inspect `epochs.json` for a saved resumable
+   checkpoint.** Baseten also records `last_resumable_state_uri` in
+   `run-state.json`. Fireworks records `resume_checkpoint` in each completed
+   epoch. Work since that checkpoint may need repeating. If local receipts are
+   incomplete, inspect the provider's checkpoint records too. Start from the
+   base model only if no usable training-state checkpoint can be recovered.
+3. **Initialize a new run with explicit remaining settings.** The new run
+   starts its epoch numbering, early-stopping history, and budget afresh. Keep
+   the earlier artifacts and checkpoints for comparison; the new run does not
+   select across the earlier run's validation history. Account for previous
+   work and spend when choosing the remaining epochs and budget.
+
+```bash
+smithtune plan --provider baseten --data-dir /persistent/data/my-sft --max-epochs 2
+smithtune train --provider baseten --data-dir /persistent/data/my-sft \
+  --run-dir /persistent/runs/my-sft-recovery --max-epochs 2 \
+  --init-from-checkpoint '<saved-resumable-checkpoint>' --detach --confirm
+```
+
+Use your original provider and chosen remaining settings; `2` is illustrative.
+Checkpoint availability is subject to provider retention. Do not clear the old
+run directory or its `.controller` sibling to force a retry.
+
+4. **If training completed and evaluation failed, resume evaluation.** Keep
+   the original provider, data/run/output directories, and replay flags. The
+   existing [evaluation recovery](#resume-an-interrupted-evaluation) reuses
+   saved generations and completed results; it can run in a persistent terminal
+   or service on the VM. Detached training itself is never resubmitted.
+
+Back up the complete data directory, run directory, and `.controller` sibling
+if the VM or its disk might be deleted. Atomic local artifact writes protect
+against interrupted process writes; preserving a remote provider checkpoint
+does not preserve the local configuration, tool evidence, or evaluation results.
+
 ## Sampler behavior
 
 Replay uses `SamplingClient` for both providers; serving capacity depends on the

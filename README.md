@@ -291,6 +291,50 @@ serverless and dedicated LoRA training; Baseten uses temporary dedicated sampler
 You do not need to run `deploy` for this step.
 Omit `--evaluate` and its replay options to train only.
 
+### Run on a remote machine
+
+When the selected workflow's `plan` reports `execution.requires_active_client: true`,
+run Smithtune on an existing Linux VM to keep training independent of your local
+machine. Use a persistent disk and keep the VM running.
+
+For the Fireworks Training API and Baseten Loops integrations, GPUs run at the
+provider. The controller VM needs CPU and memory for tokenization and data loading,
+plus outbound access to the providers and LangSmith; it needs no local GPU.
+
+1. Connect to the VM with SSH. Install the same Smithtune version using the
+   [quickstart](#quickstart), configure credentials for the remote user, run
+   `smithtune acknowledge-data-rights` interactively there, and run `smithtune doctor`.
+2. Prepare the dataset on the VM, or copy the complete data directory there with
+   compatible tokenizer and renderer dependencies. Use directories on the persistent disk.
+3. On the VM, preview the work and launch with the same training and evaluation settings:
+
+```bash
+provider=baseten # or fireworks
+data_dir="$HOME/smithtune/data/my-sft"
+run_dir="$HOME/smithtune/runs/my-sft"
+
+smithtune plan --provider "$provider" --data-dir "$data_dir" --evaluate
+smithtune train --provider "$provider" --data-dir "$data_dir" \
+  --run-dir "$run_dir" --evaluate --detach --confirm
+
+smithtune status --run-dir "$run_dir"
+smithtune logs --run-dir "$run_dir" --tail 100 --follow
+```
+
+`--detach` starts the controller **on the machine running the command**. Check
+`status` and the log to verify startup; you can then disconnect SSH and shut down
+your local machine. Reconnect to the same VM and user to inspect the run. Ctrl-C
+while following logs stops observation only. `status` reports controller health
+and artifact paths; it does not check provider resources or billing.
+
+Use a new run directory for each launch, and retain both `"$run_dir"` and its
+sibling `"$run_dir.controller"` directory.
+
+If the remote controller fails, Smithtune preserves available progress for
+[manual recovery](docs/reference.md#remote-controller-recovery). There is no
+automatic restart, and paid provider resources may remain allocated. Read the
+recovery guide before retrying or recovering from a VM reboot.
+
 ## Review results in LangSmith
 
 The CLI prints **one comparison link** for the base and tuned experiments when

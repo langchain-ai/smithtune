@@ -29,6 +29,7 @@ from smithtune.providers.base import (
     ModelSpec,
     PipelineError,
     ReasoningPolicy,
+    TerminationRequested,
     TrainingOptions,
 )
 
@@ -111,10 +112,6 @@ class BasetenRuntimeError(RuntimeError):
 
 class BudgetExceeded(BasetenRuntimeError):
     """The configured Baseten active-time ceiling has been reached."""
-
-
-class TerminationRequested(BaseException):
-    """A SIGTERM requested orderly Baseten lifecycle cleanup."""
 
 
 def _maximum_active_seconds(
@@ -795,6 +792,7 @@ class BasetenProvider:
             "run_id": run_id,
             "provider": self.name,
             "method": "Baseten Loops LoRA SFT",
+            "execution": {"requires_active_client": True},
             "base_model": model.base_model,
             "model": asdict(model),
             "dataset": {

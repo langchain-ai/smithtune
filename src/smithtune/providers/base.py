@@ -14,6 +14,10 @@ class PipelineError(ValueError):
     """A local input or state error shared across provider adapters."""
 
 
+class TerminationRequested(BaseException):
+    """A SIGTERM requested orderly training lifecycle cleanup."""
+
+
 ReasoningPolicy = Literal["omit", "preserve"]
 
 
@@ -166,7 +170,13 @@ class TrainingProvider(Protocol):
         """Apply provider preparation policy to shared trajectory preparation."""
 
     def plan(self, data_dir: Path, run_id: str, settings: Any) -> dict[str, Any]:
-        """Return a reviewable plan without provisioning resources."""
+        """Return a reviewable plan without provisioning resources.
+
+        execution.requires_active_client is a boolean for this resolved workflow:
+        true when Smithtune must keep running to drive the requested training
+        and evaluation work. Detached launch uses this value; adapters with
+        multiple execution modes resolve it here.
+        """
 
     def train(
         self,

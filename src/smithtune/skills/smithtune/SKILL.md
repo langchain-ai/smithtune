@@ -43,6 +43,20 @@ before an unfamiliar command.
 
 ## 0. Before anything
 
+**Remote execution:** when the user needs a run to continue after their local machine
+disconnects, follow the README's [remote machine workflow](https://github.com/langchain-ai/smithtune/blob/main/README.md#run-on-a-remote-machine).
+Preview the selected workflow on the user's existing VM and check
+`execution.requires_active_client`. When it is `true`, run `train --detach`
+there, using its credentials and persistent data/run paths. Execution on the
+local machine still depends on it staying on. Obtain paid-work authorization
+and check `status --run-dir DIR` plus
+`logs --run-dir DIR` after launching. A launch acknowledgment is not training
+completion. Preserve both `DIR` and `DIR.controller`. For `failed`,
+`interrupted`, or ambiguous startup, use [manual recovery](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#remote-controller-recovery):
+confirm remote resource state and follow the recovery procedure for the recorded
+provider and workflow. When initializing a recovery run, choose its remaining
+epochs and budget explicitly.
+
 ```bash
 smithtune doctor
 smithtune models list --provider "$provider"
