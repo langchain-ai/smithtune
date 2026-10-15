@@ -19,6 +19,7 @@ from test_pipeline import example, write_raw
 def glm_tokenizer(monkeypatch):
     import training.utils.tokenizers
     import training.utils.supervised
+    from training.renderer.glm5 import Glm53FlashImageTokenCounter
 
     tokenizer = _tokenizer()
     tokenizer.add_special_tokens({"additional_special_tokens": [
@@ -26,6 +27,8 @@ def glm_tokenizer(monkeypatch):
     ]})
     monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: tokenizer)
     monkeypatch.setattr(training.utils.supervised, "load_tokenizer", lambda *args, **kwargs: tokenizer)
+    # Text-only worker tests use a local counter instead of fetching image assets.
+    monkeypatch.setattr(Glm53FlashImageTokenCounter, "from_pretrained", classmethod(lambda cls, *_: cls()))
     return tokenizer
 
 
