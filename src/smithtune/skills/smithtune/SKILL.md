@@ -45,15 +45,17 @@ before an unfamiliar command.
 
 **Remote execution:** when the user needs a run to continue after their laptop
 disconnects, follow the README's [remote machine workflow](https://github.com/langchain-ai/smithtune/blob/main/README.md#run-on-a-remote-machine).
-Both training providers currently require a live controller. Run `train --detach`
-on the user's existing VM, using its credentials and persistent data/run paths;
-running it on the laptop still depends on the laptop staying on. Preview there,
-obtain paid-work authorization, and check `status --run-dir DIR` plus
+Preview the selected workflow on the user's existing VM and check
+`execution.requires_active_client`. When it is `true`, run `train --detach`
+there, using its credentials and persistent data/run paths; running it on the
+laptop still depends on the laptop staying on. Obtain paid-work authorization
+and check `status --run-dir DIR` plus
 `logs --run-dir DIR` after launching. A launch acknowledgment is not training
 completion. Preserve both `DIR` and `DIR.controller`. For `failed`,
 `interrupted`, or ambiguous startup, use [manual recovery](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#remote-controller-recovery):
-reconcile resources, then initialize a new run from a saved training checkpoint
-or resume completed training's evaluation. Keep remaining epochs/budget explicit.
+confirm remote resource state and follow the recovery procedure for the recorded
+provider and workflow. When initializing a recovery run, choose its remaining
+epochs and budget explicitly.
 
 ```bash
 smithtune doctor

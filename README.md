@@ -291,14 +291,17 @@ Omit `--evaluate` and its replay options to train only.
 
 ### Run on a remote machine
 
-Both Fireworks and Baseten require the Smithtune client to remain active: the
-client sends training batches, runs validation, and selects checkpoints. GPU
-operations run at the provider. `plan` reports `execution.requires_active_client`.
+Check `execution.requires_active_client` in the selected workflow's `plan`.
+When it is `true`, Smithtune must keep running to drive training. Use the
+workflow below to run that controller on a machine that stays available.
+`train --detach` checks this plan field before launching.
 
 To keep training independent of your laptop, use an existing Linux VM with a
-persistent disk. The controller needs CPU, memory for tokenization and data
-loading, and outbound access to your providers and LangSmith; it needs no GPU.
-Provision the machine through your usual cloud or infrastructure tooling.
+persistent disk, provisioned through your usual infrastructure tooling. Choose
+its resources and network access for the selected workflow. For the Fireworks
+Training API and Baseten Loops integrations, GPU operations run at the provider;
+the controller VM needs CPU, memory for tokenization and data loading, and
+outbound access to the providers and LangSmith, with no local GPU.
 
 1. Connect to the VM with SSH. Install the same Smithtune version using the
    [quickstart](#quickstart), configure credentials for the remote user, run

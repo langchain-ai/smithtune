@@ -8,6 +8,14 @@ Provider-specific training, sampling, and deployment modules live under
 `src/smithtune/providers/`. Shared rendering stays in `src/smithtune/`; replay orchestration lives in
 `src/smithtune/evaluation/replay.py`.
 
+Each training plan declares `execution.requires_active_client` for its resolved
+workflow. Detached launch requires this field to be `true`; resolve it from the
+selected execution mode when an adapter offers multiple modes. Keep resource
+receipts and recovery procedures in the provider integration. Shared controller
+status reports local process health and discovers available run artifacts.
+Adapters that intercept SIGTERM for cleanup raise the shared
+`providers.base.TerminationRequested` so the controller records an interruption.
+
 `evaluation/langsmith.py` publishes versioned splits, saved replay predictions,
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable
 across upload retries. Verify snapshots and create the experiments before paid

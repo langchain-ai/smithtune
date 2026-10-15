@@ -118,10 +118,10 @@ Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rat
 ### Remote controller recovery
 
 Use the [remote machine workflow](../README.md#run-on-a-remote-machine) to launch
-`train --detach` on an existing VM. Both current providers require an active
-client, including during training with remote GPU capacity. Detachment keeps
-the controller alive independently of the launching terminal. It does not
-restart a failed controller or resume the same logical training run.
+`train --detach` on an existing VM when the selected workflow's plan reports
+`execution.requires_active_client: true`. Detachment keeps the controller alive
+independently of the launching terminal. It does not restart a failed controller
+or resume the same logical training run.
 
 On the VM, inspect the original run:
 
@@ -141,7 +141,19 @@ first receipt. Inspect the log before deciding to recover. `launch_failed`
 means the launcher could not start the process. These states do not establish
 whether provider resources are still running or billing.
 
-Recovery steps:
+Preserve the data directory, run directory, and `.controller` sibling before
+retrying. `status` lists the available top-level run artifacts without assuming
+provider-specific filenames. Inspect those artifacts and the log, then confirm
+remote state with the recorded provider before submitting more work. Remote
+operations may have succeeded before their IDs or checkpoints were saved locally.
+Recovery options depend on the provider and training workflow; use the matching
+procedure below rather than inferring them from controller health.
+
+#### Fireworks Training API and Baseten Loops
+
+These integrations recover unfinished training by initializing a new run from a
+saved training-state checkpoint. They do not resume the same logical Smithtune
+run. Sampler-only weights cannot initialize training.
 
 1. **Reconcile paid resources first.** Inspect the saved session/run IDs,
    `run-state.json` (Baseten), `session.json` (Fireworks), and any
@@ -155,9 +167,9 @@ Recovery steps:
 2. **If training is unfinished, inspect `epochs.json` for a saved resumable
    checkpoint.** Baseten also records `last_resumable_state_uri` in
    `run-state.json`. Fireworks records `resume_checkpoint` in each completed
-   epoch. Use a training-state checkpoint, rather than sampler-only weights.
-   Work since that checkpoint may need repeating. If no checkpoint was saved,
-   start training again from the base model.
+   epoch. Work since that checkpoint may need repeating. If local receipts are
+   incomplete, inspect the provider's checkpoint records too. Start from the
+   base model only if no usable training-state checkpoint can be recovered.
 3. **Initialize a new run with explicit remaining settings.** The new run
    starts its epoch numbering, early-stopping history, and budget afresh. Keep
    the earlier artifacts and checkpoints for comparison; the new run does not

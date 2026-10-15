@@ -638,9 +638,13 @@ def main(argv: list[str] | None = None) -> None:
             if args.detach:
                 if not args.confirm:
                     raise PipelineError("detached training requires --confirm")
-                if not provider.requires_active_client:
-                    raise PipelineError("this training provider does not require a detached controller")
-                provider.plan(args.data_dir, run_id, settings, **replay)
+                plan = provider.plan(args.data_dir, run_id, settings, **replay)
+                execution = plan.get("execution", {})
+                requires_client = execution.get("requires_active_client") if isinstance(execution, dict) else None
+                if not isinstance(requires_client, bool):
+                    raise PipelineError("training plan must declare execution.requires_active_client as a boolean")
+                if not requires_client:
+                    raise PipelineError("this training workflow does not require a detached controller")
                 values = {**vars(args), "data_dir": args.data_dir.resolve(), "run_dir": run_dir.resolve(), "run_id": run_id}
                 worker_arguments = ["train"]
                 for name, value in values.items():

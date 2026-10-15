@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _load_json, _utc_now, output_lock
-from smithtune.providers.base import PipelineError
+from smithtune.providers.base import PipelineError, TerminationRequested
 
 
 RECOVERY_GUIDE = "https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#remote-controller-recovery"
@@ -72,7 +72,7 @@ def status(run_dir: Path) -> dict:
         raise PipelineError(f"no detached controller recorded for {run_dir}")
     with ExitStack() as observation:
         try:
-            observation.enter_context(output_lock(control_dir))
+            observation.enter_context(output_lock(control_dir, shared=True))
             active = False
         except PipelineError:
             active = True
@@ -91,16 +91,13 @@ def status(run_dir: Path) -> dict:
         result["status"] = "unknown"
     result["provider_resources"] = "not_checked"
     result["artifacts"] = {
-        name: str(run_dir.resolve() / name) for name in (
-            "plan.json", "epochs.json", "run-state.json", "session.json", "result.json", "replay",
-        ) if (run_dir / name).exists()
-    }
+        path.name: str(path) for path in sorted(run_dir.resolve().iterdir())
+    } if run_dir.is_dir() else {}
     if result["status"] in {"failed", "interrupted", "unknown", "launch_failed"}:
         result["recovery"] = [
             "Inspect the controller log and saved run artifacts; status does not check provider resources.",
-            "Reconcile and release remaining paid provider resources before starting another run.",
-            "For unfinished training, initialize a NEW run from a saved resumable checkpoint and choose remaining epochs/budget explicitly.",
-            "If training completed, rerun evaluate with the original provider, directories, and settings.",
+            "Confirm remote resource state and ownership before retrying; cancel or release resources according to the workflow's recovery procedure.",
+            "Use the recovery procedure for the recorded provider and training workflow; inspect remote progress as well as saved local artifacts.",
             f"Manual recovery: {RECOVERY_GUIDE}",
         ]
     return result
@@ -140,7 +137,6 @@ def logs(run_dir: Path, *, tail: int = 100, follow: bool = False) -> None:
 
 def run(control_dir: Path) -> int:
     from smithtune.cli import main
-    from smithtune.providers.baseten import TerminationRequested
 
     # An observer may briefly hold the lock while the worker is starting.
     with output_lock(control_dir, wait=True):

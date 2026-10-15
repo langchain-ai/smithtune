@@ -6,8 +6,10 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -41,7 +43,6 @@ from smithtune import cli
 
 real_provider = cli.get_provider
 class Provider:
-    requires_active_client = True
     def __init__(self, name):
         self.name = name
     def settings_from_options(self, options):
@@ -182,18 +183,56 @@ def test_spawn_failure_is_recorded_without_retry(tmp_path, monkeypatch):
         controller.launch(["train", "--confirm"], run, "run", "baseten")
 
 
-@pytest.mark.parametrize("arguments,match", [
-    (["train", "--detach"], "requires --confirm"),
-    (["train", "--detach", "--confirm"], "does not require"),
-])
-def test_detach_gates_launch(arguments, match, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "get_provider", lambda _: SimpleNamespace(requires_active_client=False, settings_from_options=lambda options: options))
+def test_detach_requires_confirmation(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "get_provider", lambda _: SimpleNamespace(settings_from_options=lambda options: options))
     launch = Mock()
     monkeypatch.setattr(controller, "launch", launch)
     with pytest.raises(SystemExit):
-        cli.main(arguments)
-    assert match in capsys.readouterr().err
+        cli.main(["train", "--detach"])
+    assert "requires --confirm" in capsys.readouterr().err
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("execution,error", [
+    ({"requires_active_client": True}, None),
+    ({"requires_active_client": False}, "workflow does not require"),
+    ({}, "plan must declare"),
+    ({"requires_active_client": "true"}, "plan must declare"),
+])
+def test_detach_uses_selected_workflow_plan(execution, error, monkeypatch, capsys):
+    provider = SimpleNamespace(
+        settings_from_options=lambda options: options,
+        plan=Mock(return_value={"execution": execution}),
+    )
+    monkeypatch.setattr(cli, "get_provider", lambda _: provider)
+    launch = Mock(return_value={"status": "starting"})
+    monkeypatch.setattr(controller, "launch", launch)
+    if error:
+        with pytest.raises(SystemExit):
+            cli.main(["train", "--detach", "--confirm"])
+        assert error in capsys.readouterr().err
+        launch.assert_not_called()
+    else:
+        cli.main(["train", "--detach", "--confirm"])
+        assert json.loads(capsys.readouterr().out)["status"] == "starting"
+        launch.assert_called_once()
+    provider.plan.assert_called_once()
+
+
+def test_status_reports_artifacts_without_provider_filename_assumptions(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    resource = run / "training-job.json"
+    resource.write_text('{"job_id": "remote-job"}')
+    checkpoints = run / "checkpoints"
+    checkpoints.mkdir()
+    _json_dump(controller.directory(run) / "controller.json", {
+        "schema_version": 1, "status": "failed", "run_dir": str(run.resolve()),
+        "provider": "job-provider",
+    })
+    observed = controller.status(run)
+    assert observed["provider"] == "job-provider"
+    assert observed["artifacts"] == {"training-job.json": str(resource), "checkpoints": str(checkpoints)}
 
 
 def test_status_and_logs_need_no_data_rights_acknowledgment(tmp_path, monkeypatch, capsys):
@@ -276,6 +315,33 @@ def test_completion_during_observation_uses_final_receipt(tmp_path, monkeypatch)
 
     monkeypatch.setattr(controller, "output_lock", completes_before_lock)
     assert controller.status(run)["status"] == "completed"
+
+
+def test_concurrent_observers_do_not_appear_as_an_active_controller(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _json_dump(controller.directory(run) / "controller.json", {
+        "schema_version": 1, "status": "running", "run_dir": str(run.resolve()),
+    })
+    reading, release = Event(), Event()
+    load = controller._load_json
+
+    def pause_first_reader(path):
+        if not reading.is_set():
+            reading.set()
+            assert release.wait(timeout=5)
+        return load(path)
+
+    monkeypatch.setattr(controller, "_load_json", pause_first_reader)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(controller.status, run)
+        try:
+            assert reading.wait(timeout=5)
+            second = controller.status(run)
+        finally:
+            release.set()
+        for observed in (first.result(timeout=5), second):
+            assert observed["controller_active"] is False
+            assert observed["status"] == "interrupted"
 
 
 def test_follow_waits_for_startup_and_drains_final_output(tmp_path, monkeypatch, capsys):

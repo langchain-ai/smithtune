@@ -206,6 +206,7 @@ print(json.dumps(plan))
     )
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
+    assert plan["execution"]["requires_active_client"] is True
     assert plan["base_model"] == manifest["model"]["base_model"]
     assert plan["dataset"]["train_rows"] == manifest["split"]["train"]
 
