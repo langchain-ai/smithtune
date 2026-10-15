@@ -420,7 +420,12 @@ selection may change between commands unless the version is explicitly pinned;
 This mode supports the existing prepared models and contexts, with LoRA only.
 `--provisioning-timeout` bounds each placement/readiness stage (default 1800 seconds).
 
-Dedicated replay uses separate temporary base and tuned deployments. Standalone
+The sampling client interface does not imply serverless capacity. Fireworks
+serverless runs sample through the shared pool; dedicated runs use separate
+temporary base and tuned GPU deployments, billed alongside the trainer. Dedicated
+checkpoints cannot be moved into the serverless sampler, even when the same base
+model supports serverless training. Dedicated replay currently uses standard
+deployments, without preemptible capacity. Standalone
 `evaluate --run-dir` restores the selected checkpoint on temporary dedicated
 capacity using the saved shape versions. Owned resource IDs are saved before
 creation in `session.json` and replay `resources.json`; deletion is requested on
@@ -481,8 +486,13 @@ smithtune evaluate --provider "$provider" --data-dir "$data_dir" --run-dir "$run
 
 Rerunning reuses completed predictions and judgments. Fireworks samples the
 saved training checkpoint (a promoted model ID alone cannot be
-sampled); Baseten starts temporary samplers and deactivates them on exit. To change the judge, cap,
-or sampling settings, pass a fresh `--output-dir` to both commands.
+sampled), using the saved serverless or dedicated training mode. Baseten loads
+saved sampler weights into two temporary dedicated deployments, for the base
+and tuned models, without restarting training; both are deactivated on exit.
+Their GPU and judge costs are separate from Baseten's training spend guard.
+For `train --evaluate`, Baseten shuts down its training resources before replay.
+To change the judge, cap, or sampling settings, pass a fresh `--output-dir` to
+both commands.
 
 ## 9. Deploy (optional)
 

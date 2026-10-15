@@ -117,17 +117,39 @@ Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rat
 
 ## Sampler behavior
 
-In serverless mode, Fireworks reuses its training session for `train --evaluate`.
-Baseten shuts down its trainer, then starts dedicated Loops samplers for the
-best checkpoint and base model; both samplers are deactivated on exit.
-Sampler and judge costs are separate from Baseten's training spend guard.
-Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key with the
-default Baseten judge or an Anthropic judge. Periodic replay during training is not implemented.
+Replay uses each provider's `SamplingClient` to generate the base and tuned
+responses. That client interface can be backed by shared serverless capacity or
+dedicated GPU deployments:
 
-Fireworks requires its saved training checkpoint; a promoted model ID
-alone cannot be sampled. Baseten requires saved Loops sampler weights. Keep the
-training run directory so another team member can resolve the selected checkpoint.
-See [Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models#in-session-sampling-serverless-training).
+| Training mode | Replay capacity | Cleanup | Evaluation costs |
+| --- | --- | --- | --- |
+| Fireworks serverless (default) | Both models use the shared serverless sampler; no dedicated inference deployments | Close sampler and session clients | Sampling tokens and judge calls |
+| Fireworks dedicated | Two temporary dedicated inference deployments: selected checkpoint and base model | Request deletion of owned deployments and trainer on exit | Allocated trainer time, each inference deployment, and judge calls |
+| Baseten Loops | Two temporary dedicated Loops sampler deployments: selected checkpoint and base model; training resources are shut down first | Deactivate both sampler deployments on exit | Sampler GPU capacity and judge calls; separate from the training spend guard |
+
+`train --evaluate` starts replay after selecting the best validation checkpoint.
+Fireworks reuses its live training session or dedicated trainer. Baseten releases
+its training resources before starting the samplers. Standalone `evaluate
+--run-dir ...` follows the saved training mode: Fireworks restores the checkpoint
+on a new session or temporary dedicated trainer; Baseten loads saved sampler
+weights without restarting training. Periodic replay during training is not
+implemented.
+
+A Fireworks model being available for serverless training does not make a
+checkpoint trained on dedicated capacity usable by the serverless sampler.
+[Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models#in-session-sampling-serverless-training)
+is limited to serverless training sessions. SmithTune uses dedicated replay for
+dedicated Fireworks runs; it does not import those checkpoints into serverless
+sampling. A promoted model ID alone cannot be passed to the Training API
+sampling client.
+
+Keep the training run directory: Fireworks replay needs the saved training
+checkpoint and settings; Baseten needs its saved Loops sampler weights.
+Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key with the
+default Baseten judge or an Anthropic judge. Temporary replay capacity is separate
+from a standing endpoint created with `deploy`; no separate deployment command
+is needed for replay. Cleanup runs on completion and failures; recorded resources
+need manual attention if cleanup itself fails.
 
 ## Fireworks dedicated LoRA training
 
@@ -135,8 +157,8 @@ Fireworks defaults to serverless LoRA SFT. To use dedicated capacity, add
 `--training-mode dedicated` to both `plan` and `train`:
 
 ```bash
-smithtune plan --provider fireworks --data-dir "$data_dir" --training-mode dedicated
-smithtune train --provider fireworks --data-dir "$data_dir" --training-mode dedicated --confirm
+smithtune plan --provider fireworks --data-dir "$data_dir" --training-mode dedicated --evaluate
+smithtune train --provider fireworks --data-dir "$data_dir" --training-mode dedicated --evaluate --confirm
 ```
 
 SmithTune automatically selects a validated LoRA shape for the prepared model
@@ -168,7 +190,9 @@ Dedicated trainers are billed for allocated time, including time between work.
 and base inference deployments, each billed separately. Standalone `evaluate
 --run-dir ...` uses the saved training and serving versions, temporarily starts
 a trainer to restore the selected checkpoint, and creates both inference
-deployments. A training-only run does not provision inference capacity.
+deployments. These are standard dedicated deployments; preemptible replay is
+not implemented. Omit `--evaluate` from both commands to train without provisioning
+inference capacity.
 
 SmithTune records owned IDs before provisioning and requests deletion on normal
 exit, readiness failure, exceptions, Ctrl-C, and SIGTERM. Inspect `session.json`
