@@ -117,98 +117,46 @@ Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rat
 
 ## Sampler behavior
 
-Replay uses each provider's `SamplingClient` to generate the base and tuned
-responses. That client interface can be backed by shared serverless capacity or
-dedicated GPU deployments:
+Replay uses `SamplingClient` for both providers; serving capacity depends on the
+training mode:
 
-| Training mode | Replay capacity | Cleanup | Evaluation costs |
-| --- | --- | --- | --- |
-| Fireworks serverless (default) | Both models use the shared serverless sampler; no dedicated inference deployments | Close sampler and session clients | Sampling tokens and judge calls |
-| Fireworks dedicated | Two temporary dedicated inference deployments: selected checkpoint and base model | Request deletion of owned deployments and trainer on exit | Allocated trainer time, each inference deployment, and judge calls |
-| Baseten Loops | Two temporary dedicated Loops sampler deployments: selected checkpoint and base model; training resources are shut down first | Deactivate both sampler deployments on exit | Sampler GPU capacity and judge calls; separate from the training spend guard |
+| Training mode | Replay capacity |
+| --- | --- |
+| Fireworks serverless (default) | Shared serverless sampling for base and tuned models |
+| Fireworks dedicated | Two temporary dedicated deployments, for base and tuned models |
+| Baseten Loops | Two temporary dedicated samplers, after training resources shut down |
 
-`train --evaluate` starts replay after selecting the best validation checkpoint.
-Fireworks reuses its live training session or dedicated trainer. Baseten releases
-its training resources before starting the samplers. Standalone `evaluate
---run-dir ...` follows the saved training mode: Fireworks restores the checkpoint
-on a new session or temporary dedicated trainer; Baseten loads saved sampler
-weights without restarting training. Periodic replay during training is not
-implemented.
+Fireworks requests deletion of owned dedicated resources on exit; Baseten
+deactivates its samplers. Dedicated capacity is billed for allocated time; judge
+calls cost extra. Both are outside Baseten's training spend guard. Cleanup
+failures are reported with resource IDs.
 
-A Fireworks model being available for serverless training does not make a
-checkpoint trained on dedicated capacity usable by the serverless sampler.
-[Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models#in-session-sampling-serverless-training)
-is limited to serverless training sessions. SmithTune uses dedicated replay for
-dedicated Fireworks runs; it does not import those checkpoints into serverless
-sampling. A promoted model ID alone cannot be passed to the Training API
-sampling client.
-
-Keep the training run directory: Fireworks replay needs the saved training
-checkpoint and settings; Baseten needs its saved Loops sampler weights.
-Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key with the
-default Baseten judge or an Anthropic judge. Temporary replay capacity is separate
-from a standing endpoint created with `deploy`; no separate deployment command
-is needed for replay. Cleanup runs on completion and failures; recorded resources
-need manual attention if cleanup itself fails.
+`evaluate --run-dir ...` uses the saved checkpoint and training mode. Standalone
+dedicated Fireworks replay starts a temporary trainer to restore weights. Dedicated
+checkpoints cannot use serverless sampling, even for the same base model.
+Keep the run directory; a promoted Fireworks model ID alone cannot be sampled.
+Baseten replay needs no `baseten-deploy` extra. Replay manages temporary serving;
+use `deploy` separately for a standing endpoint.
 
 ## Fireworks dedicated LoRA training
 
-Fireworks defaults to serverless LoRA SFT. To use dedicated capacity, add
-`--training-mode dedicated` to both `plan` and `train`:
+Add `--training-mode dedicated` to both `plan` and `train`. SmithTune automatically
+selects a validated LoRA shape with sufficient context; `plan` shows its hardware
+and exact version. Dedicated planning requires `FIREWORKS_API_KEY` but creates no
+resources. Serverless remains the default.
 
-```bash
-smithtune plan --provider fireworks --data-dir "$data_dir" --training-mode dedicated --evaluate
-smithtune train --provider fireworks --data-dir "$data_dir" --training-mode dedicated --evaluate --confirm
-```
+| Option | Use |
+| --- | --- |
+| `--training-shape accounts/<account>/trainingShapes/<shape>[/versions/<version>]` | Override automatic selection; include a version to pin the reviewed shape |
+| `--provisioning-timeout SECONDS` | Placement/readiness budget per stage; default 1800, range 1–7200 |
 
-SmithTune automatically selects a validated LoRA shape for the prepared model
-and context length, using the pinned Fireworks cookbook selector. It prefers an
-exact model match, then a compatible architecture and parameter-count range,
-and chooses the smallest sufficient context among matches. This is not a price
-comparison. The plan shows the exact training-shape version, node count,
-accelerator type/count, context limit, and linked serving-shape version.
+Runs record the resolved shape in `plan.json`. Add `--evaluate` for dedicated
+replay; training alone provisions no inference capacity.
 
-Most users can leave shape selection automatic. To override it, pass
-`--training-shape accounts/<account>/trainingShapes/<shape>` to either command;
-append `/versions/<version>` to pin a specific version. Unversioned shapes resolve
-to their latest validated version. Shapes must support LoRA and the prepared
-context; Fireworks also validates model/rank compatibility when provisioning.
-Dedicated mode uses the existing supported models and preparation limits.
-Full-parameter training is not supported.
-
-Dedicated `plan` requires `FIREWORKS_API_KEY` for read-only catalog discovery and
-creates no resources. It saves nothing for a later `train`: repeat the desired
-options, or copy the printed version into `--training-shape` to use exactly the
-reviewed capacity. Each training run saves its resolved version in `plan.json`.
-No matching shape is an error; SmithTune does not fall back to serverless.
-Account access, quota, and available dedicated capacity are required.
-`--provisioning-timeout SECONDS` bounds each placement/readiness stage (default
-1800; range 1–7200), rather than total training duration.
-
-Dedicated trainers are billed for allocated time, including time between work.
-`train --evaluate` reuses the trainer and provisions separate temporary tuned
-and base inference deployments, each billed separately. Standalone `evaluate
---run-dir ...` uses the saved training and serving versions, temporarily starts
-a trainer to restore the selected checkpoint, and creates both inference
-deployments. These are standard dedicated deployments; preemptible replay is
-not implemented. Omit `--evaluate` from both commands to train without provisioning
-inference capacity.
-
-SmithTune records owned IDs before provisioning and requests deletion on normal
-exit, readiness failure, exceptions, Ctrl-C, and SIGTERM. Inspect `session.json`
-for training resources and `replay/resources.json` (or the evaluation output's
-`resources.json`) for replay resources. If cleanup fails, the command reports
-an error and records remaining resource names for manual deletion in Fireworks.
-A killed process or machine failure cannot guarantee client cleanup; check those
-receipts in the Fireworks console. Deletion releases capacity asynchronously.
-Checkpoints remain subject to Fireworks retention; promote a selected checkpoint
-before it expires. Promotion and permanent deployment use the existing commands.
-To initialize a new dedicated run, pass
-`--init-from-checkpoint <trainer-job>:<checkpoint>` from the saved best result;
-optimizer state is restored while the new run starts its own epoch/data schedule.
-
-See [dedicated training](https://docs.fireworks.ai/fine-tuning/training-api/dedicated)
-and [training shapes](https://docs.fireworks.ai/fine-tuning/training-api/training-shapes).
+Initialize a new run with `--init-from-checkpoint <trainer-job>:<checkpoint>`.
+Inspect `session.json` and replay `resources.json` if cleanup fails or the process
+is killed; delete remaining capacity in Fireworks. Checkpoints remain subject
+to Fireworks retention.
 
 ## Replay options
 
