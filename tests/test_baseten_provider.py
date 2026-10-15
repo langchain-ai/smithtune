@@ -86,7 +86,7 @@ class FakeAdamParams:
 class FakeTrainer:
     run_id = "baseten-run-1"
 
-    def __init__(self, validation_losses=(1.0, 0.8, 0.9)) -> None:
+    def __init__(self, validation_losses=(1.0, 0.8, 0.9, 1.0, 1.1)) -> None:
         self.validation_losses = iter(validation_losses)
         self.forward_backward_sizes: list[int] = []
         self.forward_sizes: list[int] = []
@@ -183,7 +183,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
         "effective_batch_size": 32,
         "max_epochs": 5,
         "validation_every_steps": None,
-        "early_stopping_patience": 1,
+        "early_stopping_patience": None,
         "early_stopping_min_delta": 0.0,
         "seed": 42,
         "replicas": 1,
@@ -917,15 +917,17 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
     assert result["best_step"] == 6
     assert result["best_resumable_state_uri"] == "state://approved-run-state-epoch-2"
     assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-epoch-2"
-    assert result["last_resumable_state_uri"] == "state://approved-run-state-epoch-3"
-    assert result["stopped_early"] is True
-    assert trainer.forward_backward_sizes == [32, 32, 26] * 3
-    assert trainer.forward_sizes == [10, 10, 10]
-    assert len(trainer.optimizer_params) == 9
+    assert result["last_resumable_state_uri"] == "state://approved-run-state-epoch-5"
+    assert result["stopped_early"] is False
+    assert trainer.forward_backward_sizes == [32, 32, 26] * 5
+    assert trainer.forward_sizes == [10] * 5
+    assert len(trainer.optimizer_params) == 15
     assert trainer.save_state_names == [
         "approved-run-state-epoch-1",
         "approved-run-state-epoch-2",
         "approved-run-state-epoch-3",
+        "approved-run-state-epoch-4",
+        "approved-run-state-epoch-5",
     ]
     assert trainer.save_sampler_names == [
         "approved-run-sampler-epoch-1",
@@ -946,9 +948,9 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
         }
     ]
     assert json.loads((run_dir / "run-state.json").read_text())["status"] == "completed"
-    assert len(json.loads((run_dir / "epochs.json").read_text())) == 3
+    assert len(json.loads((run_dir / "epochs.json").read_text())) == 5
     validations = json.loads((run_dir / "validations.json").read_text())
-    assert [item["step"] for item in validations] == [3, 6, 9]
+    assert [item["step"] for item in validations] == [3, 6, 9, 12, 15]
     assert all(item["epoch_end"] for item in validations)
     assert json.loads((run_dir / "result.json").read_text()) == result
 
@@ -1067,13 +1069,17 @@ def test_step_validation_counts_optimizer_updates_after_accumulation(tmp_path: P
     assert len(trainer.forward_backward_sizes) > 3
 
 
-def test_mid_epoch_best_is_retained_and_only_epoch_end_loss_drives_patience(tmp_path: Path):
+@pytest.mark.parametrize("patience", [None, 1])
+def test_mid_epoch_best_is_retained_and_only_opt_in_epoch_patience_stops_training(tmp_path: Path, patience):
     _write_prepared_dataset(tmp_path)
     trainer = FakeTrainer(validation_losses=[0.1, 0.8, 0.5, 0.7, 0.4, 0.9])
     result = _train(_provider(FakeService(trainer), FakeManagement(inactive=[True])),
-                    tmp_path, baseten.BasetenSFTSettings(max_epochs=5, validation_every_steps=2))
+                    tmp_path, baseten.BasetenSFTSettings(
+                        max_epochs=3 if patience is None else 5,
+                        validation_every_steps=2, early_stopping_patience=patience,
+                    ))
 
-    assert result["stopped_early"] is True
+    assert result["stopped_early"] is (patience is not None)
     assert [item["validation_loss"] for item in result["epochs"]] == [0.8, 0.7, 0.9]
     assert result["best_epoch"] == 1
     assert result["best_step"] == 2
@@ -1224,7 +1230,7 @@ def test_strict_lowest_loss_checkpoint_is_separate_from_min_delta_patience(
         FakeService(trainer), FakeManagement(inactive=[True])
     )
     settings = replace(
-        baseten.BasetenSFTSettings(), early_stopping_min_delta=0.1
+        baseten.BasetenSFTSettings(), early_stopping_min_delta=0.1, early_stopping_patience=1
     )
 
     result = _train(provider, tmp_path, settings)

@@ -214,7 +214,7 @@ def _parser() -> argparse.ArgumentParser:
         )
         shared.add_argument(
             "--early-stopping-patience", type=int, default=common_defaults.early_stopping_patience,
-            help="epochs without sufficient validation improvement before stopping (default: %(default)s)",
+            help="enable early stopping after N epochs without sufficient validation improvement (default: disabled)",
         )
         shared.add_argument(
             "--early-stopping-min-delta", type=float, default=common_defaults.early_stopping_min_delta,
@@ -222,7 +222,7 @@ def _parser() -> argparse.ArgumentParser:
         )
         shared.add_argument(
             "--validation-every-steps", type=int,
-            help="validate every N optimizer updates and at epoch end (default: epoch end only); patience remains in epochs",
+            help="validate every N optimizer updates and at epoch end (default: epoch end only)",
         )
         shared.add_argument(
             "--learning-rate", type=float, default=common_defaults.learning_rate,

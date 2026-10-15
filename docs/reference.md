@@ -220,9 +220,10 @@ recalculates it from the retained rendered sequences before provisioning.
 
 The lowest validation loss across all checks selects the best checkpoint,
 recording its epoch and global optimizer step. `validations.json` preserves
-completed checks incrementally. `--early-stopping-patience` remains measured in
-**epochs**, comparing epoch-end losses; `--early-stopping-min-delta` controls
-that patience comparison, while checkpoint selection uses the lowest loss.
+completed checks incrementally. Early stopping is **off by default**. Opt in
+with `--early-stopping-patience N` to stop after N epochs without sufficient
+epoch-end loss improvement. `--early-stopping-min-delta` controls that comparison;
+checkpoint selection always uses the lowest loss across all checks.
 
 Choose an interval using the planned step count and validation cost. Each check
 runs the validation split and saves checkpoints, adding provider charges. A

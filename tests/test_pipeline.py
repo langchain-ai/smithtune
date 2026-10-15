@@ -1622,7 +1622,7 @@ def test_plan_uses_manifest_model_and_sft_defaults(tmp_path: Path):
     assert plan["base_model"] == "accounts/fireworks/models/kimi-k3"
     assert plan["config"]["renderer"] == "kimi_k3"
     assert plan["config"]["max_epochs"] == 5
-    assert plan["config"]["early_stopping_patience"] == 1
+    assert plan["config"]["early_stopping_patience"] is None
     assert plan["config"]["loss_target"] == "each assistant target once, with zero loss on history"
     assert "train_on_what" not in plan["config"]
     assert plan["dataset"]["validation_rows"] == 1

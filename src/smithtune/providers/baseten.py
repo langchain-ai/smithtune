@@ -168,7 +168,6 @@ class BasetenSFTSettings(CommonSFTSettings):
     def validate(self) -> None:
         numeric = {
             "max_epochs": self.max_epochs,
-            "early_stopping_patience": self.early_stopping_patience,
             "early_stopping_min_delta": self.early_stopping_min_delta,
             "learning_rate": self.learning_rate,
             "batch_size": self.batch_size,
@@ -176,7 +175,7 @@ class BasetenSFTSettings(CommonSFTSettings):
             "replicas": self.replicas,
             "max_dropped_training_rows": self.max_dropped_training_rows,
         }
-        for name in ("lora_rank", "microbatch_token_budget"):
+        for name in ("early_stopping_patience", "lora_rank", "microbatch_token_budget"):
             value = getattr(self, name)
             if value is not None:
                 numeric[name] = value
@@ -1309,7 +1308,8 @@ class BasetenProvider:
                     if post_checkpoint_budget_error is not None:
                         raise post_checkpoint_budget_error
                 if (
-                    epochs_without_patience_improvement
+                    settings.early_stopping_patience is not None
+                    and epochs_without_patience_improvement
                     >= settings.early_stopping_patience
                 ):
                     stopped_early = True

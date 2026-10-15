@@ -117,7 +117,7 @@ def fake_session(tmp_path, monkeypatch, *, dedicated=False, interval=2, steps_pe
 @pytest.mark.parametrize("dedicated", [False, True])
 def test_global_optimizer_intervals_and_epoch_end_are_deduplicated(tmp_path, monkeypatch, dedicated):
     session, events = fake_session(tmp_path, monkeypatch, dedicated=dedicated, losses=[0.5] * 6)
-    result = fireworks.run_early_stopping(fireworks.SFTSettings(max_epochs=3, early_stopping_patience=10), session.run_epoch)
+    result = fireworks.run_early_stopping(fireworks.SFTSettings(max_epochs=3), session.run_epoch)
 
     validations = json.loads((tmp_path / "validations.json").read_text())
     assert [(row["epoch"], row["step"]) for row in validations] == [(1, 2), (1, 3), (2, 4), (2, 6), (3, 8), (3, 9)]
@@ -153,6 +153,21 @@ def test_pipeline_drains_before_eval_and_save_and_waits_for_checkpoint(tmp_path,
         ("eval", 4), ("save", 4),
         ("submit", 5), ("forward", 5), ("optimizer", 5), ("eval", 5), ("save", 5),
     ]
+
+
+@pytest.mark.parametrize("dedicated", [False, True])
+@pytest.mark.parametrize("interval", [None, 2])
+def test_default_completes_requested_epochs_despite_worse_validation(tmp_path, monkeypatch, dedicated, interval):
+    losses = [0.1, 0.8, 0.5, 0.9, 0.7, 1.0] if interval is not None else [0.1, 0.9, 1.0]
+    session, _ = fake_session(tmp_path, monkeypatch, dedicated=dedicated, interval=interval, losses=losses)
+    result = fireworks.run_early_stopping(
+        fireworks.SFTSettings(max_epochs=3, early_stopping_min_delta=100.0), session.run_epoch,
+    )
+    assert result["stopped_early"] is False
+    assert [row["step"] for row in result["epochs"]] == [3, 6, 9]
+    assert result["best"]["epoch"] == 1
+    assert result["best"]["step"] == (2 if interval is not None else 3)
+    assert result["validations"][-1]["step"] == 9
 
 
 @pytest.mark.parametrize("dedicated", [False, True])

@@ -94,10 +94,12 @@ cli.get_provider = lambda name: Provider(name)
 
 
 @pytest.mark.parametrize("provider", ["baseten", "fireworks"])
-def test_detached_training_survives_launcher_exit_and_preserves_settings(local_trainer, provider):
+@pytest.mark.parametrize("patience", [None, 2])
+def test_detached_training_survives_launcher_exit_and_preserves_settings(local_trainer, provider, patience):
     run, launched = local_trainer(
         "--run-id", "example run; literal $(text)", "--max-epochs", "3", "--batch-size", "2",
         "--validation-every-steps", "7",
+        *([] if patience is None else ["--early-stopping-patience", str(patience)]),
         "--evaluate", "--max-points-per-trajectory", "1", provider=provider,
     )
     observed = controller.status(run)
@@ -108,6 +110,7 @@ def test_detached_training_survives_launcher_exit_and_preserves_settings(local_t
     invocation = json.loads((run / "invocation.json").read_text())
     assert invocation["run_id"] == "example run; literal $(text)"
     assert invocation["settings"]["max_epochs"] == 3
+    assert invocation["settings"]["early_stopping_patience"] == patience
     assert invocation["settings"]["batch_size"] == 2
     assert invocation["settings"]["validation_every_steps"] == 7
     assert invocation["replay"]["max_points_per_trajectory"] == 1

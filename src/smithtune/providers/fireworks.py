@@ -291,7 +291,7 @@ def run_early_stopping(
             stale_epochs = 0
         else:
             stale_epochs += 1
-            if stale_epochs >= settings.early_stopping_patience:
+            if settings.early_stopping_patience is not None and stale_epochs >= settings.early_stopping_patience:
                 break
     assert best is not None
     return {

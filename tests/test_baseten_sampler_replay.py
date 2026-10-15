@@ -205,7 +205,8 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
     monkeypatch.setattr(baseten_sampling, "BasetenReplaySampler", sampler)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", replay)
     options = dict(confirm=True, init_from_checkpoint=None, replay=REPLAY)
-    settings = baseten.BasetenSFTSettings(validation_every_steps=interval)
+    settings = baseten.BasetenSFTSettings(max_epochs=3 if interval is None else 2,
+                                         validation_every_steps=interval)
     if replay_fails:
         with pytest.raises(PipelineError, match="after training"):
             provider.train(data, run, "approved-run", settings, **options)

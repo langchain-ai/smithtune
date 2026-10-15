@@ -31,10 +31,11 @@ def test_schedule_counts_global_intervals_and_epoch_ends_once(
     assert plan["early_stopping_patience_unit"] == "epochs"
 
 
-@pytest.mark.parametrize("interval", [0, -1, True, 1.5, "3"])
-def test_validation_interval_rejects_non_positive_integers(interval):
-    with pytest.raises(PipelineError, match="validation_every_steps.*positive integer"):
-        CommonSFTSettings(validation_every_steps=interval).validate()
+@pytest.mark.parametrize("field", ["validation_every_steps", "early_stopping_patience"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "3"])
+def test_optional_training_intervals_reject_non_positive_integers(field, value):
+    with pytest.raises(PipelineError, match=f"{field}.*positive integer"):
+        CommonSFTSettings(**{field: value}).validate()
 
 
 @pytest.mark.parametrize("provider", ["fireworks", "baseten"])
@@ -45,6 +46,9 @@ def test_validation_option_resolves_for_training_and_planning(provider, command)
     assert cli._settings_from_args(args).validation_every_steps == 13
     defaults = parser.parse_args([command, "--provider", provider])
     assert cli._settings_from_args(defaults).validation_every_steps is None
+    assert cli._settings_from_args(defaults).early_stopping_patience is None
+    opted_in = parser.parse_args([command, "--provider", provider, "--early-stopping-patience", "2"])
+    assert cli._settings_from_args(opted_in).early_stopping_patience == 2
     with pytest.raises(PipelineError, match="validation_every_steps"):
         cli._settings_from_args(parser.parse_args([
             command, "--provider", provider, "--validation-every-steps", "0",

@@ -420,7 +420,8 @@ Check:
 - Training example and token counts, epochs, and hyperparameters.
 - `training_schedule`: steps per epoch and expected validation passes. Consider
   `--validation-every-steps N` for intermediate checkpoints, accounting for added
-  validation cost; early-stopping patience remains in epochs.
+  validation cost. Runs complete the requested epochs by default; use
+  `--early-stopping-patience N` only when early stopping is wanted.
 - Evaluation case and call counts (base response + tuned response + judge per
   action, plus calibration). `--max-points-per-trajectory` caps actions per
   test trajectory; omitting it evaluates every action.

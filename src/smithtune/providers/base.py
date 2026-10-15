@@ -93,7 +93,7 @@ class CommonSFTSettings:
     """Training settings supported by every provider adapter."""
 
     max_epochs: int = 5
-    early_stopping_patience: int = 1
+    early_stopping_patience: int | None = None
     early_stopping_min_delta: float = 0.0
     learning_rate: float = 1e-4
     batch_size: int = 32
@@ -103,8 +103,10 @@ class CommonSFTSettings:
     def validate(self) -> None:
         if self.max_epochs < 1:
             raise PipelineError("max_epochs must be positive")
-        if self.early_stopping_patience < 1:
-            raise PipelineError("early_stopping_patience must be positive")
+        if self.early_stopping_patience is not None and (
+            type(self.early_stopping_patience) is not int or self.early_stopping_patience < 1
+        ):
+            raise PipelineError("early_stopping_patience must be a positive integer")
         if self.early_stopping_min_delta < 0:
             raise PipelineError("early_stopping_min_delta cannot be negative")
         if self.learning_rate <= 0 or self.batch_size < 1:
