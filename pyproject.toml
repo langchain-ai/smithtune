@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smithtune"
-version = "0.1.3"
+version = "0.1.4"
 description = "Fine-tune models on LangSmith trajectories with Fireworks or Baseten, then compare base and tuned models in LangSmith."
 readme = "README.md"
 license = "MIT"
