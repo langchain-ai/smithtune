@@ -74,15 +74,17 @@ def validate_judge_credentials(judge_model: str) -> None:
 
 
 def training_metadata(run_dir: Path | None) -> dict:
-    """Read the smithtune run ID and selected epoch without guessing missing lineage."""
+    """Read the run and selected checkpoint's epoch/step when recorded."""
     if run_dir is None:
         return {}
     plan_path, result_path = run_dir / "plan.json", run_dir / "result.json"
     plan = _load_json(plan_path) if plan_path.exists() else {}
     result = _load_json(result_path) if result_path.exists() else {}
+    best = result.get("best") or {}
     values = {
         "parent_training_run_id": plan.get("run_id") or result.get("run_id"),
-        "checkpoint_epoch": result.get("best_epoch") or (result.get("best") or {}).get("epoch"),
+        "checkpoint_epoch": result.get("best_epoch") or best.get("epoch"),
+        "checkpoint_step": result.get("best_step", best.get("step")),
     }
     return {key: value for key, value in values.items() if value is not None}
 

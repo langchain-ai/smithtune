@@ -1811,7 +1811,7 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "00000000-0000-0000-0000-000000000000")
 
-    result = fireworks._epoch_checkpoints("session-1")
+    result = fireworks._epoch_checkpoints("session-1", "step-4", run_id=run_id, state_path=f"account-id/{run_id}/step-4")
 
     assert calls == ["accounts/account-id/trainingSessions/session-1"]
     assert result["resume_checkpoint"] == f"account-id/{run_id}/step-4"

@@ -9,15 +9,14 @@ import signal
 import sys
 import threading
 import uuid
-from datetime import datetime, UTC
 from contextlib import ExitStack
 from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import CLIENT_SOURCE, FIREWORKS_BASE_URL, _set_skill_session
+from smithtune.providers.fireworks import CLIENT_SOURCE, FIREWORKS_BASE_URL, _promotable_checkpoint, _set_skill_session
 from smithtune.providers.fireworks_sampling import FireworksReplaySampler
-from smithtune.providers.fireworks_training import ServerlessTraining
+from smithtune.providers.fireworks_training import ServerlessTraining, _CheckpointSaveClient
 
 _SHAPE = re.compile(r"accounts/[a-zA-Z0-9_-]+/trainingShapes/[a-zA-Z0-9_-]+(?:/versions/[a-zA-Z0-9_-]+)?")
 _DEPLOYMENT_SHAPE = re.compile(r"accounts/[a-zA-Z0-9_-]+/deploymentShapes/[a-zA-Z0-9_-]+/versions/[a-zA-Z0-9_-]+")
@@ -212,28 +211,30 @@ def checkpoint_parts(checkpoint: str):
         raise PipelineError("dedicated replay checkpoint must be <trainer-job>:<checkpoint>")
     if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part) for part in name.split("/")):
         raise PipelineError("dedicated replay checkpoint has an invalid logical name")
+    if "/" in name:
+        from fireworks.training.sdk.client import _validate_checkpoint_ref
+
+        try:
+            _validate_checkpoint_ref(name)
+        except ValueError as exc:
+            raise PipelineError("dedicated checkpoint has an invalid fully qualified path") from exc
     return job, name
 
 
 def resolve_checkpoint(client, checkpoint: str):
     """Translate a cookbook cross-job reference into the SDK storage path."""
     job, name = checkpoint_parts(checkpoint)
+    if "/" in name:
+        return client.resolve_checkpoint_path(name)
     return client.resolve_checkpoint_path(name, source_job_id=job)
-
-
-def _checkpoint_time(row):
-    try:
-        parsed = datetime.fromisoformat((row.get("createTime") or "").replace("Z", "+00:00"))
-        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
-    except (ValueError, TypeError):
-        return float("-inf")
 
 
 class DedicatedTraining(ServerlessTraining):
     """Reuse the streaming epoch loop with a dedicated LoRA trainer."""
 
-    def __init__(self, config, run_dir: Path, *, dedicated, reasoning_effort=None):
-        super().__init__(config, run_dir, reasoning_effort=reasoning_effort)
+    def __init__(self, config, run_dir: Path, *, dedicated, reasoning_effort=None, validation_every_steps=None):
+        super().__init__(config, run_dir, reasoning_effort=reasoning_effort,
+                         validation_every_steps=validation_every_steps)
         self.dedicated = dedicated
 
     def __enter__(self):
@@ -259,11 +260,18 @@ class DedicatedTraining(ServerlessTraining):
             )
             self.runner.set_accelerator_info(self.service.accelerator_type, self.service.accelerator_count,
                                              profile=self.service.training_profile)
+            self.checkpoint_client = _CheckpointSaveClient(self.client)
             self.checkpoints = TrainingCheckpoints(
-                self.client, self.resources.control, trainer_id=self.job_id,
+                self.checkpoint_client, self.resources.control, trainer_id=self.job_id,
                 log_path=self.cfg.log_path, lora_rank=self.cfg.lora_rank,
             )
-            self.checkpoints.resume(init_from_checkpoint=self.cfg.init_from_checkpoint)
+            initial = self.cfg.init_from_checkpoint
+            if initial and "/" in checkpoint_parts(initial)[1]:
+                # Fully qualified save responses load directly. The cookbook's
+                # dedicated resume parser only accepts single-label names.
+                self.client.load_state_with_optimizer(resolve_checkpoint(self.client, initial))
+            else:
+                self.checkpoints.resume(init_from_checkpoint=initial)
             self.resources.ready()
             start_running(self.runner, total_steps=self.total_steps)
             return self
@@ -277,22 +285,24 @@ class DedicatedTraining(ServerlessTraining):
         return self._stack.__exit__(exc_type, exc, tb)
 
     def snapshot(self, checkpoint: str) -> str:
+        saved = self.saved_snapshot(checkpoint)
+        if saved:
+            return saved
         job, name = checkpoint_parts(checkpoint)
         path = self.client.resolve_checkpoint_path(name) if job == self.job_id else resolve_checkpoint(self.client, checkpoint)
         self.client.load_state(path)
         return self.client.save_weights_for_sampler("replay").path
 
-    def epoch_checkpoints(self):
-        rows = [row for row in self.resources.control.list_checkpoints(self.job_id)
-                if isinstance(row.get("name"), str) and row["name"]]
-        training = sorted((row for row in rows if (row.get("checkpointType") or "").endswith(("TRAINING", "TRAINING_LORA"))),
-                          key=_checkpoint_time, reverse=True)
-        promotable = sorted((row for row in rows if row.get("promotable")),
-                            key=_checkpoint_time, reverse=True)
-        if not training or not promotable:
-            raise PipelineError(f"dedicated trainer {self.job_id} has no resumable and promotable checkpoint")
-        return {"resume_checkpoint": f"{self.job_id}:{training[0]['name'].rsplit('/', 1)[-1]}",
-                "promotable_checkpoint": promotable[0]["name"]}
+    def epoch_checkpoints(self, checkpoint_name, *, state_path):
+        rows = self.resources.control.list_checkpoints(self.job_id)
+        if state_path.startswith("cross_job://"):
+            job, name = state_path.removeprefix("cross_job://").split("/", 1)
+            restore = f"{job}:{name}"
+        else:
+            restore = f"{self.job_id}:{state_path}"
+        checkpoint_parts(restore)
+        return {"resume_checkpoint": restore,
+                "promotable_checkpoint": _promotable_checkpoint(rows, checkpoint_name)}
 
 
 class DedicatedReplaySampler(FireworksReplaySampler):

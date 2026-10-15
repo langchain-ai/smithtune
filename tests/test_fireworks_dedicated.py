@@ -207,7 +207,7 @@ def test_dedicated_checkpoint_selection_and_saved_replay_identity(tmp_path):
         {"name": "accounts/a/rlorTrainerJobs/trainer/checkpoints/epoch-2", "checkpointType": "TRAINING_LORA", "createTime": "2026-10-15T01:02:13.123Z"},
         {"name": "accounts/a/rlorTrainerJobs/trainer/checkpoints/epoch-2-abcdefab", "promotable": True, "createTime": "2026-10-15T01:02:13.123Z"},
     ]
-    best = {**session.epoch_checkpoints(), "job_id": "trainer"}
+    best = {**session.epoch_checkpoints("epoch-2", state_path="epoch-2"), "job_id": "trainer"}
     assert best["resume_checkpoint"] == "trainer:epoch-2"
     write_manifest(tmp_path)
     run = tmp_path / "run"
@@ -294,7 +294,8 @@ def test_saved_checkpoint_translation_matches_installed_sdk():
 
 
 @pytest.mark.parametrize("provision_failure", [False, True])
-def test_dedicated_training_lifecycle_uses_lora_and_cleans_readiness_failure(tmp_path, monkeypatch, control, provision_failure):
+@pytest.mark.parametrize("qualified_state", [False, True])
+def test_dedicated_training_lifecycle_uses_lora_and_cleans_readiness_failure(tmp_path, monkeypatch, control, provision_failure, qualified_state):
     from contextlib import ExitStack
     from training import utils
     from training.utils import checkpoints, runner_state, service as service_module
@@ -310,22 +311,37 @@ def test_dedicated_training_lifecycle_uses_lora_and_cleans_readiness_failure(tmp
         service.create_training_client.side_effect = RuntimeError("not ready")
     monkeypatch.setattr(service_module, "build_service_client", lambda **_kw: service)
     monkeypatch.setattr(utils, "RunnerIO", Mock(return_value=nullcontext(Mock())))
-    monkeypatch.setattr(utils.ReconnectableClient, "from_training_client", Mock(return_value=Mock()))
+    reconnect = Mock()
+    monkeypatch.setattr(utils.ReconnectableClient, "from_training_client", Mock(return_value=reconnect))
     checkpoint_adapter = Mock()
     monkeypatch.setattr(checkpoints, "TrainingCheckpoints", Mock(return_value=checkpoint_adapter))
     monkeypatch.setattr(runner_state, "start_running", Mock())
+    initial = "source-trainer:epoch-3"
+    if qualified_state:
+        source = object.__new__(dedicated.DedicatedTraining)
+        source.job_id = "source-trainer"
+        source.resources = SimpleNamespace(control=Mock())
+        source.resources.control.list_checkpoints.return_value = [
+            {"name": "accounts/a/rlorTrainerJobs/source-trainer/checkpoints/s-2-abcdefab", "promotable": True},
+        ]
+        initial = source.epoch_checkpoints("s-2", state_path=f"account/run-{'a' * 32}/s-2")["resume_checkpoint"]
     session = object.__new__(dedicated.DedicatedTraining)
     session.cfg = SimpleNamespace(base_model=MODEL.base_model, tokenizer_model=MODEL.tokenizer_model,
                                   lora_rank=4, lora_alpha=16, max_seq_len=MODEL.max_seq_len,
                                   learning_rate=1e-4, runner=None, log_path=str(tmp_path),
-                                  init_from_checkpoint="source-trainer:epoch-3")
+                                  init_from_checkpoint=initial)
     session.run_dir = tmp_path
     session._stack = ExitStack()
     session.dedicated = shape_config()
     session.total_steps = 2
     session.training_completed = False
     with pytest.raises(RuntimeError, match="not ready") if provision_failure else nullcontext(), session:
-        checkpoint_adapter.resume.assert_called_once_with(init_from_checkpoint="source-trainer:epoch-3")
+        if qualified_state:
+            checkpoint_adapter.resume.assert_not_called()
+            reconnect.resolve_checkpoint_path.assert_called_once_with(f"account/run-{'a' * 32}/s-2")
+            reconnect.load_state_with_optimizer.assert_called_once_with(reconnect.resolve_checkpoint_path.return_value)
+        else:
+            checkpoint_adapter.resume.assert_called_once_with(init_from_checkpoint=initial)
     service.create_training_client.assert_called_once_with(MODEL.base_model, lora_rank=4, lora_alpha=16)
     assert events == ["client-close", "delete"]
     assert json.loads((tmp_path / "session.json").read_text())["status"] == "closed"

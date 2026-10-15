@@ -111,7 +111,8 @@ Override either with `--run-id` or `--run-dir`; the folder must be new or empty.
 Repeat customized training settings on both `plan` and `train`; the preview does not save settings for the training command.
 
 The best checkpoint is selected by validation loss and recorded in `<run-dir>/result.json`.
-Training artifacts also include `plan.json`, `run-state.json`, and `epochs.json` in that directory.
+Training artifacts also include `plan.json`, `run-state.json`, `epochs.json`, and
+`validations.json` (each completed validation and its checkpoint) in that directory.
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 
@@ -166,15 +167,16 @@ run. Sampler-only weights cannot initialize training.
    a VM does not establish that GPU capacity was released. Baseten's local spend
    guard cannot enforce a limit after the controller dies; sampler and judge
    costs are separate from its training budget.
-2. **If training is unfinished, inspect `epochs.json` for a saved resumable
-   checkpoint.** Baseten also records `last_resumable_state_uri` in
-   `run-state.json`. Fireworks records `resume_checkpoint` in each completed
-   epoch. Work since that checkpoint may need repeating. If local receipts are
-   incomplete, inspect the provider's checkpoint records too. Start from the
-   base model only if no usable training-state checkpoint can be recovered.
+2. **If training is unfinished, inspect `validations.json` for a saved resumable
+   checkpoint** (`epochs.json` for older runs). Baseten also records
+   `last_resumable_state_uri` in `run-state.json`; Fireworks records
+   `resume_checkpoint` with each completed validation. Work since that checkpoint
+   may need repeating. If local receipts are incomplete, inspect the provider's
+   checkpoint records too. Use the base model only if no usable training-state
+   checkpoint can be recovered.
 3. **Initialize a new run with explicit remaining settings.** The new run
-   starts its epoch numbering, early-stopping history, and budget afresh. Keep
-   the earlier artifacts and checkpoints for comparison; the new run does not
+   starts its epoch and step numbering, early-stopping history, and budget afresh.
+   Keep the earlier artifacts and checkpoints for comparison; the new run does not
    select across the earlier run's validation history. Account for previous
    work and spend when choosing the remaining epochs and budget.
 
@@ -201,6 +203,31 @@ against interrupted process writes; preserving a remote provider checkpoint
 does not preserve the local configuration, tool evidence, or evaluation results.
 
 ## Training optimizations
+
+### Validation cadence and checkpoint selection
+
+By default, validation runs at epoch end. Add `--validation-every-steps N` to
+both `plan` and `train` to also validate every N completed optimizer updates,
+counted across epochs. Epoch ends are always checked, including successful
+training completion and early stopping; coinciding checks run once. This uses
+the held-out validation split, separately from replay evaluation.
+
+`plan.training_schedule` shows steps per epoch and expected validation passes
+through `--max-epochs`; early stopping or spend limits can reduce the count.
+Fireworks batches training trajectories; Baseten Loops batches rendered assistant
+targets through gradient accumulation. Baseten's preview is an estimate; training
+recalculates it from the retained rendered sequences before provisioning.
+
+The lowest validation loss across all checks selects the best checkpoint,
+recording its epoch and global optimizer step. `validations.json` preserves
+completed checks incrementally. `--early-stopping-patience` remains measured in
+**epochs**, comparing epoch-end losses; `--early-stopping-min-delta` controls
+that patience comparison, while checkpoint selection uses the lowest loss.
+
+Choose an interval using the planned step count and validation cost. Each check
+runs the validation split and saves checkpoints, adding provider charges. A
+failure or exhausted spend budget preserves completed checks without forcing
+another validation pass.
 
 ### Dedicated training throughput
 
@@ -317,9 +344,9 @@ This publisher posts completed run outputs rather than updating them.
 Experiment metadata identifies the provider and whether
 predictions came from a sampler or deployed endpoint. When a saved training run
 is available, `parent_training_run_id` records the smithtune run ID and
-`checkpoint_epoch` records the selected checkpoint’s epoch. Both experiments in
-a base/tuned comparison carry this training context; the epoch describes the
-tuned checkpoint. Endpoints without a saved training run omit these fields.
+`checkpoint_epoch` and, when available, `checkpoint_step` identify the selected
+checkpoint. Both experiments in a base/tuned comparison carry this context for
+the tuned checkpoint. Endpoints without a saved training run omit these fields.
 
 - `teacher_agreement`: each action's judge pass/fail, with its explanation.
 - `trajectory_teacher_agreement`: fraction of evaluated actions that passed in a

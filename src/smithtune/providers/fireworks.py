@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -199,7 +200,15 @@ next_action: {next_action}
     path.write_text(text, encoding="utf-8")
 
 
-def _epoch_checkpoints(job_id: str) -> dict[str, str]:
+def _checkpoint_time(row):
+    try:
+        parsed = datetime.fromisoformat((row.get("createTime") or "").replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
+    except (ValueError, TypeError):
+        return float("-inf")
+
+
+def _session_checkpoint_rows(job_id: str):
     from fireworks.training.sdk import FireworksClient
 
     client = FireworksClient(
@@ -217,42 +226,26 @@ def _epoch_checkpoints(job_id: str) -> dict[str, str]:
         )
     finally:
         client.close()
-    resumable = sorted(
-        (
-            row
-            for row in rows
-            if (row.get("checkpointType") or "").endswith(
-                ("TRAINING", "TRAINING_LORA")
-            )
-        ),
-        key=lambda row: row.get("createTime", ""),
-        reverse=True,
-    )
-    if not resumable or not isinstance(resumable[0].get("name"), str):
-        raise PipelineError(f"training job {job_id} has no resumable checkpoint")
-    short_name = resumable[0]["name"].rstrip("/").rsplit("/", 1)[-1]
-    match = re.match(r"^(run-[0-9a-f]{32})[:-](.+)$", short_name)
-    if not match:
-        raise PipelineError(
-            f"training job {job_id} returned an invalid serverless checkpoint"
-        )
-    run_id, checkpoint_name = match.groups()
-    promotable = sorted(
-        (
-            row
-            for row in rows
-            if row.get("promotable")
-            and (row.get("name") or "").rstrip("/").rsplit("/", 1)[-1].startswith(run_id)
-        ),
-        key=lambda row: row.get("createTime", ""),
-        reverse=True,
-    )
-    if not promotable or not isinstance(promotable[0].get("name"), str):
-        raise PipelineError(f"training job {job_id} has no promotable checkpoint")
-    return {
-        "resume_checkpoint": f"{account_id}/{run_id}/{checkpoint_name}",
-        "promotable_checkpoint": promotable[0]["name"],
-    }
+    return account_id, rows
+
+
+def _promotable_checkpoint(rows, checkpoint_name, *, run_id=None):
+    expected = (f"{run_id}-{checkpoint_name}", f"{run_id}:{checkpoint_name}") if run_id else (checkpoint_name,)
+    matching = [row for row in rows if isinstance(row.get("name"), str) and row.get("promotable")
+                and re.sub(r"-[0-9a-f]{8}$", "", row["name"].rsplit("/", 1)[-1]) in expected]
+    if not matching:
+        raise PipelineError("Fireworks save has no matching promotable checkpoint")
+    return max(matching, key=_checkpoint_time)["name"]
+
+
+def _epoch_checkpoints(job_id: str, checkpoint_name, *, run_id, state_path) -> dict[str, str]:
+    account_id, rows = _session_checkpoint_rows(job_id)
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", state_path):
+        state_path = f"{account_id}/{run_id}/{state_path}"
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", state_path):
+        raise PipelineError("Fireworks save_state returned no fully qualified serverless restore identity")
+    return {"resume_checkpoint": state_path,
+            "promotable_checkpoint": _promotable_checkpoint(rows, checkpoint_name, run_id=run_id)}
 
 
 def run_early_stopping(
@@ -263,6 +256,7 @@ def run_early_stopping(
     """Run epochs and select the checkpoint with the best validation loss."""
     settings.validate()
     history: list[dict[str, Any]] = []
+    validations: list[dict[str, Any]] = []
     best: dict[str, Any] | None = None
     patience_loss = math.inf
     stale_epochs = 0
@@ -279,10 +273,18 @@ def run_early_stopping(
         if not isinstance(result.get("resume_checkpoint"), str):
             raise PipelineError(f"epoch {epoch} returned no resume checkpoint")
         result = {**result, "epoch": epoch, "eval_loss": float(loss)}
+        checks = result.pop("validations", [result])
+        for check in checks:
+            check_loss = check.get("eval_loss")
+            if (not isinstance(check_loss, (int, float)) or isinstance(check_loss, bool)
+                    or not math.isfinite(check_loss) or not isinstance(check.get("resume_checkpoint"), str)):
+                raise PipelineError(f"epoch {epoch} returned an invalid saved validation")
+            check = {**check, "epoch": epoch, "eval_loss": float(check_loss)}
+            validations.append(check)
+            if best is None or check["eval_loss"] < best["eval_loss"]:
+                best = check
         history.append(result)
         checkpoint = result["resume_checkpoint"]
-        if best is None or result["eval_loss"] < best["eval_loss"]:
-            best = result
         # Patience tracks significant improvement independently of checkpoint selection.
         if result["eval_loss"] < patience_loss - settings.early_stopping_min_delta:
             patience_loss = result["eval_loss"]
@@ -294,6 +296,7 @@ def run_early_stopping(
     assert best is not None
     return {
         "epochs": history,
+        "validations": validations,
         "best": best,
         "stopped_early": len(history) < settings.max_epochs,
     }
@@ -337,6 +340,7 @@ class FireworksProvider:
             early_stopping_min_delta=options.early_stopping_min_delta,
             learning_rate=options.learning_rate,
             batch_size=options.batch_size,
+            validation_every_steps=options.validation_every_steps,
             seed=options.seed,
             lora_rank=options.lora_rank,
             training_mode=options.training_mode or defaults.training_mode,
@@ -407,6 +411,8 @@ class FireworksProvider:
         model = resolve_prepared_model(manifest, MODEL_SPECS, provider="fireworks", allow_legacy=True)
         _validate_model(model)
         lora_rank = settings.lora_rank or model.default_lora_rank
+        from smithtune.providers.validation import training_schedule
+
         value = {
             "run_id": run_id,
             "method": "Fireworks Training API serverless LoRA SFT",
@@ -439,6 +445,7 @@ class FireworksProvider:
                 "early_stopping_patience": settings.early_stopping_patience,
                 "early_stopping_min_delta": settings.early_stopping_min_delta,
                 "batch_size": settings.batch_size,
+                "validation_every_steps": settings.validation_every_steps,
                 "pipeline_depth": settings.pipeline_depth,
                 "seed": settings.seed,
                 "group_by_length": True,
@@ -446,11 +453,21 @@ class FireworksProvider:
                 "weight_decay": 0.01,
                 "warmup_steps": 0,
             },
+            "training_schedule": {
+                **training_schedule(split["train"], settings.batch_size,
+                                    settings.max_epochs, settings.validation_every_steps),
+                "training_units": split["train"],
+                "training_unit": "trajectories",
+                "estimate": False,
+            },
             "evaluation": "cross-entropy loss and perplexity on validation after each epoch; test is reserved for replay",
-            "checkpoint": "each epoch ends with a resumable and promotable checkpoint; the best epoch is selected",
+            "checkpoint": "each validation saves resumable and promotable checkpoints; the lowest-loss validation is selected",
             "cost": "serverless token charges at the current account rate; resolve in the Fireworks console before confirmation",
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
+        if settings.validation_every_steps is not None:
+            value["evaluation"] = (f"cross-entropy loss and perplexity on validation every {settings.validation_every_steps} optimizer steps "
+                                   "and at each epoch end, without duplicate checks; test is reserved for replay")
         if settings.training_mode == "dedicated":
             from smithtune.providers.fireworks_dedicated import resolve_shape
 
@@ -541,6 +558,8 @@ class FireworksProvider:
         try:
             session_class = ServerlessTraining
             session_options = {}
+            if settings.validation_every_steps is not None:
+                session_options["validation_every_steps"] = settings.validation_every_steps
             if settings.training_mode == "dedicated":
                 from smithtune.providers.fireworks_dedicated import DedicatedTraining
 

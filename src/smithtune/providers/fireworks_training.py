@@ -44,8 +44,42 @@ def _init_render_worker(init_args, reasoning_effort, worker_id=None):
     configure_reasoning_effort(sft_loop._worker_state["renderer"], reasoning_effort)
 
 
+class _CheckpointSaveClient:
+    """Retain the authoritative save responses discarded by the cookbook."""
+
+    def __init__(self, client):
+        self.client = client
+        self.reset()
+
+    def reset(self):
+        self.state_path = self.sampler_path = None
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def save_state(self, name, **kwargs):
+        response = self.client.save_state(name, **kwargs)
+        path = getattr(response, "path", None)
+        if not isinstance(path, str) or not path.strip():
+            raise PipelineError("Fireworks save_state returned no loadable checkpoint path")
+        try:
+            self.state_path = self.client.resolve_checkpoint_path(path)
+        except (TypeError, ValueError) as exc:
+            raise PipelineError("Fireworks save_state returned an unsupported checkpoint path") from exc
+        return response
+
+    def save_weights_for_sampler(self, name, **kwargs):
+        response = self.client.save_weights_for_sampler(name, **kwargs)
+        path = getattr(response, "path", None)
+        if not isinstance(path, str) or not path.strip():
+            raise PipelineError("Fireworks sampler save returned no snapshot identity")
+        self.sampler_path = path
+        return response
+
+
 class ServerlessTraining:
-    def __init__(self, config, run_dir: Path, *, reasoning_effort: str | None = None):
+    def __init__(self, config, run_dir: Path, *, reasoning_effort: str | None = None,
+                 validation_every_steps: int | None = None):
         from training.recipes import sft_loop
         from training.utils import make_render_dataloader
         from training.utils.resource_autosizing import select_render_worker_count
@@ -57,6 +91,8 @@ class ServerlessTraining:
         self.step = 0
         self.consumed = 0
         self.history = []
+        self.validations = []
+        self.validation_every_steps = validation_every_steps
         self.training_completed = False
         self.init_args = (
             config.tokenizer_model, config.renderer_name, config.train_on_what,
@@ -105,6 +141,7 @@ class ServerlessTraining:
             )
             self.runner.mark_serverless()
             self.job_id = self.service.training_session_id
+            self.training_run_id = training_client.run_id
             self.client = ReconnectableClient.from_training_client(
                 training_client, base_model=self.cfg.base_model,
                 lora_rank=self.cfg.lora_rank, job_id=self.job_id, service=self.service,
@@ -115,8 +152,9 @@ class ServerlessTraining:
                                     "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]},
             )
             self._stack.callback(control.close)
+            self.checkpoint_client = _CheckpointSaveClient(self.client)
             self.checkpoints = TrainingCheckpoints(
-                self.client, ServerlessCheckpointClient(control, control.account_id),
+                self.checkpoint_client, ServerlessCheckpointClient(control, control.account_id),
                 trainer_id=self.job_id, log_path=self.cfg.log_path,
                 lora_rank=self.cfg.lora_rank, serverless=True, current_run_id=training_client.run_id,
             )
@@ -152,6 +190,7 @@ class ServerlessTraining:
         self.generator.manual_seed(self.cfg.seed + epoch - 1)
         pending = deque()
         epoch_steps = 0
+        validation_start = len(self.validations)
 
         def collect():
             step, tokens, weight, forward, optimizer = pending.popleft()
@@ -185,7 +224,11 @@ class ServerlessTraining:
                     forward.result(timeout=DEFAULT_TIMEOUT_S)
                     raise
                 pending.append((self.step, tokens, sft_loop._batch_loss_weight(batch), forward, optimizer))
-                if len(pending) >= self.cfg.pipeline_depth:
+                if self.validation_every_steps is not None and self.step % self.validation_every_steps == 0:
+                    while pending:
+                        collect()
+                    self.validate(epoch)
+                elif len(pending) >= self.cfg.pipeline_depth:
                     collect()
             while pending:
                 collect()
@@ -198,25 +241,53 @@ class ServerlessTraining:
                     pass
         if epoch_steps == 0:
             raise PipelineError("prepared training data has no usable batches")
+        if not self.validations or self.validations[-1]["step"] != self.step:
+            self.validate(epoch)
+        result = self.validations[-1]
+        self.history.append(result)
+        _json_dump(self.run_dir / "epochs.json", self.history)
+        return {**result, "validations": self.validations[validation_start:]}
+
+    def validate(self, epoch):
+        """Save a coherent validation before the next optimizer update."""
+        from training.recipes import sft_loop
+
         with redirect_stdout(sys.stderr):
             loss = sft_loop.run_eval(self.validation, self.client, self.cfg.batch_size, self.step, epoch - 1)
-        if not isinstance(loss, (int, float)) or not math.isfinite(loss):
+        if not isinstance(loss, (int, float)) or isinstance(loss, bool) or not math.isfinite(loss):
             raise PipelineError("Fireworks validation returned no finite loss")
         self.runner.append_metrics(self.step, {"eval/loss": loss, "eval/epoch": epoch})
-        self.checkpoints.save(f"epoch-{epoch}", resumable=True, promotable=True, data_consumed=self.consumed)
-        result = {"job_id": self.job_id, "steps": self.step, "eval_loss": loss,
-                  **self.epoch_checkpoints()}
-        self.history.append({**result, "epoch": epoch})
-        _json_dump(self.run_dir / "epochs.json", self.history)
+        name = f"s-{self.step}" if self.validation_every_steps is not None else f"epoch-{epoch}"
+        self.checkpoint_client.reset()
+        self.checkpoints.save(name, resumable=True, promotable=True, data_consumed=self.consumed)
+        state_path = self.checkpoint_client.state_path
+        sampler_path = self.checkpoint_client.sampler_path
+        if not state_path or not sampler_path:
+            raise PipelineError("Fireworks validation save did not return both training and sampler checkpoint identities")
+        result = {"job_id": self.job_id, "epoch": epoch, "step": self.step, "steps": self.step, "eval_loss": loss,
+                  "sampler_snapshot": sampler_path,
+                  **self.epoch_checkpoints(name, state_path=state_path)}
+        if any(previous["resume_checkpoint"] == result["resume_checkpoint"] for previous in self.validations):
+            raise PipelineError("Fireworks reused a save_state response path for distinct validation steps; "
+                                "the provider must return distinct restorable training checkpoint identities")
+        self.validations.append(result)
+        _json_dump(self.run_dir / "validations.json", self.validations)
         return result
 
-    def epoch_checkpoints(self):
+    def epoch_checkpoints(self, checkpoint_name, *, state_path):
         from smithtune.providers.fireworks import _epoch_checkpoints
 
-        return _epoch_checkpoints(self.job_id)
+        return _epoch_checkpoints(self.job_id, checkpoint_name, run_id=self.training_run_id, state_path=state_path)
+
+    def saved_snapshot(self, checkpoint):
+        return next((row.get("sampler_snapshot") for row in getattr(self, "validations", [])
+                     if row["resume_checkpoint"] == checkpoint), None)
 
     def snapshot(self, checkpoint: str) -> str:
-        """Restore the selected epoch in this session before publishing weights."""
+        """Use saved validation weights, or restore a legacy checkpoint."""
+        saved = self.saved_snapshot(checkpoint)
+        if saved:
+            return saved
         self.client.load_state(checkpoint)
         return self.client.save_weights_for_sampler("replay").path
 

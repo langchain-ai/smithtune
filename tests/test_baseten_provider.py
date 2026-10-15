@@ -182,6 +182,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
         "max_dropped_training_rows": 1,
         "effective_batch_size": 32,
         "max_epochs": 5,
+        "validation_every_steps": None,
         "early_stopping_patience": 1,
         "early_stopping_min_delta": 0.0,
         "seed": 42,
@@ -242,6 +243,7 @@ def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options
         replicas=2,
         spend_reserve_fraction=0.2,
         max_dropped_training_rows=0,
+        validation_every_steps=4,
     )
     assert provider.settings_from_options(options) == baseten.BasetenSFTSettings(
         max_epochs=2,
@@ -255,6 +257,7 @@ def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options
         replicas=2,
         spend_reserve_fraction=0.2,
         max_dropped_training_rows=0,
+        validation_every_steps=4,
     )
 
 
@@ -592,6 +595,7 @@ def test_capability_read_retries_a_transient_response_with_bounded_backoff():
         ("seed", 7, "seed"),
         ("replicas", 2, "replicas"),
         ("max_dropped_training_rows", 0, "max_dropped_training_rows"),
+        ("validation_every_steps", 4, "validation_every_steps"),
     ],
 )
 def test_baseten_training_policy_is_configurable(
@@ -910,6 +914,8 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
 
     assert result["status"] == "completed"
     assert result["best_epoch"] == 2
+    assert result["best_step"] == 6
+    assert result["best_resumable_state_uri"] == "state://approved-run-state-epoch-2"
     assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-epoch-2"
     assert result["last_resumable_state_uri"] == "state://approved-run-state-epoch-3"
     assert result["stopped_early"] is True
@@ -941,7 +947,243 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
     ]
     assert json.loads((run_dir / "run-state.json").read_text())["status"] == "completed"
     assert len(json.loads((run_dir / "epochs.json").read_text())) == 3
+    validations = json.loads((run_dir / "validations.json").read_text())
+    assert [item["step"] for item in validations] == [3, 6, 9]
+    assert all(item["epoch_end"] for item in validations)
     assert json.loads((run_dir / "result.json").read_text()) == result
+
+
+
+def test_plan_estimates_steps_from_all_assistant_targets_without_rendering(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    rows_path = tmp_path / "prepared/train.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    for row in rows:
+        row["messages"].extend([
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call"}]},
+            {"role": "assistant", "reasoning_content": "Consider the answer"},
+            {"role": "assistant", "content": ""},
+        ])
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def unexpected_call(*args, **kwargs):
+        raise AssertionError("free plan must not render or contact Baseten")
+
+    provider = baseten.BasetenProvider(
+        renderer_factory=unexpected_call, render_fn=unexpected_call,
+        service_factory=unexpected_call, capability_resolver=unexpected_call,
+    )
+    plan = provider.plan(tmp_path, "approved-run", baseten.BasetenSFTSettings(
+        max_epochs=2, validation_every_steps=4,
+    ))
+
+    assert plan["training_schedule"] == {
+        "training_units": 270,
+        "training_unit": "assistant_targets",
+        "estimate": True,
+        "steps_per_epoch": 9,
+        "max_optimizer_steps": 18,
+        "expected_validation_passes": 6,
+        "step_unit": "optimizer_updates",
+        "early_stopping_patience_unit": "epochs",
+    }
+
+
+def test_runtime_schedule_counts_retained_rendered_datums_before_provisioning(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[1.0])
+    service = FakeService(trainer)
+
+    def render(row, model, **kwargs):
+        index = int(row["_source"]["example_id"].split("-")[-1])
+        if index == 0:
+            return [_datum(1), _datum(131_073)]
+        if index < 90:
+            return [_datum(1) for _ in range(3)]
+        return [_datum(1)]
+
+    original_create = service.create_lora_training_client
+
+    def create(**kwargs):
+        schedule = json.loads((tmp_path / "run/plan.json").read_text())["training_schedule"]
+        assert schedule == {
+            "training_units": 267,
+            "training_unit": "rendered_datums",
+            "estimate": False,
+            "steps_per_epoch": 9,
+            "max_optimizer_steps": 9,
+            "expected_validation_passes": 1,
+            "step_unit": "optimizer_updates",
+            "early_stopping_patience_unit": "epochs",
+        }
+        return original_create(**kwargs)
+
+    service.create_lora_training_client = create
+    result = _train(_provider(service, FakeManagement(inactive=[True]), render_fn=render),
+                    tmp_path, baseten.BasetenSFTSettings(max_epochs=1))
+
+    assert result["completed_step"] == 9
+    assert result["split"]["train_rows"] == 89
+
+
+def test_step_validation_uses_global_intervals_and_deduplicates_epoch_boundaries(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[1.0, 0.9, 0.8, 0.7, 0.6, 0.5])
+    provider = _provider(FakeService(trainer), FakeManagement(inactive=[True]))
+
+    result = _train(provider, tmp_path, baseten.BasetenSFTSettings(
+        max_epochs=3, validation_every_steps=2,
+    ))
+
+    assert [(item["epoch"], item["step"]) for item in result["validations"]] == [
+        (1, 2), (1, 3), (2, 4), (2, 6), (3, 8), (3, 9),
+    ]
+    assert [item["step"] for item in result["epochs"]] == [3, 6, 9]
+    assert len(trainer.forward_sizes) == 6
+    assert trainer.save_state_names == [
+        f"approved-run-state-step-{step}" for step in (2, 3, 4, 6, 8, 9)
+    ]
+    assert json.loads((tmp_path / "run/validations.json").read_text()) == result["validations"]
+
+
+def test_step_validation_counts_optimizer_updates_after_accumulation(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[1.0, 0.9, 0.8])
+    boundaries = []
+    original_forward = trainer.forward
+
+    def forward(batch, loss):
+        boundaries.append((len(trainer.optimizer_params), sum(trainer.forward_backward_sizes)))
+        return original_forward(batch, loss)
+
+    trainer.forward = forward
+    result = _train(_provider(FakeService(trainer), FakeManagement(inactive=[True])),
+                    tmp_path, baseten.BasetenSFTSettings(
+                        max_epochs=1, validation_every_steps=1, microbatch_token_budget=10,
+                    ))
+
+    assert boundaries == [(1, 32), (2, 64), (3, 90)]
+    assert [item["step"] for item in result["validations"]] == [1, 2, 3]
+    assert len(trainer.forward_backward_sizes) > 3
+
+
+def test_mid_epoch_best_is_retained_and_only_epoch_end_loss_drives_patience(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[0.1, 0.8, 0.5, 0.7, 0.4, 0.9])
+    result = _train(_provider(FakeService(trainer), FakeManagement(inactive=[True])),
+                    tmp_path, baseten.BasetenSFTSettings(max_epochs=5, validation_every_steps=2))
+
+    assert result["stopped_early"] is True
+    assert [item["validation_loss"] for item in result["epochs"]] == [0.8, 0.7, 0.9]
+    assert result["best_epoch"] == 1
+    assert result["best_step"] == 2
+    assert result["best_resumable_state_uri"] == "state://approved-run-state-step-2"
+    assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-step-2"
+    assert result["last_resumable_state_uri"] == "state://approved-run-state-step-9"
+    state = json.loads((tmp_path / "run/run-state.json").read_text())
+    assert state["best_step"] == 2
+    assert state["best_resumable_state_uri"] == result["best_resumable_state_uri"]
+    assert state["best_sampler_weights_uri"] == result["best_sampler_weights_uri"]
+
+
+@pytest.mark.parametrize("failure_at", ["validation", "state", "sampler", "budget", "interruption"])
+def test_step_validation_preserves_prior_coherent_best_on_later_failure(tmp_path: Path, failure_at):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[0.5, 0.1])
+    now = 0.0
+    forward = trainer.forward
+    save_state = trainer.save_state
+    save_sampler = trainer.save_weights_for_sampler
+    validated = 0
+
+    def assert_prior_best():
+        saved = json.loads((tmp_path / "run/validations.json").read_text())
+        assert [item["step"] for item in saved] == [2]
+        state = json.loads((tmp_path / "run/run-state.json").read_text())
+        assert state["best_step"] == 2
+
+    def fail_forward(batch, loss):
+        nonlocal validated
+        validated += 1
+        if validated == 2:
+            assert_prior_best()
+            if failure_at == "validation":
+                raise RuntimeError("validation failed")
+            if failure_at == "interruption":
+                raise baseten.TerminationRequested("interrupted")
+        return forward(batch, loss)
+
+    def fail_state(name):
+        nonlocal now
+        if name.endswith("step-3"):
+            assert_prior_best()
+            if failure_at == "state":
+                raise RuntimeError("state failed")
+            if failure_at == "budget":
+                now = 8_100.0
+        return save_state(name)
+
+    def fail_sampler(name):
+        if name.endswith("step-3") and failure_at == "sampler":
+            assert_prior_best()
+            raise RuntimeError("sampler failed")
+        return save_sampler(name)
+
+    trainer.forward = fail_forward
+    trainer.save_state = fail_state
+    trainer.save_weights_for_sampler = fail_sampler
+    management = FakeManagement(inactive=[True])
+    provider = _provider(FakeService(trainer), management, monotonic=lambda: now)
+    settings = baseten.BasetenSFTSettings(
+        max_epochs=2, validation_every_steps=2, max_spend_usd=75.0, hourly_rate_usd=30.0,
+    )
+    if failure_at == "budget":
+        _train(provider, tmp_path, settings)
+    else:
+        exception = baseten.TerminationRequested if failure_at == "interruption" else RuntimeError
+        with pytest.raises(exception):
+            _train(provider, tmp_path, settings)
+
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["status"] == ("budget_stopped" if failure_at == "budget" else "failed")
+    assert result["best_epoch"] == 1
+    assert result["best_step"] == 2
+    assert result["best_resumable_state_uri"] == "state://approved-run-state-step-2"
+    assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-step-2"
+    assert result["last_resumable_state_uri"] == result["best_resumable_state_uri"]
+    assert [item["step"] for item in result["validations"]] == [2]
+    assert len(trainer.forward_sizes) <= 2
+    assert trainer.closed is True
+    assert management.deactivated == ["baseten-run-1"]
+
+
+def test_validation_retry_stops_if_budget_expires_during_backoff(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer()
+    now = 0.0
+    attempts = 0
+
+    def forward(batch, loss):
+        nonlocal attempts
+        attempts += 1
+        raise urllib.error.HTTPError("fake", 503, "unavailable", {}, None)
+
+    def backoff(seconds):
+        nonlocal now
+        now = 8_100.0
+
+    trainer.forward = forward
+    provider = _provider(FakeService(trainer), FakeManagement(inactive=[True]),
+                         monotonic=lambda: now, sleeper=backoff)
+    result = _train(provider, tmp_path, baseten.BasetenSFTSettings(
+        validation_every_steps=1, max_spend_usd=75.0, hourly_rate_usd=30.0,
+    ))
+
+    assert result["status"] == "budget_stopped"
+    assert attempts == 1
+    assert len(trainer.optimizer_params) == 1
+    assert result["validations"] == []
+    assert result["best_step"] is None
 
 
 def test_audit_hashes_distinguish_base_models_with_identical_rendering_and_settings(
@@ -1766,7 +2008,8 @@ def _install_renderer_output(monkeypatch: pytest.MonkeyPatch, tokens=None, weigh
 
 def _row() -> dict:
     return bound_row({
-        "messages": [{"role": "user", "content": "Hello"}],
+        "messages": [{"role": "user", "content": "Hello"},
+                     {"role": "assistant", "content": "Hi"}],
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
     })

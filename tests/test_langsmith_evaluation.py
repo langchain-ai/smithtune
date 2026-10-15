@@ -604,7 +604,11 @@ def test_cli_rejects_langsmith_opt_out(command, capsys):
     assert "unrecognized arguments: --no-langsmith" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("training", [{}, {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2}])
+@pytest.mark.parametrize("training", [
+    {},
+    {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2},
+    {"parent_training_run_id": "weather-sft", "checkpoint_epoch": 2, "checkpoint_step": 17},
+])
 def test_experiments_record_available_training_origin(prepared, tmp_path, training):
     data, _, client = prepared
     output = tmp_path / "replay"
@@ -612,7 +616,7 @@ def test_experiments_record_available_training_origin(prepared, tmp_path, traini
     evaluation.run_replay_evaluation(data, output, "tuned", "judge", **kwargs)
     assert len(client.projects) == 2
     for project in client.projects.values():
-        for key in ("parent_training_run_id", "checkpoint_epoch"):
+        for key in ("parent_training_run_id", "checkpoint_epoch", "checkpoint_step"):
             if key in training:
                 assert project.metadata[key] == training[key]
             else:
