@@ -124,6 +124,9 @@ class TrainingOptions(CommonSFTSettings):
     lora_rank: int | None = None
     lora_alpha: int | None = None
     pipeline_depth: int | None = None
+    training_mode: str | None = None
+    training_shape: str | None = None
+    provisioning_timeout: float | None = None
     microbatch_token_budget: int | None = None
     max_spend_usd: float | None = None
     hourly_rate_usd: float | None = None

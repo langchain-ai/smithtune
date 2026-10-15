@@ -715,8 +715,10 @@ class BasetenProvider:
 
     def settings_from_options(self, options: TrainingOptions) -> BasetenSFTSettings:
         """Resolve Baseten defaults and reject Fireworks-only settings."""
-        if options.lora_alpha is not None or options.pipeline_depth is not None:
-            raise PipelineError("--lora-alpha and --pipeline-depth are Fireworks-only")
+        if any(getattr(options, name) is not None for name in (
+            "lora_alpha", "pipeline_depth", "training_mode", "training_shape", "provisioning_timeout",
+        )):
+            raise PipelineError("--lora-alpha, --pipeline-depth, --training-mode, --training-shape, and --provisioning-timeout are Fireworks-only")
         optional = {
             name: getattr(options, name)
             for name in ("replicas", "spend_reserve_fraction", "max_dropped_training_rows")

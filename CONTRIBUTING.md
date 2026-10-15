@@ -22,8 +22,10 @@ evaluation always verifies its dataset snapshot and publishes results.
 Cover both sampler providers, endpoint cleanup, and saved-generation recovery
 when changing this integration.
 
-`providers/fireworks_training.py` keeps one serverless session across epochs and optional
-replay. It uses the pinned cookbook's rendering, data loader, validation,
+`providers/fireworks_training.py` keeps one session across epochs and optional
+replay. `providers/fireworks_dedicated.py` adds pinned shape discovery, dedicated
+LoRA lifecycle, and separate base/tuned replay deployments. Record owned IDs
+before provisioning, check deletion failures, and test partial readiness cleanup. It uses the pinned cookbook's rendering, data loader, validation,
 optimizer, and checkpoint helpers. `providers/fireworks_sampling.py` uses the official
 Training API sampler and the same renderer for replay. When changing these
 adapters, check checkpoint selection, session cleanup, tool parsing, and replay

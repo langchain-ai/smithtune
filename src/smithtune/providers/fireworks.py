@@ -115,9 +115,22 @@ class SFTSettings(CommonSFTSettings):
     lora_rank: int | None = None
     lora_alpha: int = 32
     pipeline_depth: int = 4
+    training_mode: str = "serverless"
+    training_shape: str | None = None
+    provisioning_timeout: float = 1800
 
     def validate(self) -> None:
         super().validate()
+        if self.training_mode not in ("serverless", "dedicated"):
+            raise PipelineError("training_mode must be serverless or dedicated")
+        if self.training_mode != "dedicated" and (self.training_shape is not None or self.provisioning_timeout != 1800):
+            raise PipelineError("--training-shape and --provisioning-timeout require --training-mode dedicated")
+        if not math.isfinite(self.provisioning_timeout) or not 1 <= self.provisioning_timeout <= 7200:
+            raise PipelineError("provisioning_timeout must be between 1 and 7200 seconds")
+        if self.training_shape is not None:
+            from smithtune.providers.fireworks_dedicated import validate_shape_name
+
+            validate_shape_name(self.training_shape)
         if self.lora_rank is not None and self.lora_rank < 1:
             raise PipelineError("lora_rank must be positive")
         if self.lora_alpha < 1 or self.pipeline_depth < 1:
@@ -168,7 +181,7 @@ skill_client_source: {CLIENT_SOURCE}
 ## Intent
 
 task: Train {plan['base_model']} on LangSmith message trajectories.
-method: training-api-serverless
+method: training-api-{plan.get("training_mode", "serverless")}
 success_metric: Held-out cross-entropy loss and perplexity are recorded.
 
 ## Resolved plan
@@ -315,6 +328,8 @@ class FireworksProvider:
                 "--microbatch-token-budget, --max-spend-usd, --hourly-rate-usd, --replicas, "
                 "--spend-reserve-fraction, and --max-dropped-training-rows are Baseten-only"
             )
+        if options.provisioning_timeout is not None and options.training_mode != "dedicated":
+            raise PipelineError("--provisioning-timeout requires --training-mode dedicated")
         defaults = SFTSettings()
         settings = SFTSettings(
             max_epochs=options.max_epochs,
@@ -324,6 +339,9 @@ class FireworksProvider:
             batch_size=options.batch_size,
             seed=options.seed,
             lora_rank=options.lora_rank,
+            training_mode=options.training_mode or defaults.training_mode,
+            training_shape=options.training_shape,
+            provisioning_timeout=defaults.provisioning_timeout if options.provisioning_timeout is None else options.provisioning_timeout,
             lora_alpha=defaults.lora_alpha if options.lora_alpha is None else options.lora_alpha,
             pipeline_depth=defaults.pipeline_depth if options.pipeline_depth is None else options.pipeline_depth,
         )
@@ -432,6 +450,18 @@ class FireworksProvider:
             "cost": "serverless token charges at the current account rate; resolve in the Fireworks console before confirmation",
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
+        if settings.training_mode == "dedicated":
+            from smithtune.providers.fireworks_dedicated import resolve_shape
+
+            value.update(
+                training_mode="dedicated",
+                method="Fireworks Training API dedicated LoRA SFT",
+                training_api=FIREWORKS_BASE_URL,
+                dedicated=resolve_shape(model, lora_rank, settings.training_shape,
+                                        timeout=settings.provisioning_timeout, replay=replay is not None),
+                cost="dedicated trainer time charges until cleanup; account access and available capacity required",
+                deployment="trainer deleted on exit; checkpoints remain subject to Fireworks retention; promotion and permanent serving are separate",
+            )
         if replay is not None:
             from smithtune.evaluation.replay import prepare_replay_evaluation
 
@@ -441,7 +471,9 @@ class FireworksProvider:
                 preview = prepare_replay_evaluation(
                     data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
                 )
-            value["replay"] = {**preview, **replay, "serving_mode": "serverless", "evaluated_models": 2}
+            value["replay"] = {**preview, **replay, "serving_mode": settings.training_mode, "evaluated_models": 2}
+            if settings.training_mode == "dedicated":
+                value["replay"]["cost"] = "separate temporary base and tuned inference deployments, time-billed in addition to the trainer until cleanup"
         return value
 
     def train(
@@ -452,6 +484,10 @@ class FireworksProvider:
         _require_confirm(confirm, "training and replay" if replay is not None else "training")
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
+        if settings.training_mode == "dedicated" and init_from_checkpoint is not None:
+            from smithtune.providers.fireworks_dedicated import checkpoint_parts
+
+            checkpoint_parts(init_from_checkpoint)
         plan = self.plan(data_dir, run_id, settings, replay=replay)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
@@ -461,7 +497,8 @@ class FireworksProvider:
             # Check before writing the run directory so a missing key can be fixed and retried.
             validate_judge_credentials(replay["judge_model"])
         model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
-        preflight_model(model)
+        if settings.training_mode == "serverless":
+            preflight_model(model)
         load_training_renderer(model)
         from training.recipes import sft_loop
         from training.utils import RunnerConfig, WandBConfig
@@ -488,7 +525,7 @@ class FireworksProvider:
             tokenizer_model=model.tokenizer_model, tokenizer_revision=model.tokenizer_revision,
             tokenizer_trust_remote_code=model.trust_remote_code, renderer_name=model.renderer,
             thinking_trace_history_mode=model.thinking_trace_history_mode,
-            train_on_what=SFT_TARGET_POLICY, serverless=True,
+            train_on_what=SFT_TARGET_POLICY, serverless=settings.training_mode == "serverless",
             lora_rank=settings.lora_rank or model.default_lora_rank, lora_alpha=settings.lora_alpha,
             max_seq_len=model.max_seq_len, learning_rate=settings.learning_rate,
             epochs=settings.max_epochs, batch_size=settings.batch_size,
@@ -501,7 +538,14 @@ class FireworksProvider:
         _write_run_md(run_dir / "run.md", plan, "job_running", "wait for training and replay")
         result = None
         try:
-            with ServerlessTraining(cfg, run_dir, reasoning_effort=model.reasoning_effort) as session:
+            session_class = ServerlessTraining
+            session_options = {}
+            if settings.training_mode == "dedicated":
+                from smithtune.providers.fireworks_dedicated import DedicatedTraining
+
+                session_class = DedicatedTraining
+                session_options["dedicated"] = plan["dedicated"]
+            with session_class(cfg, run_dir, reasoning_effort=model.reasoning_effort, **session_options) as session:
                 result = run_early_stopping(settings, session.run_epoch, init_from_checkpoint)
                 _json_dump(run_dir / "epochs.json", result["epochs"])
                 _json_dump(run_dir / "result.json", result)
@@ -511,10 +555,17 @@ class FireworksProvider:
                     from smithtune.providers.fireworks_sampling import FireworksReplaySampler
 
                     checkpoint = result["best"]["resume_checkpoint"]
-                    sampler = FireworksReplaySampler(
+                    sampler_class = FireworksReplaySampler
+                    sampler_options = {}
+                    if settings.training_mode == "dedicated":
+                        from smithtune.providers.fireworks_dedicated import DedicatedReplaySampler
+
+                        sampler_class = DedicatedReplaySampler
+                        sampler_options["dedicated"] = plan["dedicated"]
+                    sampler = sampler_class(
                         model, checkpoint, run_dir / "replay", service=session.service,
                         snapshot=session.snapshot(checkpoint),
-                        lora_rank=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+                        lora_rank=cfg.lora_rank, lora_alpha=cfg.lora_alpha, **sampler_options,
                     )
                     _write_run_md(run_dir / "run.md", plan, "evaluating", "wait for replay")
                     result["replay"] = run_replay_evaluation(
@@ -575,7 +626,10 @@ class FireworksProvider:
             },
         )
         try:
-            client.promote_session_checkpoint(checkpoint, output_model_id, base_model)
+            if plan.get("training_mode") == "dedicated":
+                client.promote_checkpoint(name=checkpoint, output_model_id=output_model_id, base_model=base_model)
+            else:
+                client.promote_session_checkpoint(checkpoint, output_model_id, base_model)
         finally:
             client.close()
         _json_dump(

@@ -117,17 +117,46 @@ Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rat
 
 ## Sampler behavior
 
-Fireworks reuses its serverless training session for `train --evaluate`.
-Baseten shuts down its trainer, then starts dedicated Loops samplers for the
-best checkpoint and base model; both samplers are deactivated on exit.
-Sampler and judge costs are separate from Baseten's training spend guard.
-Baseten sampler replay needs no `baseten-deploy` extra or Fireworks key with the
-default Baseten judge or an Anthropic judge. Periodic replay during training is not implemented.
+Replay uses `SamplingClient` for both providers; serving capacity depends on the
+training mode:
 
-Fireworks requires its saved serverless training checkpoint; a promoted model ID
-alone cannot be sampled. Baseten requires saved Loops sampler weights. Keep the
-training run directory so another team member can resolve the selected checkpoint.
-See [Fireworks in-session sampling](https://docs.fireworks.ai/fine-tuning/evaluating-fine-tuned-models#in-session-sampling-serverless-training).
+| Training mode | Replay capacity |
+| --- | --- |
+| Fireworks serverless (default) | Shared serverless sampling for base and tuned models |
+| Fireworks dedicated | Two temporary dedicated deployments, for base and tuned models |
+| Baseten Loops | Two temporary dedicated samplers, after training resources shut down |
+
+Fireworks requests deletion of owned dedicated resources on exit; Baseten
+deactivates its samplers. Dedicated capacity is billed for allocated time; judge
+calls cost extra. Both are outside Baseten's training spend guard. Cleanup
+failures are reported with resource IDs.
+
+`evaluate --run-dir ...` uses the saved checkpoint and training mode. Standalone
+dedicated Fireworks replay starts a temporary trainer to restore weights. Dedicated
+checkpoints cannot use serverless sampling, even for the same base model.
+Keep the run directory; a promoted Fireworks model ID alone cannot be sampled.
+Baseten replay needs no `baseten-deploy` extra. Replay manages temporary serving;
+use `deploy` separately for a standing endpoint.
+
+## Fireworks dedicated LoRA training
+
+Add `--training-mode dedicated` to both `plan` and `train`. SmithTune automatically
+selects a validated LoRA shape with sufficient context; `plan` shows its hardware
+and exact version. Dedicated planning requires `FIREWORKS_API_KEY` but creates no
+resources. Serverless remains the default.
+
+| Option | Use |
+| --- | --- |
+| `--training-shape accounts/<account>/trainingShapes/<shape>[/versions/<version>]` | Override automatic selection; include a version to pin the reviewed shape |
+| `--provisioning-timeout SECONDS` | Placement/readiness budget per stage; default 1800, range 1–7200 |
+
+Runs record the resolved shape in `plan.json`. Add `--evaluate` for dedicated
+replay; training alone provisions no inference capacity.
+
+Initialize a new run with `--init-from-checkpoint <trainer-job>:<checkpoint>`.
+Inspect `session.json` and replay `resources.json` if cleanup fails or the process
+is killed; delete remaining capacity in Fireworks. Checkpoints remain subject
+to Fireworks retention.
 
 ## Replay options
 

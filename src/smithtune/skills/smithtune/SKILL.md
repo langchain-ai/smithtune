@@ -123,25 +123,18 @@ From the output, write down what actually exists:
 **Inspect relevant online evaluators when they exist.** Before treating their
 feedback as a trusted selection signal, inspect:
 - the evaluation criteria, output schema, emitted feedback key, and score
-  direction—what constitutes a pass or failure;
-- what is evaluated: an input, output, individual run or action, tool behavior,
-  complete trace, or conversation/thread;
+  direction;
+- the evaluated unit (action, run, trace, or thread), and whether feedback is
+  attached to roots or children;
 - configured sampling and filters, and observed feedback coverage within the
-  requested time window; distinguish root feedback from child-run feedback;
-- whether the signal measures correctness or another task requirement, or
-  infers quality indirectly, such as from apparent user satisfaction.
+  requested time window;
+- whether the signal measures task quality directly or through a proxy such as
+  user satisfaction.
 
-Check a few high/low or pass/fail scored examples against the criteria. If a
-signal's meaning cannot be established, or its definition conflicts with
-recorded scores, explain the uncertainty before recommending it as a selection
-condition. Assess whether the signal covers the behavior the model will learn;
-a positive score on one output or action does not validate the whole training
-trajectory.
-
-Present the relevant signals, their meaning and coverage, and any uncertainty
-before recommending selection conditions or council review. These checks apply
-to both conversational projects and mechanical workflows; use the project's
-actual task requirements rather than assuming dialogue or user reactions.
+Check a few high/low or pass/fail examples against the criteria. A positive
+score on one action does not validate the whole training trajectory. Show the
+user each signal's meaning, coverage, and uncertainty before
+recommending selection conditions or council review.
 
 **1c. Agree with the user what "good training data" means**, then map it to
 those fields. Ask:
@@ -171,12 +164,9 @@ Common building blocks:
 | One known root | `eq(id, "<root-run-id>")` (time bounds must include it) |
 | Combine | `and(eq(name, "support-agent"), has(tags, "production"))` |
 
-Feedback conditions may combine several keys: require multiple positive
-signals, accept alternative positive signals, or exclude known failures.
-Keep each feedback key paired with its own value or threshold, then test the
-combined filter against actual returned scores. Measure how the combination
-changes coverage; multiple matching roots in one thread may still produce only
-one training trajectory.
+For combined feedback filters, keep each key paired with its own value or
+threshold. Check returned scores and coverage; multiple matching roots in one
+thread produce one training trajectory.
 
 **1e. Test the filter before pulling.** `langsmith trace list --filter` takes
 the same syntax and costs nothing. Use the same window you will pull:
@@ -216,13 +206,9 @@ Recommend one based on what you found in step 1: if the user's quality signal
 is real and well covered, suggest no review; if not, suggest council review.
 An agent-name filter or "no errors" alone is not a quality signal.
 
-Existing quality proxies can also prefilter candidates before council review,
-even when they are insufficient to justify skipping review. Explain this option
-when relevant, including how unscored candidates would be handled. The source
-selection can therefore use trusted feedback without council review, feedback
-prefiltering plus council review, or council review without a feedback
-prefilter. Let the user decide, and record both the selection conditions and
-the review choice.
+Weaker quality signals can still prefilter candidates for council review.
+Offer this option when relevant, using the agreed handling of missing scores.
+Record the user's selection conditions and review choice.
 
 Because omitting the flag means council review, always pass `--no-triage`
 explicitly when the user chose no review.
@@ -379,13 +365,11 @@ model's tokenizer and per-assistant tools, splits about 80/10/10 into
 train/validation/test (a whole trajectory stays in one split), and publishes the
 splits to the LangSmith dataset.
 
-For Fireworks GLM-5.3-Flash, choose `--reasoning-effort low`, `high`, or `max`
-(default) on `prepare`. Training and replay reuse the saved effort; use a new
-data directory to change it. This keeps thinking enabled and is separate from
-`--reasoning-policy omit|preserve`, which controls recorded reasoning in the
-training examples. Other training models currently reject `--reasoning-effort`.
-When calling a deployed GLM model through Fireworks' chat API, pass the matching
-`reasoning_effort` in the request.
+Only Fireworks GLM-5.3-Flash accepts `prepare --reasoning-effort low|high|max`
+(`max` default; all keep thinking enabled). Training and replay reuse it;
+changing it requires a new data directory. `--reasoning-policy omit|preserve`
+instead controls recorded reasoning in training examples. For deployed chat
+requests, see [reasoning settings](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#preparation-defaults).
 
 Check:
 - Split counts. Validation and test must be non-empty for training and
@@ -419,6 +403,22 @@ Check:
   action, plus calibration). `--max-points-per-trajectory` caps actions per
   test trajectory; omitting it evaluates every action.
 - Show the user these numbers and get authorization for the spend.
+
+### Fireworks capacity
+
+Serverless is the default. For dedicated LoRA, pass `--training-mode dedicated`
+to both `plan` and `train`. Omit `--training-shape` for automatic selection;
+review the hardware and context limit, then pin the reviewed version with
+`--training-shape accounts/<account>/trainingShapes/<shape>/versions/<version>`.
+
+Dedicated replay creates temporary, separately billed base and tuned deployments.
+Later `evaluate --run-dir` also starts temporary training capacity to restore the
+checkpoint. Dedicated checkpoints cannot use serverless sampling.
+
+If cleanup fails or the process is killed, inspect `session.json` and replay
+`resources.json` and delete remaining capacity in Fireworks. For provisioning
+overrides, checkpoint initialization, and retention, read the
+[dedicated LoRA reference](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#fireworks-dedicated-lora-training).
 
 ## 7. Train (and evaluate)
 
@@ -457,10 +457,14 @@ smithtune evaluate --provider "$provider" --data-dir "$data_dir" --run-dir "$run
   --judge-model "$judge_model" --max-points-per-trajectory 2 --confirm
 ```
 
-Rerunning reuses completed predictions and judgments. Fireworks samples the
-saved serverless training checkpoint (a promoted model ID alone cannot be
-sampled); Baseten starts temporary samplers and deactivates them on exit. To change the judge, cap,
+Rerunning reuses completed predictions and judgments. To change the judge, cap,
 or sampling settings, pass a fresh `--output-dir` to both commands.
+
+Fireworks reuses the saved checkpoint and training mode; a promoted model ID
+alone cannot be sampled. Baseten replay uses two temporary GPU deployments,
+deactivated on exit; their GPU and judge costs fall outside the training spend
+guard. See [sampler behavior](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#sampler-behavior)
+for capacity and cleanup details.
 
 ## 9. Deploy (optional)
 
@@ -470,9 +474,7 @@ See the [deployment guide](https://github.com/langchain-ai/smithtune/blob/main/d
 for details.
 
 ```bash
-# Fireworks (firectl 1.8.5+): promotes the best checkpoint, matches a validated
-# deployment shape, and waits for a ready replica. --account-id must own the
-# checkpoint; a saved promotion is reused. Omit --confirm first to preview the shape.
+# Fireworks (firectl 1.8.5+): --account-id must own the checkpoint.
 smithtune deploy --provider fireworks --run-dir "$run_dir" \
   --account-id "$account_id" --output-model-id my-tuned-model \
   --deployment-id my-endpoint --confirm
@@ -482,15 +484,11 @@ smithtune deploy --provider baseten --run-dir "$run_dir" \
   --accelerator H200:1 --max-seq-len 32768 --confirm
 ```
 
-**Fireworks blocks agents from creating or deleting deployments.** firectl refuses
-mutating commands when it detects an AI agent, so `deploy --confirm` and
-`undeploy` stop with a message containing the exact `smithtune` command to run.
-As the agent: run the preview (no `--confirm`) to show the shape, run
-`--confirm` once (it promotes the checkpoint and then stops), and give the user
-the printed command to run in their own terminal. If the user confirms their
-team allows it, `FIRECTL_AGENT_SAFE_ACCOUNTS=<account>` (firectl's allowlist)
-lets you create the deployment; `undeploy` always needs the user. Never hide
-the agent environment to get past the block. Baseten deploys are not affected.
+**Fireworks `deploy`/`undeploy` use firectl, which normally blocks agent changes.**
+Run an authorized `deploy --confirm` once; if blocked, promotion has completed,
+so give the user the printed terminal command. `undeploy` always needs the user.
+Keep agent detection intact. For team-approved account allowlists, see the
+deployment guide above.
 
 Stop serving when the user is done:
 
@@ -516,8 +514,8 @@ The flow is done when you can hand the user:
 - if deployed, the **deployment ID** and its `undeploy` command.
 
 Nothing should be left pending or running without the user knowing:
-`dataset resume DIR` shows no pending stages, Baseten samplers are cleaned up
-(`sampler.json`), and any deployment is acknowledged.
+`dataset resume DIR` shows no pending stages, temporary capacity is cleaned up,
+and any standing deployment is acknowledged.
 
 ## Debugging
 
