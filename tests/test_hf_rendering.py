@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 import copy
 import json
@@ -17,7 +17,8 @@ from transformers import PreTrainedTokenizerFast
 
 from smithtune import hf_rendering, rendering
 from smithtune.hf_rendering import HFRenderer, template_sha256
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 
 
@@ -231,7 +232,7 @@ def test_resolution_pins_branch_once_and_records_template_identity(monkeypatch):
 
 
 def test_native_prepare_persists_resolved_identity_and_whole_trajectories(monkeypatch, tmp_path):
-    from test_pipeline import example, write_raw
+    from tests.test_pipeline import example, write_raw
     from smithtune import dataset
     from smithtune.providers.base import ModelOptions
 

@@ -283,6 +283,12 @@ generates and judges a base response and a tuned response, plus judge calibratio
 Use a new or empty run directory. Repeat custom settings on both commands;
 `plan` is a preview and does not save settings for `train`.
 
+Validation runs at epoch end by default. For intermediate checkpoints, add
+`--validation-every-steps N` to both commands; see
+[validation cadence and checkpoint selection](docs/reference.md#validation-cadence-and-checkpoint-selection).
+Training runs the requested epochs by default; `--early-stopping-patience N`
+opts into stopping after N epochs without sufficient validation improvement.
+
 The CLI selects the saved model checkpoint with the lowest validation loss and
 compares it with the base model on held-out test data. Evaluation uses provider
 sampling clients to generate responses; [serving capacity, costs, and cleanup

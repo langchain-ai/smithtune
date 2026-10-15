@@ -11,7 +11,7 @@ from smithtune import artifacts, checkpoint, dataset_workflow, triage, triage_so
 from smithtune.dataset_artifacts import LazySequence, save_conversation
 from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
-from test_triage import API, judge_call, source, uid
+from tests.test_triage import API, judge_call, source, uid
 
 MIB = 1024 * 1024
 

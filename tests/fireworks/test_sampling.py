@@ -1,5 +1,5 @@
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 import copy
 import io
 import json
@@ -10,10 +10,10 @@ import pytest
 
 from smithtune import cli
 from smithtune.evaluation import replay as evaluation
-from smithtune.providers import fireworks_sampling as sampling
+from smithtune.providers.fireworks import sampling
 from smithtune.providers.base import PipelineError
-from smithtune.providers.fireworks import DEFAULT_MODEL
-from test_pipeline import write_manifest
+from smithtune.providers.fireworks.provider import DEFAULT_MODEL
+from tests.test_pipeline import write_manifest
 
 
 CHECKPOINT = "account/run-" + "a" * 32 + "/epoch-2"
@@ -130,8 +130,8 @@ def test_partial_sampler_startup_closes_resources(tmp_path, monkeypatch):
 
 def test_glm_sampler_keeps_reasoning_separate_from_visible_answer_and_tools(tmp_path, monkeypatch):
     from training.renderer import get_renderer
-    from smithtune.providers.fireworks import MODEL_SPECS
-    from test_hf_rendering import _tokenizer
+    from smithtune.providers.fireworks.provider import MODEL_SPECS
+    from tests.test_hf_rendering import _tokenizer
 
     model = MODEL_SPECS["glm-5p3-flash"]
     tokenizer = _tokenizer()
@@ -252,7 +252,7 @@ def test_cli_saved_run_defaults_to_serverless_base_comparison(tmp_path, monkeypa
 
 
 def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
-    from smithtune.providers.baseten import DEFAULT_MODEL as BASETEN_MODEL
+    from smithtune.providers.baseten.provider import DEFAULT_MODEL as BASETEN_MODEL
 
     write_manifest(tmp_path / "data", model=BASETEN_MODEL)
     with pytest.raises(SystemExit):
@@ -263,8 +263,8 @@ def test_fireworks_preview_requires_fireworks_data(tmp_path, capsys):
 
 @pytest.mark.parametrize("failure", ["calibration", "replay", "langsmith"])
 def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_path, monkeypatch, failure):
-    from smithtune.providers import fireworks_training as runtime
-    from smithtune.providers import fireworks
+    from smithtune.providers.fireworks import training as runtime
+    from smithtune.providers.fireworks import provider as fireworks
 
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"
@@ -332,7 +332,7 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
 
 
 def test_missing_judge_key_fails_before_writing_the_run_directory(tmp_path, monkeypatch):
-    from smithtune.providers import fireworks
+    from smithtune.providers.fireworks import provider as fireworks
 
     data = replay_data(tmp_path, monkeypatch)
     run = tmp_path / "run"

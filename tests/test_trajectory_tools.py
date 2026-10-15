@@ -8,10 +8,10 @@ import pytest
 
 from smithtune import curation, dataset, triage, triage_source
 from smithtune.providers.base import PipelineError
-from test_assistant_bindings import tool
-from test_per_assistant_preparation import example
-from test_triage import API, source, uid
-from trajectory_fixtures import items
+from tests.test_assistant_bindings import tool
+from tests.test_per_assistant_preparation import example
+from tests.test_triage import API, source, uid
+from tests.trajectory_fixtures import items
 
 
 def test_ui_pages_preserve_messages_and_global_assistant_positions():

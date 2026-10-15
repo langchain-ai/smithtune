@@ -93,23 +93,30 @@ class CommonSFTSettings:
     """Training settings supported by every provider adapter."""
 
     max_epochs: int = 5
-    early_stopping_patience: int = 1
+    early_stopping_patience: int | None = None
     early_stopping_min_delta: float = 0.0
     learning_rate: float = 1e-4
     batch_size: int = 32
     seed: int = 42
+    validation_every_steps: int | None = None
 
     def validate(self) -> None:
         if self.max_epochs < 1:
             raise PipelineError("max_epochs must be positive")
-        if self.early_stopping_patience < 1:
-            raise PipelineError("early_stopping_patience must be positive")
+        if self.early_stopping_patience is not None and (
+            type(self.early_stopping_patience) is not int or self.early_stopping_patience < 1
+        ):
+            raise PipelineError("early_stopping_patience must be a positive integer")
         if self.early_stopping_min_delta < 0:
             raise PipelineError("early_stopping_min_delta cannot be negative")
         if self.learning_rate <= 0 or self.batch_size < 1:
             raise PipelineError("learning_rate and batch_size must be positive")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
             raise PipelineError("seed must be a non-negative integer")
+        if self.validation_every_steps is not None and (
+            type(self.validation_every_steps) is not int or self.validation_every_steps < 1
+        ):
+            raise PipelineError("validation_every_steps must be a positive integer")
 
 
 @dataclass(frozen=True)

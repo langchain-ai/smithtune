@@ -4,9 +4,9 @@ import pytest
 
 from smithtune import triage_source
 from smithtune.providers.base import PipelineError
-from test_dataset_backfill import Candidates
-from test_dataset_workflow import no_judge, run
-from test_triage import uid
+from tests.test_dataset_backfill import Candidates
+from tests.test_dataset_workflow import no_judge, run
+from tests.test_triage import uid
 
 
 def judge_for(kept, calls):

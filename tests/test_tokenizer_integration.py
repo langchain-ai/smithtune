@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from binding_fixtures import bound_row
-from smithtune.providers import baseten, fireworks
+from tests.binding_fixtures import bound_row
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 from smithtune.hf_rendering import _normalize_messages
 from smithtune.rendering import load_training_renderer, render_row_tokens, replay_prompt, resolve_rendering_model
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.parametrize("stop_reason,closed_body,valid", [("stop", True, True), ("length", True, False), ("stop", False, False)])
 def test_kimi_sampler_stop_framing_preserves_truncation_checks(stop_reason, closed_body, valid):
-    from smithtune.providers.fireworks_sampling import restore_stop_suffix
+    from smithtune.providers.fireworks.sampling import restore_stop_suffix
 
     renderer = load_training_renderer(fireworks.MODEL_SPECS["kimi-k3"])
     text = "reason<|close|>think<|sep|><|open|>response<|sep|>ready"
@@ -135,7 +136,7 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
 @pytest.mark.parametrize("stop_reason", ["stop", "length"])
 @pytest.mark.parametrize("effort", ["low", "high", "max"])
 def test_fireworks_glm_replay_uses_native_prompts_and_parses_completions(tmp_path, tool_call, stop_reason, effort):
-    from smithtune.providers.fireworks_sampling import FireworksReplaySampler
+    from smithtune.providers.fireworks.sampling import FireworksReplaySampler
 
     model = replace(fireworks.MODEL_SPECS["glm-5p3-flash"], reasoning_effort=effort)
     renderer = load_training_renderer(model)

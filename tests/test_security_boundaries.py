@@ -11,7 +11,7 @@ import pytest
 
 from smithtune import dataset, inference
 from smithtune.inference_contract import ContractError, InferenceContract
-from smithtune.providers import fireworks
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 
 

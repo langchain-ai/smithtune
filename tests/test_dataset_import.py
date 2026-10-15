@@ -11,7 +11,7 @@ import pytest
 from smithtune import cli, dataset, dataset_import, dataset_workflow, triage
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
-from binding_fixtures import bound_example
+from tests.binding_fixtures import bound_example
 
 
 def uid(n):
@@ -29,7 +29,7 @@ def example(n, turns=1, **metadata):
 
 class API:
     def __init__(self, existing=()):
-        from test_curation import API as SourceAPI
+        from tests.test_curation import API as SourceAPI
 
         self.source = SourceAPI()
         self.existing = list(existing)
@@ -200,7 +200,7 @@ def test_cli_rejects_conflicting_destinations(targets):
 
 def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
     from smithtune.triage_source import load_snapshot
-    from test_triage import API as SourceAPI, source
+    from tests.test_triage import API as SourceAPI, source
 
     dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), no_triage=True, **{key: value for key, value in source().items() if key != "seed"})
     old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
@@ -218,7 +218,7 @@ def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
 
 
 def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypatch, capsys):
-    from test_triage import run
+    from tests.test_triage import run
 
     run(tmp_path)
     incoming, = triage.selected_examples(tmp_path)
@@ -242,7 +242,7 @@ def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypat
 
 
 def test_failed_triage_never_reaches_destination(tmp_path):
-    from test_triage import API as SourceAPI, source
+    from tests.test_triage import API as SourceAPI, source
 
     triage.run_triage(source(), tmp_path, runner=SourceAPI(), judge_call=lambda *_: {"keep": 1}, confirm=True, attempts=1)
     api = API()
@@ -285,7 +285,7 @@ def test_duplicate_incoming_cannot_create_second_example(tmp_path):
 
 
 def test_fresh_triage_can_label_unchanged_ordinary_example(tmp_path):
-    from test_triage import run
+    from tests.test_triage import run
 
     run(tmp_path)
     incoming, = triage.selected_examples(tmp_path)

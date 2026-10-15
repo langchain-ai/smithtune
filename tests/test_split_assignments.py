@@ -6,9 +6,9 @@ import pytest
 from smithtune import dataset
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json, _load_jsonl, output_lock
 from smithtune.inference_contract import json_sha256
-from smithtune.providers import fireworks
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
-from test_pipeline import example, loaded_contract, write_raw
+from tests.test_pipeline import example, loaded_contract, write_raw
 
 
 def prepare(path, examples, monkeypatch, **kwargs):

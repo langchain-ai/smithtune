@@ -9,10 +9,13 @@ import pytest
 from smithtune import capabilities, cli, rendering
 from smithtune.dataset import _model_from_manifest
 from smithtune.models import resolve_model_options
-from smithtune.providers import baseten, fireworks, fireworks_sampling, fireworks_training
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
+from smithtune.providers.fireworks import sampling as fireworks_sampling
+from smithtune.providers.fireworks import training as fireworks_training
 from smithtune.providers.base import ModelOptions, PipelineError
-from test_hf_rendering import _tokenizer
-from test_pipeline import example, write_raw
+from tests.test_hf_rendering import _tokenizer
+from tests.test_pipeline import example, write_raw
 
 
 @pytest.fixture

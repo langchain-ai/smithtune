@@ -32,6 +32,7 @@ from smithtune.providers.base import (
     TerminationRequested,
     TrainingOptions,
 )
+from smithtune.providers.validation import training_schedule
 
 
 # Loops uses this sentinel for targets excluded from assistant-only loss.
@@ -167,7 +168,6 @@ class BasetenSFTSettings(CommonSFTSettings):
     def validate(self) -> None:
         numeric = {
             "max_epochs": self.max_epochs,
-            "early_stopping_patience": self.early_stopping_patience,
             "early_stopping_min_delta": self.early_stopping_min_delta,
             "learning_rate": self.learning_rate,
             "batch_size": self.batch_size,
@@ -175,7 +175,7 @@ class BasetenSFTSettings(CommonSFTSettings):
             "replicas": self.replicas,
             "max_dropped_training_rows": self.max_dropped_training_rows,
         }
-        for name in ("lora_rank", "microbatch_token_budget"):
+        for name in ("early_stopping_patience", "lora_rank", "microbatch_token_budget"):
             value = getattr(self, name)
             if value is not None:
                 numeric[name] = value
@@ -728,6 +728,7 @@ class BasetenProvider:
             learning_rate=options.learning_rate,
             batch_size=options.batch_size,
             seed=options.seed,
+            validation_every_steps=options.validation_every_steps,
             lora_rank=options.lora_rank,
             microbatch_token_budget=options.microbatch_token_budget,
             max_spend_usd=options.max_spend_usd,
@@ -786,8 +787,15 @@ class BasetenProvider:
         manifest, _train_rows, _validation_rows = _load_prepared_data(data_dir)
         model = _validate_manifest(manifest)
         settings = _resolved_settings(settings, model)
+        _validate_canonical_rows(_train_rows, split="train")
         prepared_max_seq_len = _prepared_max_sequence_tokens(manifest, model)
         max_seq_len = min(prepared_max_seq_len, model.training_context_limit)
+        from smithtune.dataset import _has_message_content
+
+        assistant_targets = sum(
+            message.get("role") == "assistant" and _has_message_content(message)
+            for row in _train_rows for message in row["messages"]
+        )
         value = {
             "run_id": run_id,
             "provider": self.name,
@@ -813,6 +821,7 @@ class BasetenProvider:
                 "microbatch_token_budget": settings.microbatch_token_budget,
                 "effective_batch_size": settings.batch_size,
                 "max_epochs": settings.max_epochs,
+                "validation_every_steps": settings.validation_every_steps,
                 "early_stopping_patience": settings.early_stopping_patience,
                 "early_stopping_min_delta": settings.early_stopping_min_delta,
                 "seed": settings.seed,
@@ -821,8 +830,15 @@ class BasetenProvider:
                 "with_sampler": False,
                 "max_dropped_training_rows": settings.max_dropped_training_rows,
             },
+            "training_schedule": {
+                **training_schedule(assistant_targets, settings.batch_size,
+                                    settings.max_epochs, settings.validation_every_steps),
+                "training_units": assistant_targets,
+                "training_unit": "assistant_targets",
+                "estimate": True,
+            },
             "evaluation": "forward-only cross-entropy on the held-out validation split",
-            "checkpoint": "resumable state after every epoch and sampler weights for each new best",
+            "checkpoint": "resumable state at every validation and sampler weights for each new best",
             "budget": {
                 "enabled": settings.max_spend_usd is not None,
                 "max_spend_usd": settings.max_spend_usd,
@@ -937,6 +953,14 @@ class BasetenProvider:
         ]
         if not rendered_train:
             raise BasetenDataError("no training rows remain within the trainer limit")
+        training_units = sum(len(values) for values in rendered_train)
+        plan["training_schedule"] = {
+            **training_schedule(training_units, settings.batch_size,
+                                settings.max_epochs, settings.validation_every_steps),
+            "training_units": training_units,
+            "training_unit": "rendered_datums",
+            "estimate": False,
+        }
         plan["dataset"].update(
             {
                 "prepared_train_rows": len(train_rows),
@@ -963,6 +987,7 @@ class BasetenProvider:
             _atomic_json(state_path, state)
 
         epochs_path = run_dir / "epochs.json"
+        validations_path = run_dir / "validations.json"
         result_path = run_dir / "result.json"
         renderer_identity = {
             "renderer": model.renderer,
@@ -982,6 +1007,7 @@ class BasetenProvider:
             ensure_judge_calibration(_load_jsonl(run_dir / "replay" / "cases.jsonl"),
                                      run_dir / "replay", replay["judge_model"], _chat_completion)
         _atomic_json(epochs_path, [])
+        _atomic_json(validations_path, [])
         update_state(
             status="planned",
             provider="baseten",
@@ -991,9 +1017,12 @@ class BasetenProvider:
             renderer_identity=renderer_identity,
             **audit_identity,
             completed_epoch=0,
+            completed_step=0,
             last_resumable_state_uri=None,
+            best_resumable_state_uri=None,
             best_sampler_weights_uri=None,
             best_epoch=None,
+            best_step=None,
             budget_status="enabled" if settings.max_spend_usd is not None else "disabled",
             cleanup_status="pending",
             primary_error=None,
@@ -1006,13 +1035,17 @@ class BasetenProvider:
             clock=self._monotonic,
         )
         epochs: list[dict[str, Any]] = []
+        validations: list[dict[str, Any]] = []
         step_losses: list[dict[str, Any]] = []
         lowest_loss = math.inf
         patience_loss = math.inf
         epochs_without_patience_improvement = 0
         best_epoch: int | None = None
+        best_step: int | None = None
+        best_state_uri: str | None = None
         best_sampler_uri: str | None = None
         last_state_uri: str | None = None
+        completed_step = 0
         service: Any | None = None
         trainer: Any | None = None
         session_id: str | None = None
@@ -1038,10 +1071,14 @@ class BasetenProvider:
             "renderer_identity": renderer_identity,
             "capability": asdict(capability),
             "epochs": epochs,
+            "validations": validations,
             "step_losses": step_losses,
             "last_resumable_state_uri": None,
+            "best_resumable_state_uri": None,
             "best_sampler_weights_uri": None,
             "best_epoch": None,
+            "best_step": None,
+            "completed_step": 0,
             "stopped_early": False,
             "primary_error": None,
             "budget": {
@@ -1056,6 +1093,102 @@ class BasetenProvider:
                 "error": None,
             },
         }
+
+        def validate_checkpoint(epoch: int, *, epoch_end: bool) -> tuple[dict[str, Any], BudgetExceeded | None]:
+            nonlocal lowest_loss, best_epoch, best_step, best_state_uri, best_sampler_uri, last_state_uri
+            validation_weighted_loss = 0.0
+            validation_active_tokens = 0.0
+            for microbatch in validation_batches:
+                def validation_forward(microbatch=microbatch):
+                    budget.check("validation step")
+                    return trainer.forward(microbatch, "cross_entropy").result()
+
+                validation_result = retry_idempotent(
+                    validation_forward,
+                    sleeper=self._sleeper,
+                )
+                loss, active_tokens, metrics = _finite_loss_result(
+                    validation_result,
+                    operation="validation forward",
+                    fallback_active_tokens=_batch_active_tokens(microbatch),
+                )
+                validation_weighted_loss += loss * active_tokens
+                validation_active_tokens += active_tokens
+                step_losses.append(
+                    {
+                        "epoch": epoch,
+                        "step": completed_step,
+                        "operation": "validation_forward",
+                        "examples": len(microbatch),
+                        "loss": loss,
+                        "active_tokens": active_tokens,
+                        "metrics": metrics,
+                    }
+                )
+            if validation_active_tokens <= 0:
+                raise BasetenRuntimeError("validation returned no active target tokens")
+            validation_loss = validation_weighted_loss / validation_active_tokens
+            sampler_improved = validation_loss < lowest_loss
+            suffix = (
+                f"epoch-{epoch}" if settings.validation_every_steps is None
+                else f"step-{completed_step}"
+            )
+            post_checkpoint_budget_error: BudgetExceeded | None = None
+            budget.check("validation state checkpoint")
+            candidate_state_uri = _checkpoint_path(
+                trainer.save_state(_checkpoint_name(run_id, f"state-{suffix}")).result(),
+                operation="save_state",
+            )
+            try:
+                budget.check("validation state checkpoint")
+            except BudgetExceeded as exc:
+                if sampler_improved:
+                    raise
+                post_checkpoint_budget_error = exc
+            candidate_sampler_uri: str | None = None
+            if sampler_improved:
+                budget.check("best checkpoint")
+                candidate_sampler_uri = _checkpoint_path(
+                    trainer.save_weights_for_sampler(
+                        _checkpoint_name(run_id, f"sampler-{suffix}")
+                    ).result(),
+                    operation="save_weights_for_sampler",
+                )
+                try:
+                    budget.check("best checkpoint")
+                except BudgetExceeded as exc:
+                    post_checkpoint_budget_error = exc
+
+            # A best checkpoint always pairs resume state and sampler weights
+            # from the same completed optimizer update.
+            validation = {
+                "epoch": epoch,
+                "step": completed_step,
+                "epoch_end": epoch_end,
+                "validation_loss": validation_loss,
+                "resumable_state_uri": candidate_state_uri,
+                "sampler_weights_uri": candidate_sampler_uri,
+                "new_best": sampler_improved,
+            }
+            _atomic_json(validations_path, [*validations, validation])
+            validations.append(validation)
+            last_state_uri = candidate_state_uri
+            if sampler_improved:
+                lowest_loss = validation_loss
+                best_epoch = epoch
+                best_step = completed_step
+                best_state_uri = candidate_state_uri
+                best_sampler_uri = candidate_sampler_uri
+            update_state(
+                completed_step=completed_step,
+                last_resumable_state_uri=last_state_uri,
+                best_resumable_state_uri=best_state_uri,
+                best_sampler_weights_uri=best_sampler_uri,
+                best_epoch=best_epoch,
+                best_step=best_step,
+                active_seconds=budget.elapsed_seconds,
+            )
+            return validation, post_checkpoint_budget_error
 
         try:
             update_state(status="provisioning")
@@ -1112,7 +1245,7 @@ class BasetenProvider:
                 epoch_weighted_loss = 0.0
                 epoch_active_tokens = 0.0
                 optimizer_steps = 0
-                for group in groups:
+                for group_index, group in enumerate(groups, start=1):
                     for microbatch in group:
                         budget.check("training step")
                         training_result = trainer.forward_backward(microbatch).result()
@@ -1139,104 +1272,44 @@ class BasetenProvider:
                     ).result()
                     _finite_metrics(optimizer_result, operation="optimizer step")
                     optimizer_steps += 1
-
-                validation_weighted_loss = 0.0
-                validation_active_tokens = 0.0
-                for microbatch in validation_batches:
-                    budget.check("validation step")
-                    validation_result = retry_idempotent(
-                        lambda microbatch=microbatch: trainer.forward(
-                            microbatch, "cross_entropy"
-                        ).result(),
-                        sleeper=self._sleeper,
+                    completed_step += 1
+                    epoch_end = group_index == len(groups)
+                    interval_due = (
+                        settings.validation_every_steps is not None
+                        and completed_step % settings.validation_every_steps == 0
                     )
-                    loss, active_tokens, metrics = _finite_loss_result(
-                        validation_result,
-                        operation="validation forward",
-                        fallback_active_tokens=_batch_active_tokens(microbatch),
+                    if not (epoch_end or interval_due):
+                        continue
+                    validation, post_checkpoint_budget_error = validate_checkpoint(
+                        epoch, epoch_end=epoch_end
                     )
-                    validation_weighted_loss += loss * active_tokens
-                    validation_active_tokens += active_tokens
-                    step_losses.append(
-                        {
+                    if epoch_end:
+                        if epoch_active_tokens <= 0:
+                            raise BasetenRuntimeError("epoch returned no active target tokens")
+                        validation_loss = validation["validation_loss"]
+                        # Patience counts epochs, independent of interval checks.
+                        if validation_loss < patience_loss - settings.early_stopping_min_delta:
+                            patience_loss = validation_loss
+                            epochs_without_patience_improvement = 0
+                        else:
+                            epochs_without_patience_improvement += 1
+                        epochs.append({
                             "epoch": epoch,
-                            "operation": "validation_forward",
-                            "examples": len(microbatch),
-                            "loss": loss,
-                            "active_tokens": active_tokens,
-                            "metrics": metrics,
-                        }
-                    )
-                if epoch_active_tokens <= 0 or validation_active_tokens <= 0:
-                    raise BasetenRuntimeError("epoch returned no active target tokens")
-                train_loss = epoch_weighted_loss / epoch_active_tokens
-                validation_loss = validation_weighted_loss / validation_active_tokens
-
-                sampler_improved = validation_loss < lowest_loss
-                patience_improved = validation_loss < (
-                    patience_loss - settings.early_stopping_min_delta
-                )
-                post_checkpoint_budget_error: BudgetExceeded | None = None
-                budget.check("epoch state checkpoint")
-                candidate_state_uri = _checkpoint_path(
-                    trainer.save_state(_checkpoint_name(run_id, f"state-epoch-{epoch}")).result(),
-                    operation="save_state",
-                )
-                try:
-                    budget.check("epoch state checkpoint")
-                except BudgetExceeded as exc:
-                    if sampler_improved:
-                        raise
-                    post_checkpoint_budget_error = exc
-                candidate_sampler_uri: str | None = None
-                if sampler_improved:
-                    budget.check("best checkpoint")
-                    candidate_sampler_uri = _checkpoint_path(
-                        trainer.save_weights_for_sampler(
-                            _checkpoint_name(run_id, f"sampler-epoch-{epoch}")
-                        ).result(),
-                        operation="save_weights_for_sampler",
-                    )
-                    try:
-                        budget.check("best checkpoint")
-                    except BudgetExceeded as exc:
-                        post_checkpoint_budget_error = exc
-
-                # Advance durable metadata only after this epoch's required
-                # checkpoint set is coherent.
-                last_state_uri = candidate_state_uri
-                sampler_uri = candidate_sampler_uri
-                if sampler_improved:
-                    lowest_loss = validation_loss
-                    best_epoch = epoch
-                    best_sampler_uri = sampler_uri
-                if patience_improved:
-                    patience_loss = validation_loss
-                    epochs_without_patience_improvement = 0
-                else:
-                    epochs_without_patience_improvement += 1
-                epoch_result = {
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "validation_loss": validation_loss,
-                    "optimizer_steps": optimizer_steps,
-                    "resumable_state_uri": candidate_state_uri,
-                    "sampler_weights_uri": sampler_uri,
-                    "new_best": sampler_improved,
-                }
-                epochs.append(epoch_result)
-                _atomic_json(epochs_path, epochs)
-                update_state(
-                    completed_epoch=epoch,
-                    last_resumable_state_uri=last_state_uri,
-                    best_sampler_weights_uri=best_sampler_uri,
-                    best_epoch=best_epoch,
-                    active_seconds=budget.elapsed_seconds,
-                )
-                if post_checkpoint_budget_error is not None:
-                    raise post_checkpoint_budget_error
+                            "step": completed_step,
+                            "train_loss": epoch_weighted_loss / epoch_active_tokens,
+                            "validation_loss": validation_loss,
+                            "optimizer_steps": optimizer_steps,
+                            "resumable_state_uri": validation["resumable_state_uri"],
+                            "sampler_weights_uri": validation["sampler_weights_uri"],
+                            "new_best": validation["new_best"],
+                        })
+                        _atomic_json(epochs_path, epochs)
+                        update_state(completed_epoch=epoch)
+                    if post_checkpoint_budget_error is not None:
+                        raise post_checkpoint_budget_error
                 if (
-                    epochs_without_patience_improvement
+                    settings.early_stopping_patience is not None
+                    and epochs_without_patience_improvement
                     >= settings.early_stopping_patience
                 ):
                     stopped_early = True
@@ -1291,10 +1364,14 @@ class BasetenProvider:
             {
                 "status": status,
                 "epochs": epochs,
+                "validations": validations,
                 "step_losses": step_losses,
+                "completed_step": completed_step,
                 "last_resumable_state_uri": last_state_uri,
+                "best_resumable_state_uri": best_state_uri,
                 "best_sampler_weights_uri": best_sampler_uri,
                 "best_epoch": best_epoch,
+                "best_step": best_step,
                 "stopped_early": stopped_early,
                 "primary_error": safe_primary_error,
             }
@@ -1309,9 +1386,12 @@ class BasetenProvider:
             update_state(
                 status=status,
                 completed_epoch=len(epochs),
+                completed_step=completed_step,
                 last_resumable_state_uri=last_state_uri,
+                best_resumable_state_uri=best_state_uri,
                 best_sampler_weights_uri=best_sampler_uri,
                 best_epoch=best_epoch,
+                best_step=best_step,
                 # Active time is measured only by the optional spend guard.
                 active_seconds=(
                     final_active_seconds if settings.max_spend_usd is not None else None
@@ -1326,6 +1406,7 @@ class BasetenProvider:
                 primary_error=safe_primary_error,
             )
             _atomic_json(epochs_path, epochs)
+            _atomic_json(validations_path, validations)
             _atomic_json(result_path, result)
         except BaseException as exc:
             if primary_error is None:
@@ -1348,7 +1429,7 @@ class BasetenProvider:
         if cleanup_error is not None:
             raise cleanup_error
         if replay is not None:
-            from smithtune.providers.baseten_sampling import BasetenReplaySampler
+            from smithtune.providers.baseten.sampling import BasetenReplaySampler
             from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
 
             try:

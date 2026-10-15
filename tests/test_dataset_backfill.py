@@ -6,8 +6,8 @@ import pytest
 
 from smithtune import cli, dataset_workflow, triage_source
 from smithtune.providers.base import PipelineError
-from test_dataset_workflow import SOURCE, no_judge, run
-from test_triage import API, uid
+from tests.test_dataset_workflow import SOURCE, no_judge, run
+from tests.test_triage import API, uid
 
 
 class Candidates(API):

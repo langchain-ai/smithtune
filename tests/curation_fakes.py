@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
-from test_assistant_bindings import example
-from trajectory_fixtures import run_items
+from tests.test_assistant_bindings import example
+from tests.trajectory_fixtures import run_items
 
 
 def uid(n):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from binding_fixtures import bound_row, bound_example
+from tests.binding_fixtures import bound_row, bound_example
 
 import copy
 import io
@@ -17,12 +17,13 @@ import pytest
 
 from smithtune import artifacts, capabilities
 from smithtune import dataset as dataset_ops
-from smithtune.evaluation import replay as replay
+from smithtune.evaluation import replay
 from smithtune import inference as inference_transport
 from smithtune import inference_contract
 from smithtune import cli as pipeline
 from smithtune import rendering
-from smithtune.providers import baseten, fireworks
+from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import ModelSpec, PipelineError
 
 
@@ -65,7 +66,7 @@ def write_raw(root: Path, examples: list[dict], dataset_id: str = "dataset-id", 
     if not any(part.get("type") == "tool_call" for ex in examples
                for msg in ex["inputs"]["messages"] if isinstance(msg["content"], list)
                for part in msg["content"]):
-        from test_example_tools import write_empty_tool_snapshot
+        from tests.test_example_tools import write_empty_tool_snapshot
         write_empty_tool_snapshot(root, examples, dataset_id, workspace_id)
 
 
@@ -1622,7 +1623,7 @@ def test_plan_uses_manifest_model_and_sft_defaults(tmp_path: Path):
     assert plan["base_model"] == "accounts/fireworks/models/kimi-k3"
     assert plan["config"]["renderer"] == "kimi_k3"
     assert plan["config"]["max_epochs"] == 5
-    assert plan["config"]["early_stopping_patience"] == 1
+    assert plan["config"]["early_stopping_patience"] is None
     assert plan["config"]["loss_target"] == "each assistant target once, with zero loss on history"
     assert "train_on_what" not in plan["config"]
     assert plan["dataset"]["validation_rows"] == 1
@@ -1811,7 +1812,7 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "00000000-0000-0000-0000-000000000000")
 
-    result = fireworks._epoch_checkpoints("session-1")
+    result = fireworks._epoch_checkpoints("session-1", "step-4", run_id=run_id, state_path=f"account-id/{run_id}/step-4")
 
     assert calls == ["accounts/account-id/trainingSessions/session-1"]
     assert result["resume_checkpoint"] == f"account-id/{run_id}/step-4"
@@ -1823,7 +1824,7 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
     *[replace(fireworks.MODEL_SPECS["glm-5p3-flash"], reasoning_effort=effort) for effort in ("low", "high", "max")],
 ], ids=lambda model: f"{model.name}-{model.reasoning_effort}")
 def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model):
-    import smithtune.providers.fireworks_training as runtime
+    import smithtune.providers.fireworks.training as runtime
 
     metadata_calls = []
     renderer_calls = []
@@ -1921,7 +1922,7 @@ def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkey
 def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     commands = []
     monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
-    from firectl_fakes import FakeFirectl
+    from tests.fireworks.fakes import FakeFirectl
     firectl = FakeFirectl()
     commands = firectl.commands
     monkeypatch.setattr(fireworks, "_run", firectl)
@@ -1958,7 +1959,7 @@ def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch
 def test_failed_deployment_smoke_test_retains_receipt(tmp_path, monkeypatch, error):
     monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
-    from firectl_fakes import FakeFirectl
+    from tests.fireworks.fakes import FakeFirectl
     monkeypatch.setattr(fireworks, "_run", FakeFirectl())
 
     def fail(route):

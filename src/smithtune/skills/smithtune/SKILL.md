@@ -402,7 +402,7 @@ Re-running with `--no-fetch` reuses the downloaded data (splits still sync).
 
 Before choosing training settings, consult the
 [training optimizations](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#training-optimizations)
-for the selected workflow. Use its context and batching guidance to propose
+for the selected workflow. Use its context, batching, and validation guidance to propose
 settings and any budgeted comparison runs.
 
 ```bash
@@ -418,6 +418,10 @@ ID such as `accounts/fireworks/models/deepseek-v4p1-flash`, or
 
 Check:
 - Training example and token counts, epochs, and hyperparameters.
+- `training_schedule`: steps per epoch and expected validation passes. Consider
+  `--validation-every-steps N` for intermediate checkpoints, accounting for added
+  validation cost. Runs complete the requested epochs by default; use
+  `--early-stopping-patience N` only when early stopping is wanted.
 - Evaluation case and call counts (base response + tuned response + judge per
   action, plus calibration). `--max-points-per-trajectory` caps actions per
   test trajectory; omitting it evaluates every action.
@@ -458,7 +462,8 @@ smithtune train \
 Check:
 - Share the LangSmith comparison link printed when evaluation starts.
 - `"$run_dir/result.json"` records the best checkpoint (lowest validation loss).
-  In `epochs.json`, flag validation loss that rises steadily or never improves.
+  In `validations.json` (`epochs.json` for older runs), flag validation loss that
+  rises steadily or never improves.
 - The final JSON has `langsmith.comparison_url`; `"$run_dir/replay/summary.json"`
   has base vs tuned scores. `teacher_agreement` is per action,
   `trajectory_teacher_agreement` the per-trajectory mean. They measure agreement
@@ -527,7 +532,8 @@ The flow is done when you can hand the user:
 - the LangSmith **dataset ID**, its trajectory count, the filter and window used,
   and (council mode) kept/dropped counts with common drop reasons;
 - the **data directory**, split counts, and rejected count from `prepare`;
-- the **run directory** and the selected checkpoint and epoch from `result.json`;
+- the **run directory**, selected checkpoint, epoch, and step when recorded in
+  `result.json`;
 - the **LangSmith comparison URL** with base vs tuned `teacher_agreement`, noting
   what the score does and doesn't measure;
 - if deployed, the **deployment ID** and its `undeploy` command.

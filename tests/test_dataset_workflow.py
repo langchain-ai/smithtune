@@ -6,7 +6,7 @@ import pytest
 from smithtune import checkpoint, cli, dataset_workflow as workflow, triage, triage_source
 from smithtune.artifacts import output_lock
 from smithtune.providers.base import PipelineError
-from test_triage import API, judge_call, uid
+from tests.test_triage import API, judge_call, uid
 
 
 SOURCE = {"workspace_id": uid(100), "project_id": uid(101),
@@ -386,7 +386,7 @@ def test_distinct_trajectory_target_stops_query_pagination(tmp_path):
 
 
 def test_pre_workflow_triage_snapshot_can_be_pushed(tmp_path):
-    from test_triage import run as old_triage
+    from tests.test_triage import run as old_triage
 
     api = API()
     old_triage(tmp_path, api)
@@ -424,7 +424,7 @@ def test_command_help_is_available(command, capsys):
 
 
 def test_pre_workflow_interrupted_triage_upload_is_resumed(tmp_path):
-    from test_triage import run as old_triage
+    from tests.test_triage import run as old_triage
 
     api = API()
     old_triage(tmp_path, api)
@@ -482,7 +482,7 @@ def test_parallel_pull_preserves_inflight_downloads_and_order_on_resume(tmp_path
 
 
 def test_legacy_interrupted_triage_download_keeps_council_intent(tmp_path):
-    from test_triage import source
+    from tests.test_triage import source
 
     api = API()
     api.failure = lambda command: (_ for _ in ()).throw(KeyboardInterrupt()) if command[2] == "/v1/trajectory" else None
@@ -502,7 +502,7 @@ def test_staged_dataset_can_be_downloaded_and_prepared(tmp_path):
     from types import SimpleNamespace
     from urllib.parse import parse_qs, urlsplit
     from smithtune import dataset
-    from smithtune.providers.fireworks import DEFAULT_MODEL
+    from smithtune.providers.fireworks.provider import DEFAULT_MODEL
 
     api = API()
     api.root_pages[0].extend({"trace_id": uid(n), "thread_id": None,
