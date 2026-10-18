@@ -523,7 +523,7 @@ def _cleanup_failure(run_id: str, operation: str, failure: BaseException) -> Bas
 
 
 class _BasetenManagement:
-    def __init__(self, *, api_key: str | None = None, opener: Any = urllib.request.urlopen) -> None:
+    def __init__(self, *, api_key: str | None = None, opener: Any = open_without_redirects) -> None:
         resolved = api_key if api_key is not None else os.environ.get("BASETEN_API_KEY")
         if not resolved or not resolved.strip():
             raise BasetenRuntimeError("BASETEN_API_KEY is required for cleanup")

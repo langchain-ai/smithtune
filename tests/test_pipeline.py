@@ -1436,7 +1436,7 @@ def test_anthropic_judge_calls_anthropic_directly(monkeypatch: pytest.MonkeyPatc
         captured["body"] = json.loads(request.data)
         return Response(json.dumps({"content": [{"type": "text", "text": '{"pass":true,"reason":"match"}'}]}).encode())
 
-    monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(inference_transport, "open_without_redirects", fake_urlopen)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-value")
 
     result = inference_transport._chat_completion(
@@ -1468,7 +1468,7 @@ def test_anthropic_judge_ignores_custom_headers(monkeypatch: pytest.MonkeyPatch)
         response = {"content": [{"type": "text", "text": '{"pass":true,"reason":"match"}'}]}
         return Response(json.dumps(response).encode())
 
-    monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(inference_transport, "open_without_redirects", fake_urlopen)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"other-key"}')
 
