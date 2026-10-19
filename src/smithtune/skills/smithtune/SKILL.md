@@ -43,19 +43,9 @@ before an unfamiliar command.
 
 ## 0. Before anything
 
-**Remote execution:** when the user needs a run to continue after their local machine
-disconnects, follow the README's [remote machine workflow](https://github.com/langchain-ai/smithtune/blob/main/README.md#run-on-a-remote-machine).
-Preview the selected workflow on the user's existing VM and check
-`execution.requires_active_client`. When it is `true`, run `train --detach`
-there, using its credentials and persistent data/run paths. Execution on the
-local machine still depends on it staying on. Obtain paid-work authorization
-and check `status --run-dir DIR` plus
-`logs --run-dir DIR` after launching. A launch acknowledgment is not training
-completion. Preserve both `DIR` and `DIR.controller`. For `failed`,
-`interrupted`, or ambiguous startup, use [manual recovery](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#remote-controller-recovery):
-confirm remote resource state and follow the recovery procedure for the recorded
-provider and workflow. When initializing a recovery run, choose its remaining
-epochs and budget explicitly.
+**Execution location:** honor any local or VM preference the user has already
+provided. Otherwise, choose the controller's location in step 6, after preparation
+and before approving or launching training, including a throughput pilot.
 
 ```bash
 smithtune doctor
@@ -400,6 +390,43 @@ Re-running with `--no-fetch` reuses the downloaded data (splits still sync).
 
 ## 6. Plan
 
+### Choose where the controller runs
+
+Resolve this before the first training pilot or main run. Reuse an execution
+location already chosen in this conversation; ask only for missing details.
+Otherwise ask:
+
+> Where should the training controller run: this machine, or an existing VM so
+> the run can continue when you disconnect?
+
+The controller needs CPU, memory, persistent storage, and network access.
+`--detach` starts a controller on the machine running the command; it does not
+connect to a VM.
+
+- **This machine:** preview here and inspect `execution.requires_active_client`.
+  When it is `true`, explain that this machine must stay awake, running, and
+  connected even with `--detach`. If the user needs laptop-independent execution,
+  resolve a VM target before launching.
+- **Existing VM:** collect the SSH host or connection command, remote user,
+  authentication method by reference, and persistent working directory. Reuse
+  supplied configuration. If no VM exists, ask the user to provide one or
+  explicitly authorize provisioning before creating paid infrastructure. Follow
+  the README's [remote machine workflow](https://github.com/langchain-ai/smithtune/blob/main/README.md#run-on-a-remote-machine):
+  verify connectivity, the same Smithtune version and compatible dependencies,
+  credential presence with `doctor`, the user's interactive data-rights
+  acknowledgment, persistent storage, and outbound access to LangSmith and the
+  selected providers. Prepare there or copy the complete prepared data directory,
+  preserving its split assignments. Set `data_dir` and a new `run_dir` to persistent
+  paths on that VM and preview the selected workflow there.
+
+Inspect `execution.requires_active_client` in the chosen host's plan. When it is
+`true`, use `train --detach` on that host after the user authorizes the paid work.
+Keep the chosen host, remote user when applicable, and absolute data/run paths in
+the handoff so pilots, the main run, and later evaluation use the intended machine.
+A location choice does not authorize a paid training run or VM provisioning.
+
+### Choose training settings
+
 Before choosing training settings, consult the
 [training optimizations](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#training-optimizations)
 for the selected workflow. Use its context, batching, and validation guidance to propose
@@ -460,6 +487,14 @@ smithtune train \
   `--hourly-rate-usd`.
 
 Check:
+- For a detached run, check `status --run-dir "$run_dir"` and
+  `logs --run-dir "$run_dir"` on the chosen host and user before reporting that
+  the user can disconnect. A launch acknowledgment is not verified startup or
+  training completion; controller status does not check provider resources or billing.
+  Preserve both `"$run_dir"` and `"$run_dir.controller"`. For `failed`, `interrupted`,
+  or ambiguous startup, follow [manual recovery](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#remote-controller-recovery):
+  confirm provider resource state before retrying, and choose remaining epochs
+  and budget explicitly for a recovery run.
 - Share the LangSmith comparison link printed when evaluation starts.
 - `"$run_dir/result.json"` records the best checkpoint (lowest validation loss).
   In `validations.json` (`epochs.json` for older runs), flag validation loss that
