@@ -399,10 +399,9 @@ Otherwise ask:
 > Where should the training controller run: this machine, or an existing VM so
 > the run can continue when you disconnect?
 
-Explain that Fireworks or Baseten supplies the training GPUs in either case.
-The controller needs CPU, memory, persistent storage, and network access; choosing
-a VM does not move the provider's GPU training onto that VM. `--detach` starts a
-controller on the machine running the command; it does not connect to a VM.
+The controller needs CPU, memory, persistent storage, and network access.
+`--detach` starts a controller on the machine running the command; it does not
+connect to a VM.
 
 - **This machine:** preview here and inspect `execution.requires_active_client`.
   When it is `true`, explain that this machine must stay awake, running, and
