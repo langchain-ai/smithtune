@@ -50,14 +50,15 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
         shutil.copy2(ROOT / name, work / name)
     targets = ["tests"] if full_tests else ["tests/test_cli_installation.py", "tests/test_training_dependency.py"]
     run(python, "-I", "-m", "pytest", *targets, cwd=work, env=env)
-    run(str(venv / "bin/smithtune"), "skill", "export", "--output", str(work / "skills"), cwd=work, env=env)
+    run(python, "-I", "-c", "from importlib.resources import files; root = files('smithtune'); "
+        "assert root.joinpath('skills/smithtune/SKILL.md').is_file()", cwd=work, env=env)
     if full_tests:
         # Verify the opt-in runtime from the installed wheel, with real graphs
         # and deterministic local models. The default install is tested first.
         run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[deepagents]")
         run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
         run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[baseten-deploy]")
-        run(python, "-I", "-m", "pytest", "tests/test_baseten_truss.py", "tests/test_baseten_deployment.py", "tests/test_baseten_deploy_cli.py", cwd=work, env=env)
+        run(python, "-I", "-m", "pytest", "tests/baseten/test_truss.py", "tests/baseten/test_deployment.py", "tests/baseten/test_deploy_cli.py", cwd=work, env=env)
         # Commit a clean source snapshot in a disposable repository. This tests
         # Git installation of the current working tree without committing it to
         # the developer's repository or depending on a published branch.

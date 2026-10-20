@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare LangSmith trajectories and orchestrate provider-specific SFT."""
+"""Fine-tune models on LangSmith trajectories with Fireworks or Baseten, then compare base and tuned models in LangSmith."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from smithtune import data_rights, dataset, dataset_workflow, triage
+from smithtune import controller, data_rights, dataset, dataset_workflow
 from smithtune.evaluation import replay as replay_evaluation
 from smithtune.evaluation import langsmith as reporting
 from smithtune.inference_contract import ContractError, load_inference_contract
-from smithtune.inference import ANTHROPIC_ENDPOINTS, BasetenEndpoint, anthropic_connection
+from smithtune.inference import BasetenEndpoint
 from smithtune.providers.baseten.provider import (
     MODEL_SPECS as BASETEN_MODEL_SPECS,
     BasetenRuntimeError,
@@ -40,11 +40,17 @@ from smithtune.artifacts import _json_dump, _load_json, output_lock
 from smithtune.progress import command_status
 
 
+JUDGE_MODEL_HELP = ("evaluation judge (default: %(default)s); baseten/<model-id>, anthropic/<model-id>, "
+                    "or a Fireworks model ID such as accounts/fireworks/models/deepseek-v4p1-flash")
+
+
 def _add_replay_options(command):
-    command.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL)
-    command.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
+    command.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL, help=JUDGE_MODEL_HELP)
+    command.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY,
+                         help="concurrent evaluation cases (default: %(default)s)")
     command.add_argument("--max-points-per-trajectory", type=int, help="optional replay cap; default scores every assistant action")
-    command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
+    command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS,
+                         help="maximum generated response tokens (default: %(default)s)")
 
 
 def _training_replay(args):
@@ -76,7 +82,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     models = sub.add_parser("models", help="show supported training models")
-    models_sub = models.add_subparsers(dest="models_command", required=True)
+    models_sub = models.add_subparsers(dest="models_command", metavar="{list}", required=True)
     models_list = models_sub.add_parser(
         "list", help="list smithtune's supported models without network calls",
         description="List smithtune's supported training models as JSON. No credentials or downloads are needed; live provider availability is checked during prepare and train.",
@@ -86,30 +92,30 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     curate = sub.add_parser("dataset", help="curate trajectories from a tracing project")
-    curate_sub = curate.add_subparsers(dest="dataset_command", required=True)
+    curate_sub = curate.add_subparsers(dest="dataset_command", metavar="{pull,triage,push,resume,publish-splits}", required=True)
     for name, help_text in {
-        "pull": "download trajectories and tool contracts to a saved directory",
-        "triage": "preview local council judging; --confirm runs it",
+        "pull": "download trajectories and their per-turn tools to a saved directory",
+        "triage": "review trajectory quality with an agent council against --rubric or --rule criteria; preview before --confirm",
         "push": "preview a dataset upload; --confirm uploads",
-        "create": "download, optionally judge, and upload with one saved directory",
         "resume": "show pending stages; --confirm continues saved work",
     }.items():
         command = curate_sub.add_parser(name, help=help_text, description=help_text)
-        command.add_argument("directory", nargs="?", type=Path, help="saved directory (generated for a new pull/create)")
-        if name in {"pull", "create"}:
-            command.add_argument("--workspace-id")
-            command.add_argument("--project-id")
+        command.add_argument("directory", nargs="?", type=Path,
+                             help="download directory (generated if omitted)" if name == "pull" else "saved directory from dataset pull")
+        if name == "pull":
+            command.add_argument("--workspace-id", help="LangSmith workspace containing the tracing project")
+            command.add_argument("--project-id", help="LangSmith tracing project to pull root runs from")
             command.add_argument("--start-time", help="inclusive root start time (default: 24 hours before end)")
             command.add_argument("--end-time", help="exclusive root start time (default: now)")
-            command.add_argument("--filter", help="LangSmith root-run filter; create skips council when no judging criteria are supplied")
-            command.add_argument("--limit", type=int, help="distinct trajectories to select (default: 100, maximum: 2000)")
-        if name in {"push", "create"}:
+            command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window")
+            command.add_argument("--target-count", type=int, help="desired council-approved trajectories, or structurally usable trajectories with --no-triage (default: 100)")
+            command.add_argument("--max-candidates", type=int, help="maximum new candidates per collection round (default: 1000, maximum: 2000)")
+            command.add_argument("--no-triage", action="store_true", default=None, help="count structurally usable trajectories toward the target; skip council review (saved for this directory)")
+        if name == "push":
             destination = command.add_mutually_exclusive_group()
             destination.add_argument("--name", help="new dataset name; saved for resume")
             destination.add_argument("--dataset-id", help="existing dataset to extend")
-        if name == "create":
-            command.add_argument("--no-triage", action="store_true", default=None, help="download and upload without council judging")
-        if name in {"triage", "create"}:
+        if name == "triage":
             command.add_argument("--judges", help="comma-separated model aliases or provider:model; requests council judging")
             command.add_argument("--rule", action="append", help="criterion requiring council judging; repeat for multiple rules")
             command.add_argument("--rubric", type=Path, help="UTF-8 file with selection criteria; requests council judging and saves the text for resume")
@@ -117,10 +123,15 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--runner", choices=("api", "deepagent"), help=argparse.SUPPRESS)
             command.add_argument("--max-output-tokens", type=int, help=argparse.SUPPRESS)
             command.add_argument("--attempts", type=int, help=argparse.SUPPRESS)
-        if name in {"pull", "triage", "create"}:
-            command.add_argument("--concurrency", type=int, help="concurrent tasks (default: 4); downloads cap at 4, judges at 16")
+        if name in {"pull", "triage"}:
+            command.add_argument("--concurrency", type=int,
+                                 help="concurrent downloads (default: 4, capped at 4)" if name == "pull" else "concurrent judge tasks (default: 4, maximum: 16)")
         if name != "pull":
-            command.add_argument("--confirm", action="store_true", help="run this workflow's paid judging and uploads; otherwise preview")
+            command.add_argument("--confirm", action="store_true", help={
+                "triage": "run paid council judging; otherwise preview",
+                "push": "upload eligible trajectories; otherwise preview",
+                "resume": "continue saved pending stages; otherwise show local status",
+            }[name])
 
     publish_splits = curate_sub.add_parser(
         "publish-splits",
@@ -132,21 +143,8 @@ def _parser() -> argparse.ArgumentParser:
         help="existing prepared dataset directory containing raw/ and prepared/ artifacts",
     )
 
-    skill = sub.add_parser("skill", help="export the packaged SFT selection skill for any agent")
-    skill_sub = skill.add_subparsers(dest="skill_command", required=True)
-    skill_export = skill_sub.add_parser("export")
-    skill_export.add_argument("--output", type=Path, required=True, help="parent directory for sft-trace-triage/SKILL.md")
-
-    capture_contract = sub.add_parser(
-        "capture-contract",
-        help="collect all function tools from a sample conversation; reject provider built-ins",
-    )
-    capture_contract.add_argument("--workspace-id", required=True)
-    capture_contract.add_argument("--run-id", required=True, help="LLM run ID used to locate the sample thread; scans every LLM call in that thread")
-    capture_contract.add_argument("--output", type=Path, required=True)
-
     prep = sub.add_parser("prepare", help="fetch, convert, split, and validate all trajectories")
-    prep.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
+    prep.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="training provider (default: %(default)s)")
     prep.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     prep.add_argument("--workspace-id", required=True)
     prep.add_argument("--dataset-id", required=True)
@@ -155,6 +153,10 @@ def _parser() -> argparse.ArgumentParser:
     prep.add_argument(
         "--reasoning-policy", choices=["omit", "preserve"], default="omit",
         help="omit source reasoning from SFT and replay (default), or explicitly preserve readable reasoning",
+    )
+    prep.add_argument(
+        "--reasoning-effort", choices=["low", "high", "max"],
+        help="Fireworks GLM-5.3-Flash thinking effort (default: max); saved for training and replay, separate from source --reasoning-policy",
     )
     prep.add_argument(
         "--validation-fraction", type=float,
@@ -179,7 +181,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--data-dir", type=Path, default=project / "data", help="dataset directory (default: ./data in the current working directory)")
     plan.add_argument("--run-id", default="langsmith-sft", help="label for this preview (default: %(default)s); not reserved for training")
 
-    training = sub.add_parser("train", help="run paid serverless SFT after plan approval")
+    training = sub.add_parser("train", help="run paid SFT after plan approval")
     training.add_argument(
         "--provider", choices=tuple(PROVIDERS), default="fireworks",
         help="training provider (default: %(default)s)",
@@ -189,6 +191,14 @@ def _parser() -> argparse.ArgumentParser:
     training.add_argument("--run-id", help="run name (default: generated from the UTC timestamp and a random suffix)")
     training.add_argument("--init-from-checkpoint")
     training.add_argument("--confirm", action="store_true")
+    training.add_argument("--detach", action="store_true", help="run independently of this terminal on the current machine; inspect with status/logs")
+
+    observation = sub.add_parser("status", help="inspect a detached controller on this machine; provider resources are not queried")
+    observation.add_argument("--run-dir", type=Path, required=True)
+    log = sub.add_parser("logs", help="print a detached controller's log on this machine")
+    log.add_argument("--run-dir", type=Path, required=True)
+    log.add_argument("--tail", type=int, default=100, help="last N lines (default: %(default)s)")
+    log.add_argument("--follow", action="store_true", help="stream until the controller exits; Ctrl-C stops observation only")
 
     common_defaults = CommonSFTSettings()
     fireworks_defaults = FireworksSFTSettings()
@@ -205,11 +215,15 @@ def _parser() -> argparse.ArgumentParser:
         )
         shared.add_argument(
             "--early-stopping-patience", type=int, default=common_defaults.early_stopping_patience,
-            help="epochs without sufficient validation improvement before stopping (default: %(default)s)",
+            help="enable early stopping after N epochs without sufficient validation improvement (default: disabled)",
         )
         shared.add_argument(
             "--early-stopping-min-delta", type=float, default=common_defaults.early_stopping_min_delta,
-            help="minimum validation-loss improvement (default: %(default)s)",
+            help="minimum epoch-end validation-loss improvement for patience (default: %(default)s)",
+        )
+        shared.add_argument(
+            "--validation-every-steps", type=int,
+            help="validate every N optimizer updates and at epoch end (default: epoch end only)",
         )
         shared.add_argument(
             "--learning-rate", type=float, default=common_defaults.learning_rate,
@@ -237,6 +251,18 @@ def _parser() -> argparse.ArgumentParser:
         fireworks.add_argument(
             "--pipeline-depth", type=int,
             help=f"training pipeline depth (default: {fireworks_defaults.pipeline_depth})",
+        )
+        fireworks.add_argument(
+            "--training-mode", choices=("serverless", "dedicated"),
+            help="Fireworks capacity mode (default: serverless)",
+        )
+        fireworks.add_argument(
+            "--training-shape",
+            help="dedicated shape resource, optionally versioned (default: automatically select a compatible LoRA shape)",
+        )
+        fireworks.add_argument(
+            "--provisioning-timeout", type=float,
+            help="dedicated placement/readiness budget in seconds per stage (default: 1800)",
         )
         baseten = command.add_argument_group(
             "Baseten-only options", "Require --provider baseten; rejected by Fireworks.",
@@ -266,21 +292,16 @@ def _parser() -> argparse.ArgumentParser:
             help=f"maximum training rows excluded above the trainer context limit (default: {baseten_defaults.max_dropped_training_rows})",
         )
 
-    promotion = sub.add_parser("promote", help="register the selected Fireworks checkpoint without deploying it (deploy does this automatically)")
-    promotion.add_argument("--run-dir", type=Path, required=True)
-    promotion.add_argument("--output-model-id", required=True)
-    promotion.add_argument("--confirm", action="store_true")
-
     deployment = sub.add_parser("deploy", help="deploy the selected checkpoint and test it; automatically promotes on Fireworks")
     deployment.add_argument("--run-dir", type=Path, required=True)
-    deployment.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
+    deployment.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="training provider (default: %(default)s)")
     deployment.add_argument("--account-id", help="Fireworks account ID")
     deployment.add_argument("--output-model-id", help="Fireworks model ID")
     deployment.add_argument("--deployment-id", help="Fireworks deployment ID")
-    deployment.add_argument("--deployment-shape", help="Fireworks deployment shape")
+    deployment.add_argument("--deployment-shape", help="Fireworks deployment shape (default: matched by firectl after promotion; needs firectl 1.8.5+)")
     deployment.add_argument("--accelerator", help="required Baseten GPU allocation, for example H200:1")
     deployment.add_argument("--max-seq-len", type=int, help="required Baseten evaluation context cap, verified against the live server; does not configure serving context")
-    deployment.add_argument("--deployment-timeout", type=float, help="Baseten readiness timeout in seconds (default: 1800)")
+    deployment.add_argument("--deployment-timeout", type=float, help="seconds to wait for a ready replica (default: 1800)")
     deployment.add_argument("--confirm", action="store_true")
 
     eval_plan = sub.add_parser("eval-plan", help="build held-out trajectory replay cases")
@@ -308,12 +329,11 @@ def _parser() -> argparse.ArgumentParser:
         if command is evaluation:
             serving.add_argument("--base-model", help="optional base-model route served by the same endpoint")
     evaluation.add_argument("--concurrency", type=int, default=replay_evaluation.DEFAULT_EVALUATION_CONCURRENCY)
-    evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL,
-                            help="judge route (default: direct Anthropic); use anthropic-gateway/<model-id> for the LangSmith gateway")
+    evaluation.add_argument("--judge-model", default=replay_evaluation.DEFAULT_JUDGE_MODEL, help=JUDGE_MODEL_HELP)
     evaluation.add_argument("--confirm", action="store_true")
 
     remove = sub.add_parser("undeploy", help="stop serving capacity for a deployment")
-    remove.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks")
+    remove.add_argument("--provider", choices=tuple(PROVIDERS), default="fireworks", help="training provider (default: %(default)s)")
     remove.add_argument("--run-dir", type=Path, help="Baseten run directory containing the deployment receipt")
     remove.add_argument("--account-id", help="Fireworks account ID")
     remove.add_argument("--deployment-id", help="Fireworks deployment ID")
@@ -358,11 +378,7 @@ def _temporary_baseten_plan(args) -> dict | None:
             raise PipelineError("--max-output-tokens must be positive")
         if not os.environ.get("BASETEN_API_KEY", "").strip():
             raise PipelineError("BASETEN_API_KEY is not set")
-        judge_provider = args.judge_model.partition("/")[0]
-        if judge_provider in ANTHROPIC_ENDPOINTS:
-            anthropic_connection(judge_provider)
-        elif not os.environ.get("FIREWORKS_API_KEY", "").strip():
-            raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
+        replay_evaluation.validate_judge_credentials(args.judge_model)
     return baseten_deployment.plan(
         args.run_dir, accelerator=args.accelerator, max_seq_len=args.max_seq_len,
         timeout=args.deployment_timeout,
@@ -446,7 +462,7 @@ def _run_fireworks_evaluation(args):
         args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model,
         args.accelerator,
     )) or args.deployment_timeout != 600:
-        raise PipelineError("Fireworks evaluation uses the serverless sampler and --run-dir; omit endpoint and deployment options")
+        raise PipelineError("Fireworks evaluation uses the saved training mode and --run-dir; omit endpoint and deployment options")
     model = best = None
     if args.run_dir is not None:
         if args.run_dir.resolve() == args.output_dir.resolve():
@@ -458,7 +474,10 @@ def _run_fireworks_evaluation(args):
             value = replay_evaluation.prepare_replay_evaluation(
                 args.data_dir, args.output_dir, args.max_points_per_trajectory, args.max_output_tokens,
             )
-            value["serving_mode"] = "serverless"
+            value["serving_mode"] = best.get("training_mode", "serverless") if best else "serverless"
+            if best and best.get("dedicated"):
+                value["dedicated"] = best["dedicated"]
+                value["cost"] = "temporary dedicated trainer plus separate base and tuned inference deployments; time-billed until cleanup"
             if best is not None:
                 value["checkpoint"] = best["resume_checkpoint"]
             _json_dump(args.output_dir / "plan.json", value)
@@ -466,12 +485,19 @@ def _run_fireworks_evaluation(args):
     if best is None:
         raise PipelineError("Fireworks evaluate requires --run-dir containing the saved training result")
     if args.base_model not in (None, model.base_model):
-        raise PipelineError("serverless replay compares the checkpoint with its own base model")
+        raise PipelineError("Fireworks replay compares the checkpoint with its own base model")
     if not args.confirm:
         raise PipelineError("model and judge inference require --confirm")
     replay_evaluation.validate_judge_credentials(args.judge_model)
-    sampler = FireworksReplaySampler(model, best["resume_checkpoint"], args.output_dir,
-                                     lora_rank=best["lora_rank"], lora_alpha=best["lora_alpha"])
+    sampler_class = FireworksReplaySampler
+    sampler_options = {}
+    if best.get("training_mode") == "dedicated":
+        from smithtune.providers.fireworks.dedicated import DedicatedReplaySampler
+
+        sampler_class = DedicatedReplaySampler
+        sampler_options["dedicated"] = best["dedicated"]
+    sampler = sampler_class(model, best["resume_checkpoint"], args.output_dir,
+                            lora_rank=best["lora_rank"], lora_alpha=best["lora_alpha"], **sampler_options)
     return replay_evaluation.run_replay_evaluation(
         args.data_dir, args.output_dir, best["resume_checkpoint"], args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,
@@ -543,28 +569,31 @@ def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments[:1] == ["dataset"] and len(arguments) > 1 and arguments[1] in (*dataset_workflow.STAGES, "create", "resume"):
+    if arguments[:1] == ["dataset"] and len(arguments) > 1 and arguments[1] in (*dataset_workflow.STAGES, "resume"):
         flags = {argument.split("=", 1)[0] for argument in arguments[2:]}
-        for old, replacement in {"--run-dir": "dataset create DIR", "--output": "dataset pull DIR",
+        for old, replacement in {"--run-dir": "dataset pull DIR", "--output": "dataset pull DIR",
                                  "--triage-dir": "dataset push DIR", "--output-dir": "dataset triage DIR"}.items():
             if old in flags:
-                parser.error(f"{old} was replaced by the directory argument; use {replacement}")
-        if arguments[1] == "triage" and flags & {"--workspace-id", "--project-id", "--start-time", "--end-time", "--filter", "--limit", "--seed"}:
+                parser.error(f"dataset commands take the directory as an argument, not {old}; use {replacement}")
+        if arguments[1] == "triage" and flags & {"--workspace-id", "--project-id", "--start-time", "--end-time", "--filter", "--target-count", "--max-candidates", "--seed"}:
             parser.error("triage uses saved local trajectories; run dataset pull DIR with source flags first")
     args = parser.parse_args(arguments)
     activity = ExitStack()
     try:
-        if args.command not in {"doctor", "models", "skill"}:
+        if args.command not in {"doctor", "models", "status", "logs"}:
             receipt = data_rights.require_acknowledgment()
             if args.command == "acknowledge-data-rights":
                 print(json.dumps(receipt, indent=2, sort_keys=True))
                 return
         command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
         activity.enter_context(command_status(f"Running {command}"))
-        if args.command == "doctor":
+        if args.command == "status":
+            value = controller.status(args.run_dir)
+        elif args.command == "logs":
+            controller.logs(args.run_dir, tail=args.tail, follow=args.follow)
+            return
+        elif args.command == "doctor":
             value = diagnose()
-        elif args.command == "skill":
-            value = triage.export_skill(args.output)
         elif args.command == "models":
             profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
             value = {
@@ -587,20 +616,14 @@ def main(argv: list[str] | None = None) -> None:
                 value = reporting.publish_prepared_splits(args.data_dir)
             else:
                 options = {key: getattr(args, key, None) for key in (
-                    "workspace_id", "project_id", "start_time", "end_time", "filter", "limit",
-                    "name", "dataset_id", "no_triage", "concurrency", "attempts", "max_output_tokens",
+                    "workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates", "no_triage",
+                    "name", "dataset_id", "concurrency", "attempts", "max_output_tokens",
                 )}
                 options.update(judges=args.judges.split(",") if getattr(args, "judges", None) is not None else None,
                                rules=getattr(args, "rule", None), config_path=getattr(args, "config", None),
                                runner_mode=getattr(args, "runner", None), rubric_path=getattr(args, "rubric", None))
                 value = dataset_workflow.run(args.dataset_command, args.directory,
                                              confirm=getattr(args, "confirm", False), **options)
-        elif args.command == "capture-contract":
-            value = dataset.capture_inference_contract(
-                args.workspace_id,
-                args.run_id,
-                args.output,
-            )
         elif args.command == "prepare":
             contract = None
             if args.inference_contract is not None:
@@ -638,19 +661,31 @@ def main(argv: list[str] | None = None) -> None:
                     raise PipelineError("run ID must be a single directory name when --run-dir is omitted")
                 run_dir = Path.cwd() / "runs" / run_id
             print(f"Run ID: {run_id}\nRun directory: {run_dir.resolve()}", file=sys.stderr)
-            result = provider.train(
-                args.data_dir,
-                run_dir,
-                run_id,
-                _settings_from_args(args),
-                confirm=args.confirm,
-                init_from_checkpoint=args.init_from_checkpoint,
-                **_training_replay(args),
-            )
+            settings, replay = _settings_from_args(args), _training_replay(args)
+            if args.detach:
+                if not args.confirm:
+                    raise PipelineError("detached training requires --confirm")
+                plan = provider.plan(args.data_dir, run_id, settings, **replay)
+                execution = plan.get("execution", {})
+                requires_client = execution.get("requires_active_client") if isinstance(execution, dict) else None
+                if not isinstance(requires_client, bool):
+                    raise PipelineError("training plan must declare execution.requires_active_client as a boolean")
+                if not requires_client:
+                    raise PipelineError("this training workflow does not require a detached controller")
+                values = {**vars(args), "data_dir": args.data_dir.resolve(), "run_dir": run_dir.resolve(), "run_id": run_id}
+                worker_arguments = ["train"]
+                for name, value in values.items():
+                    if name in {"command", "detach"} or value is None or value is False:
+                        continue
+                    flag = f"--{name.replace('_', '-')}"
+                    worker_arguments.append(flag if value is True else f"{flag}={value}")
+                result = controller.launch(worker_arguments, run_dir, run_id, args.provider)
+            else:
+                result = provider.train(
+                    args.data_dir, run_dir, run_id, settings, confirm=args.confirm,
+                    init_from_checkpoint=args.init_from_checkpoint, **replay,
+                )
             value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
-        elif args.command == "promote":
-            FireworksProvider().promote(args.run_dir, args.output_model_id, confirm=args.confirm)
-            value = {"status": "promoted", "output_model_id": args.output_model_id}
         elif args.command == "deploy":
             fireworks_options = (args.account_id, args.output_model_id, args.deployment_id, args.deployment_shape)
             if args.provider == "baseten":
@@ -664,11 +699,14 @@ def main(argv: list[str] | None = None) -> None:
                     confirm=args.confirm,
                 )
             else:
-                if any(value is not None for value in (args.accelerator, args.max_seq_len, args.deployment_timeout)):
-                    raise PipelineError("--accelerator, --max-seq-len, and --deployment-timeout require --provider baseten")
-                if not all(fireworks_options):
-                    raise PipelineError("Fireworks deploy requires --account-id, --output-model-id, --deployment-id, and --deployment-shape")
-                value = FireworksProvider().deploy(args.run_dir, *fireworks_options, confirm=args.confirm)
+                if any(value is not None for value in (args.accelerator, args.max_seq_len)):
+                    raise PipelineError("--accelerator and --max-seq-len require --provider baseten")
+                if not all(fireworks_options[:3]):
+                    raise PipelineError("Fireworks deploy requires --account-id, --output-model-id, and --deployment-id")
+                value = FireworksProvider().deploy(
+                    args.run_dir, *fireworks_options, confirm=args.confirm,
+                    timeout=args.deployment_timeout if args.deployment_timeout is not None else 1800,
+                )
         elif args.command in ("eval-plan", "evaluate") and args.provider == "fireworks":
             if args.output_dir is None:
                 if args.run_dir is None:
@@ -736,7 +774,8 @@ def main(argv: list[str] | None = None) -> None:
                 value = {"status": "deleted", "deployment_id": args.deployment_id}
     except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
         activity.close()
-        parser.error(str(exc))
+        # Runtime failures are not usage mistakes; keep argparse's status without its usage banner.
+        parser.exit(2, f"{parser.prog}: error: {exc}\n")
     finally:
         activity.close()
     print(json.dumps(value, indent=2, sort_keys=True))

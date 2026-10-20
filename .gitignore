@@ -22,5 +22,6 @@ fireworks-cookbook/
 data/
 data-*/
 runs/
+*.controller/
 .superpowers/
 docs/superpowers/

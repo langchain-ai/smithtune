@@ -5,12 +5,20 @@ pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
 is maintained here, and there is no bootstrap step.
 
 Provider-specific training, sampling, and deployment modules live under
-`src/smithtune/providers/<provider>/`. Each provider package has a lightweight
-`__init__.py` and a `provider.py` implementation selected by the lazy registry.
-Provider-specific execution and serving helpers stay in the same package;
-cloud-independent HF recipes stay in `src/smithtune/training/`.
+`src/smithtune/providers/<provider>/`, with matching tests in `tests/<provider>/`.
+Shared provider interfaces and validation scheduling stay in `providers/`.
+Cloud-independent HF recipes stay in `src/smithtune/training/`; Vertex execution
+and sampling helpers stay in `src/smithtune/providers/vertex/`.
 Shared rendering stays in `src/smithtune/`; replay orchestration lives in
 `src/smithtune/evaluation/replay.py`.
+
+Each training plan declares `execution.requires_active_client` for its resolved
+workflow. Detached launch requires this field to be `true`; resolve it from the
+selected execution mode when an adapter offers multiple modes. Keep resource
+receipts and recovery procedures in the provider integration. Shared controller
+status reports local process health and discovers available run artifacts.
+Adapters that intercept SIGTERM for cleanup raise the shared
+`providers.base.TerminationRequested` so the controller records an interruption.
 
 `evaluation/langsmith.py` publishes versioned splits, saved replay predictions,
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable
@@ -26,8 +34,10 @@ evaluation always verifies its dataset snapshot and publishes results.
 Cover both sampler providers, endpoint cleanup, and saved-generation recovery
 when changing this integration.
 
-`providers/fireworks/training.py` keeps one serverless session across epochs and optional
-replay. It uses the pinned cookbook's rendering, data loader, validation,
+`providers/fireworks/training.py` keeps one session across epochs and optional
+replay. `providers/fireworks/dedicated.py` adds pinned shape discovery, dedicated
+LoRA lifecycle, and separate base/tuned replay deployments. Record owned IDs
+before provisioning, check deletion failures, and test partial readiness cleanup. It uses the pinned cookbook's rendering, data loader, validation,
 optimizer, and checkpoint helpers. `providers/fireworks/sampling.py` uses the official
 Training API sampler and the same renderer for replay. When changing these
 adapters, check checkpoint selection, session cleanup, tool parsing, and replay
@@ -68,16 +78,20 @@ conversation messages and have no tools.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
-The default council is read from the packaged `config.example.json`; CLI,
-Python, and exported skill defaults must agree. Terra uses OpenAI Responses
-with `reasoning.effort=none`; Fireworks calls set `reasoning_effort=none`.
+The default council is `DEFAULT_COUNCIL` in `triage.py`. The judge prompt
+(`triage_judges.JUDGE_PROMPT`) and coordinator prompt
+(`triage_coordinator.COORDINATOR_PROMPT`) are internal; operator guidance
+belongs in `src/smithtune/skills/smithtune/SKILL.md`. The optional `gpt-5.6-terra` judge
+alias uses OpenAI Responses with `reasoning.effort=none`; Fireworks calls set
+`reasoning_effort=none`.
 GLM-5.3-Flash requires reasoning, so selecting it uses `low`; the saved plan
 records that exception.
 Keep the request checks when changing either transport. Bump the triage agent version
 when model transport or evidence presentation changes.
 
-`sfw` is used for contributor dependency installation. It is not a smithtune runtime
-prerequisite. Companion CLIs and provider credentials are only needed for live
+`sfw` (Socket Firewall) screens packages during
+contributor dependency installation. It is optional: drop the `sfw` prefix if you do not
+use it. It is not a smithtune runtime prerequisite. Companion CLIs and provider credentials are only needed for live
 operations; the automated tests do not provision training or deployments.
 
 CI runs `ruff check` with the rules in `pyproject.toml`; it does not enforce
@@ -156,7 +170,7 @@ configuration and checks tools, reasoning, and loss masks without provisioning
 training or downloading model weights. Run those checks locally with:
 
 ```bash
-SMITHTUNE_TOKENIZER_TESTS=1 uv run --no-sync pytest tests/test_tokenizer_integration.py tests/test_baseten_sampling_formats.py
+SMITHTUNE_TOKENIZER_TESTS=1 uv run --no-sync pytest tests/test_tokenizer_integration.py tests/baseten/test_sampling_formats.py
 ```
 
 The ordinary test suite uses synthetic tokenizers and requires no Hub access.
@@ -181,8 +195,7 @@ This builds smithtune's wheel and source distribution, installs dependencies fro
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
 The default wheel is tested first, then the optional Deep Agents extra. Both
-distributions must include the portable skill and support `skill export` outside
-the checkout.
+distributions must include the workflow skill as package data.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves
@@ -191,13 +204,13 @@ the smithtune artifacts and matching `overrides.txt` for inspection.
 ## Releases from GitHub
 
 Merge the changes and let CI pass. Set the version in `pyproject.toml`, regenerate
-`uv.lock`, and tag the tested commit (for example, `v0.1.0`). Customers install that
-tag directly:
+`uv.lock`, and tag the tested commit (for example, `v0.1.4`). Customers install that
+tag directly, and the README quickstart pins the same tag (update both URLs there when releasing):
 
 ```bash
 uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.0/overrides.txt \
-  'git+https://github.com/langchain-ai/smithtune.git@v0.1.0'
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.4/overrides.txt \
+  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.4'
 ```
 
 The example tag must be created before this command works. Repeat the command with

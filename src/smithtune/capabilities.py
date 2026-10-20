@@ -16,13 +16,14 @@ from smithtune.providers.base import ModelSpec, PipelineError
 
 FIREWORKS_MODEL_API = "https://api.fireworks.ai/v1/"
 FIREWORKS_TRAINING_CATALOG = "https://docs.fireworks.ai/fine-tuning/models"
-# The training catalog generated 2026-09-12 lists these shared pools. There is
+# The training catalog generated 2026-10-08 lists these shared pools. There is
 # no documented read-only pool API; inference supportsServerless is unrelated.
 FIREWORKS_SERVERLESS_CONTEXT_LIMITS = {
     "accounts/fireworks/models/qwen3p8-27b": 131_072,
     "accounts/fireworks/models/kimi-k3": 196_608,
     "accounts/fireworks/models/deepseek-v4-flash-0731": 262_144,
     "accounts/fireworks/models/muse-glimmer-30b": 131_072,
+    "accounts/fireworks/models/glm-5p3-flash": 200_064,
 }
 # Loops does not expose supported losses in its capabilities response. Keep
 # known cross-entropy compatibility separate from its live model catalog.
@@ -177,6 +178,11 @@ def preflight_model(
         vision = getattr(capability, "supports_vision_language", None)
         if vision is not None and not isinstance(vision, bool):
             raise PipelineError("Baseten returned an invalid vision support flag")
+        # _validate_capability already refused a workspace that is not enabled
+        # for this model; keep the same shape check on the optional flag here.
+        enabled = getattr(capability, "enabled", None)
+        if enabled is not None and not isinstance(enabled, bool):
+            raise PipelineError("Baseten returned an invalid model enablement flag")
     elif model.provider == "fireworks":
         _require_serverless_context(model.base_model, context)
         resolver = capability_resolver or fetch_fireworks_model_capability

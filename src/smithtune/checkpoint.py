@@ -1,4 +1,4 @@
-"""Content-verified curation downloads shared by direct creation and triage."""
+"""Content-verified downloads for resumable dataset curation."""
 
 from pathlib import Path
 

@@ -6,17 +6,23 @@ import json
 import math
 import os
 import re
+import shlex
+import subprocess
+import sys
 import tempfile
+import time
 import uuid
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _load_jsonl, _run, _utc_now
-from smithtune.capabilities import preflight_model
+from smithtune.capabilities import open_without_redirects, preflight_model
+from smithtune.doctor import MIN_FIRECTL_SHAPE_MATCH, firectl_version
 from smithtune.dataset import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
@@ -36,6 +42,8 @@ from smithtune.providers.base import (
 )
 from smithtune.rendering import SFT_TARGET_POLICY, load_training_renderer, resolve_rendering_model
 
+DEPLOYMENT_TIMEOUT_SECONDS = 1800
+READY_POLL_SECONDS = 15
 
 TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
 FIREWORKS_BASE_URL = "https://api.fireworks.ai"
@@ -86,6 +94,18 @@ MODEL_SPECS = {
         supports_reasoning_content=True,
         requires_tool_declarations=True,
     ),
+    "glm-5p3-flash": ModelSpec(
+        name="glm-5p3-flash",
+        base_model="accounts/fireworks/models/glm-5p3-flash",
+        tokenizer_model="zai-org/GLM-5.3-Flash",
+        tokenizer_revision="eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+        renderer="glm53_flash_preserve_thinking",
+        reasoning_effort="max",
+        max_seq_len=200_064,
+        thinking_trace_history_mode="preserved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+    ),
 }
 
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]
@@ -96,19 +116,32 @@ class SFTSettings(CommonSFTSettings):
     lora_rank: int | None = None
     lora_alpha: int = 32
     pipeline_depth: int = 4
+    training_mode: str = "serverless"
+    training_shape: str | None = None
+    provisioning_timeout: float = 1800
 
     def validate(self) -> None:
         super().validate()
+        if self.training_mode not in ("serverless", "dedicated"):
+            raise PipelineError("training_mode must be serverless or dedicated")
+        if self.training_mode != "dedicated" and (self.training_shape is not None or self.provisioning_timeout != 1800):
+            raise PipelineError("--training-shape and --provisioning-timeout require --training-mode dedicated")
+        if not math.isfinite(self.provisioning_timeout) or not 1 <= self.provisioning_timeout <= 7200:
+            raise PipelineError("provisioning_timeout must be between 1 and 7200 seconds")
+        if self.training_shape is not None:
+            from smithtune.providers.fireworks.dedicated import validate_shape_name
+
+            validate_shape_name(self.training_shape)
         if self.lora_rank is not None and self.lora_rank < 1:
             raise PipelineError("lora_rank must be positive")
         if self.lora_alpha < 1 or self.pipeline_depth < 1:
             raise PipelineError("lora_alpha and pipeline_depth must be positive")
 
 
-def _require_confirm(value: bool, action: str) -> None:
+def _require_confirm(value: bool, action: str, provider: str = "Fireworks") -> None:
     if not value:
         raise PipelineError(
-            f"{action} changes Fireworks resources or incurs cost; rerun with --confirm"
+            f"{action} changes {provider} resources or incurs cost; rerun with --confirm"
         )
 
 
@@ -149,7 +182,7 @@ skill_client_source: {CLIENT_SOURCE}
 ## Intent
 
 task: Train {plan['base_model']} on LangSmith message trajectories.
-method: training-api-serverless
+method: training-api-{plan.get("training_mode", "serverless")}
 success_metric: Held-out cross-entropy loss and perplexity are recorded.
 
 ## Resolved plan
@@ -167,7 +200,15 @@ next_action: {next_action}
     path.write_text(text, encoding="utf-8")
 
 
-def _epoch_checkpoints(job_id: str) -> dict[str, str]:
+def _checkpoint_time(row):
+    try:
+        parsed = datetime.fromisoformat((row.get("createTime") or "").replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp()
+    except (ValueError, TypeError):
+        return float("-inf")
+
+
+def _session_checkpoint_rows(job_id: str):
     from fireworks.training.sdk import FireworksClient
 
     client = FireworksClient(
@@ -185,42 +226,26 @@ def _epoch_checkpoints(job_id: str) -> dict[str, str]:
         )
     finally:
         client.close()
-    resumable = sorted(
-        (
-            row
-            for row in rows
-            if (row.get("checkpointType") or "").endswith(
-                ("TRAINING", "TRAINING_LORA")
-            )
-        ),
-        key=lambda row: row.get("createTime", ""),
-        reverse=True,
-    )
-    if not resumable or not isinstance(resumable[0].get("name"), str):
-        raise PipelineError(f"training job {job_id} has no resumable checkpoint")
-    short_name = resumable[0]["name"].rstrip("/").rsplit("/", 1)[-1]
-    match = re.match(r"^(run-[0-9a-f]{32})[:-](.+)$", short_name)
-    if not match:
-        raise PipelineError(
-            f"training job {job_id} returned an invalid serverless checkpoint"
-        )
-    run_id, checkpoint_name = match.groups()
-    promotable = sorted(
-        (
-            row
-            for row in rows
-            if row.get("promotable")
-            and (row.get("name") or "").rstrip("/").rsplit("/", 1)[-1].startswith(run_id)
-        ),
-        key=lambda row: row.get("createTime", ""),
-        reverse=True,
-    )
-    if not promotable or not isinstance(promotable[0].get("name"), str):
-        raise PipelineError(f"training job {job_id} has no promotable checkpoint")
-    return {
-        "resume_checkpoint": f"{account_id}/{run_id}/{checkpoint_name}",
-        "promotable_checkpoint": promotable[0]["name"],
-    }
+    return account_id, rows
+
+
+def _promotable_checkpoint(rows, checkpoint_name, *, run_id=None):
+    expected = (f"{run_id}-{checkpoint_name}", f"{run_id}:{checkpoint_name}") if run_id else (checkpoint_name,)
+    matching = [row for row in rows if isinstance(row.get("name"), str) and row.get("promotable")
+                and re.sub(r"-[0-9a-f]{8}$", "", row["name"].rsplit("/", 1)[-1]) in expected]
+    if not matching:
+        raise PipelineError("Fireworks save has no matching promotable checkpoint")
+    return max(matching, key=_checkpoint_time)["name"]
+
+
+def _epoch_checkpoints(job_id: str, checkpoint_name, *, run_id, state_path) -> dict[str, str]:
+    account_id, rows = _session_checkpoint_rows(job_id)
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", state_path):
+        state_path = f"{account_id}/{run_id}/{state_path}"
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", state_path):
+        raise PipelineError("Fireworks save_state returned no fully qualified serverless restore identity")
+    return {"resume_checkpoint": state_path,
+            "promotable_checkpoint": _promotable_checkpoint(rows, checkpoint_name, run_id=run_id)}
 
 
 def run_early_stopping(
@@ -231,6 +256,7 @@ def run_early_stopping(
     """Run epochs and select the checkpoint with the best validation loss."""
     settings.validate()
     history: list[dict[str, Any]] = []
+    validations: list[dict[str, Any]] = []
     best: dict[str, Any] | None = None
     patience_loss = math.inf
     stale_epochs = 0
@@ -247,21 +273,30 @@ def run_early_stopping(
         if not isinstance(result.get("resume_checkpoint"), str):
             raise PipelineError(f"epoch {epoch} returned no resume checkpoint")
         result = {**result, "epoch": epoch, "eval_loss": float(loss)}
+        checks = result.pop("validations", [result])
+        for check in checks:
+            check_loss = check.get("eval_loss")
+            if (not isinstance(check_loss, (int, float)) or isinstance(check_loss, bool)
+                    or not math.isfinite(check_loss) or not isinstance(check.get("resume_checkpoint"), str)):
+                raise PipelineError(f"epoch {epoch} returned an invalid saved validation")
+            check = {**check, "epoch": epoch, "eval_loss": float(check_loss)}
+            validations.append(check)
+            if best is None or check["eval_loss"] < best["eval_loss"]:
+                best = check
         history.append(result)
         checkpoint = result["resume_checkpoint"]
-        if best is None or result["eval_loss"] < best["eval_loss"]:
-            best = result
         # Patience tracks significant improvement independently of checkpoint selection.
         if result["eval_loss"] < patience_loss - settings.early_stopping_min_delta:
             patience_loss = result["eval_loss"]
             stale_epochs = 0
         else:
             stale_epochs += 1
-            if stale_epochs >= settings.early_stopping_patience:
+            if settings.early_stopping_patience is not None and stale_epochs >= settings.early_stopping_patience:
                 break
     assert best is not None
     return {
         "epochs": history,
+        "validations": validations,
         "best": best,
         "stopped_early": len(history) < settings.max_epochs,
     }
@@ -296,6 +331,8 @@ class FireworksProvider:
                 "--microbatch-token-budget, --max-spend-usd, --hourly-rate-usd, --replicas, "
                 "--spend-reserve-fraction, and --max-dropped-training-rows are Baseten-only"
             )
+        if options.provisioning_timeout is not None and options.training_mode != "dedicated":
+            raise PipelineError("--provisioning-timeout requires --training-mode dedicated")
         defaults = SFTSettings()
         settings = SFTSettings(
             max_epochs=options.max_epochs,
@@ -303,8 +340,12 @@ class FireworksProvider:
             early_stopping_min_delta=options.early_stopping_min_delta,
             learning_rate=options.learning_rate,
             batch_size=options.batch_size,
+            validation_every_steps=options.validation_every_steps,
             seed=options.seed,
             lora_rank=options.lora_rank,
+            training_mode=options.training_mode or defaults.training_mode,
+            training_shape=options.training_shape,
+            provisioning_timeout=defaults.provisioning_timeout if options.provisioning_timeout is None else options.provisioning_timeout,
             lora_alpha=defaults.lora_alpha if options.lora_alpha is None else options.lora_alpha,
             pipeline_depth=defaults.pipeline_depth if options.pipeline_depth is None else options.pipeline_depth,
         )
@@ -370,10 +411,13 @@ class FireworksProvider:
         model = resolve_prepared_model(manifest, MODEL_SPECS, provider="fireworks", allow_legacy=True)
         _validate_model(model)
         lora_rank = settings.lora_rank or model.default_lora_rank
+        from smithtune.providers.validation import training_schedule
+
         value = {
             "run_id": run_id,
             "method": "Fireworks Training API serverless LoRA SFT",
             "training_api": TRAINING_BASE_URL,
+            "execution": {"requires_active_client": True},
             "base_model": model.base_model,
             "source_examples_sha256": manifest.get("source_examples_sha256"),
             "dataset": {
@@ -391,6 +435,7 @@ class FireworksProvider:
                 "tokenizer_revision": model.tokenizer_revision,
                 "renderer": model.renderer,
                 "thinking_trace_history_mode": model.thinking_trace_history_mode,
+                "reasoning_effort": model.reasoning_effort,
                 "loss_target": "each assistant target once, with zero loss on history",
                 "max_seq_len": model.max_seq_len,
                 "lora_rank": lora_rank,
@@ -400,6 +445,7 @@ class FireworksProvider:
                 "early_stopping_patience": settings.early_stopping_patience,
                 "early_stopping_min_delta": settings.early_stopping_min_delta,
                 "batch_size": settings.batch_size,
+                "validation_every_steps": settings.validation_every_steps,
                 "pipeline_depth": settings.pipeline_depth,
                 "seed": settings.seed,
                 "group_by_length": True,
@@ -407,11 +453,33 @@ class FireworksProvider:
                 "weight_decay": 0.01,
                 "warmup_steps": 0,
             },
+            "training_schedule": {
+                **training_schedule(split["train"], settings.batch_size,
+                                    settings.max_epochs, settings.validation_every_steps),
+                "training_units": split["train"],
+                "training_unit": "trajectories",
+                "estimate": False,
+            },
             "evaluation": "cross-entropy loss and perplexity on validation after each epoch; test is reserved for replay",
-            "checkpoint": "each epoch ends with a resumable and promotable checkpoint; the best epoch is selected",
+            "checkpoint": "each validation saves resumable and promotable checkpoints; the lowest-loss validation is selected",
             "cost": "serverless token charges at the current account rate; resolve in the Fireworks console before confirmation",
             "deployment": "not included in training; a promoted LoRA needs a separately confirmed on-demand deployment",
         }
+        if settings.validation_every_steps is not None:
+            value["evaluation"] = (f"cross-entropy loss and perplexity on validation every {settings.validation_every_steps} optimizer steps "
+                                   "and at each epoch end, without duplicate checks; test is reserved for replay")
+        if settings.training_mode == "dedicated":
+            from smithtune.providers.fireworks.dedicated import resolve_shape
+
+            value.update(
+                training_mode="dedicated",
+                method="Fireworks Training API dedicated LoRA SFT",
+                training_api=FIREWORKS_BASE_URL,
+                dedicated=resolve_shape(model, lora_rank, settings.training_shape,
+                                        timeout=settings.provisioning_timeout, replay=replay is not None),
+                cost="dedicated trainer time charges until cleanup; account access and available capacity required",
+                deployment="trainer deleted on exit; checkpoints remain subject to Fireworks retention; promotion and permanent serving are separate",
+            )
         if replay is not None:
             from smithtune.evaluation.replay import prepare_replay_evaluation
 
@@ -421,7 +489,9 @@ class FireworksProvider:
                 preview = prepare_replay_evaluation(
                     data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
                 )
-            value["replay"] = {**preview, **replay, "serving_mode": "serverless", "evaluated_models": 2}
+            value["replay"] = {**preview, **replay, "serving_mode": settings.training_mode, "evaluated_models": 2}
+            if settings.training_mode == "dedicated":
+                value["replay"]["cost"] = "separate temporary base and tuned inference deployments, time-billed in addition to the trainer until cleanup"
         return value
 
     def train(
@@ -432,11 +502,21 @@ class FireworksProvider:
         _require_confirm(confirm, "training and replay" if replay is not None else "training")
         if run_dir.exists() and any(run_dir.iterdir()):
             raise PipelineError(f"run directory must be new or empty: {run_dir}")
+        if settings.training_mode == "dedicated" and init_from_checkpoint is not None:
+            from smithtune.providers.fireworks.dedicated import checkpoint_parts
+
+            checkpoint_parts(init_from_checkpoint)
         plan = self.plan(data_dir, run_id, settings, replay=replay)
         if not os.environ.get("FIREWORKS_API_KEY"):
             raise PipelineError("FIREWORKS_API_KEY is not set")
+        if replay is not None:
+            from smithtune.evaluation.replay import validate_judge_credentials
+
+            # Check before writing the run directory so a missing key can be fixed and retried.
+            validate_judge_credentials(replay["judge_model"])
         model = _model_from_manifest(_load_json(data_dir / "prepared" / "manifest.json"))
-        preflight_model(model)
+        if settings.training_mode == "serverless":
+            preflight_model(model)
         load_training_renderer(model)
         from training.recipes import sft_loop
         from training.utils import RunnerConfig, WandBConfig
@@ -447,10 +527,9 @@ class FireworksProvider:
         os.environ["FIREWORKS_BASE_URL"] = FIREWORKS_BASE_URL
         _json_dump(run_dir / "plan.json", plan)
         if replay is not None:
-            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, validate_judge_credentials, preflight_langsmith
+            from smithtune.evaluation.replay import ensure_judge_calibration, prepare_replay_evaluation, preflight_langsmith
             from smithtune.inference import _chat_completion
 
-            validate_judge_credentials(replay["judge_model"])
             preflight_langsmith(data_dir)
             prepare_replay_evaluation(
                 data_dir, run_dir / "replay", replay["max_points_per_trajectory"], replay["max_output_tokens"],
@@ -464,7 +543,7 @@ class FireworksProvider:
             tokenizer_model=model.tokenizer_model, tokenizer_revision=model.tokenizer_revision,
             tokenizer_trust_remote_code=model.trust_remote_code, renderer_name=model.renderer,
             thinking_trace_history_mode=model.thinking_trace_history_mode,
-            train_on_what=SFT_TARGET_POLICY, serverless=True,
+            train_on_what=SFT_TARGET_POLICY, serverless=settings.training_mode == "serverless",
             lora_rank=settings.lora_rank or model.default_lora_rank, lora_alpha=settings.lora_alpha,
             max_seq_len=model.max_seq_len, learning_rate=settings.learning_rate,
             epochs=settings.max_epochs, batch_size=settings.batch_size,
@@ -477,7 +556,16 @@ class FireworksProvider:
         _write_run_md(run_dir / "run.md", plan, "job_running", "wait for training and replay")
         result = None
         try:
-            with ServerlessTraining(cfg, run_dir) as session:
+            session_class = ServerlessTraining
+            session_options = {}
+            if settings.validation_every_steps is not None:
+                session_options["validation_every_steps"] = settings.validation_every_steps
+            if settings.training_mode == "dedicated":
+                from smithtune.providers.fireworks.dedicated import DedicatedTraining
+
+                session_class = DedicatedTraining
+                session_options["dedicated"] = plan["dedicated"]
+            with session_class(cfg, run_dir, reasoning_effort=model.reasoning_effort, **session_options) as session:
                 result = run_early_stopping(settings, session.run_epoch, init_from_checkpoint)
                 _json_dump(run_dir / "epochs.json", result["epochs"])
                 _json_dump(run_dir / "result.json", result)
@@ -487,10 +575,17 @@ class FireworksProvider:
                     from smithtune.providers.fireworks.sampling import FireworksReplaySampler
 
                     checkpoint = result["best"]["resume_checkpoint"]
-                    sampler = FireworksReplaySampler(
+                    sampler_class = FireworksReplaySampler
+                    sampler_options = {}
+                    if settings.training_mode == "dedicated":
+                        from smithtune.providers.fireworks.dedicated import DedicatedReplaySampler
+
+                        sampler_class = DedicatedReplaySampler
+                        sampler_options["dedicated"] = plan["dedicated"]
+                    sampler = sampler_class(
                         model, checkpoint, run_dir / "replay", service=session.service,
                         snapshot=session.snapshot(checkpoint),
-                        lora_rank=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+                        lora_rank=cfg.lora_rank, lora_alpha=cfg.lora_alpha, **sampler_options,
                     )
                     _write_run_md(run_dir / "run.md", plan, "evaluating", "wait for replay")
                     result["replay"] = run_replay_evaluation(
@@ -551,7 +646,10 @@ class FireworksProvider:
             },
         )
         try:
-            client.promote_session_checkpoint(checkpoint, output_model_id, base_model)
+            if plan.get("training_mode") == "dedicated":
+                client.promote_checkpoint(name=checkpoint, output_model_id=output_model_id, base_model=base_model)
+            else:
+                client.promote_session_checkpoint(checkpoint, output_model_id, base_model)
         finally:
             client.close()
         _json_dump(
@@ -566,40 +664,57 @@ class FireworksProvider:
         account_id: str,
         output_model_id: str,
         deployment_id: str,
-        deployment_shape: str,
+        deployment_shape: str | None = None,
         *,
         confirm: bool,
+        timeout: float = DEPLOYMENT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
-        _require_confirm(confirm, "checkpoint promotion, deployment, and smoke-test inference")
         _validate_resource_id(account_id, "account id")
         _validate_resource_id(output_model_id, "output model id")
         _validate_resource_id(deployment_id, "deployment id")
-        if not os.environ.get("FIREWORKS_API_KEY"):
-            raise PipelineError("FIREWORKS_API_KEY is not set")
-        self.promote(run_dir, output_model_id, confirm=confirm, account_id=account_id)
-        _set_skill_session(run_dir)
+        if deployment_shape is not None and not deployment_shape.strip():
+            raise PipelineError("--deployment-shape must not be empty")
+        if not math.isfinite(timeout) or not 1 <= timeout <= 7200:
+            raise PipelineError("deployment timeout must be between 1 and 7200 seconds")
         model = f"accounts/{account_id}/models/{output_model_id}"
         deployment = f"accounts/{account_id}/deployments/{deployment_id}"
-        _run(
-            [
-                "firectl",
-                "deployment",
-                "create",
-                model,
-                "--deployment-id",
-                deployment_id,
-                "--deployment-shape",
-                deployment_shape,
-                "--account-id",
-                account_id,
-                "--wait",
-            ]
-        )
+        if not confirm:
+            return self._deploy_preview(run_dir, account_id, model, deployment, output_model_id, deployment_shape)
+        if not os.environ.get("FIREWORKS_API_KEY"):
+            raise PipelineError("FIREWORKS_API_KEY is not set")
+        if deployment_shape is None:
+            _require_shape_matching()
+        self.promote(run_dir, output_model_id, confirm=confirm, account_id=account_id)
+        _set_skill_session(run_dir)
+        # Match after promotion: the promoted model must exist before Fireworks can match its shapes.
+        shape = {"name": deployment_shape, "source": "explicit"} if deployment_shape else _match_deployment_shape(model, account_id)
+        print(f"Deployment shape: {_describe_shape(shape)}", file=sys.stderr)
+        print("Creating the Fireworks deployment; this can take several minutes...", file=sys.stderr)
+        handoff = ["smithtune", "deploy", "--provider", "fireworks", "--run-dir", str(run_dir), "--account-id", account_id,
+                   "--output-model-id", output_model_id, "--deployment-id", deployment_id,
+                   "--deployment-shape", shape["name"], "--confirm"]
         model_route = f"{model}#{deployment}"
         endpoint = {"inference_url": INFERENCE_URL, "model": model_route, "deployment": deployment,
-                    "smoke_test": {"status": "pending"}}
+                    "deployment_shape": shape, "smoke_test": {"status": "pending"}}
         receipt = run_dir / "endpoint.json"
+        deadline = time.monotonic() + timeout
+        try:
+            _run_firectl_change(
+                ["firectl", "deployment", "create", model, "--deployment-id", deployment_id,
+                 "--deployment-shape", shape["name"], "--account-id", account_id],
+                "create the deployment", handoff, agent_safe_allowed=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            endpoint["creation_status"] = "unknown"
+            _json_dump(receipt, endpoint)
+            raise PipelineError(
+                f"Fireworks deployment creation timed out after {int(timeout)}s; its outcome is unknown. "
+                f"Inspect {deployment} before retrying. If it exists, stop it with smithtune undeploy "
+                f"--provider fireworks --account-id {account_id} --deployment-id {deployment_id} --confirm"
+            ) from None
         _json_dump(receipt, endpoint)
+        # READY can still be waiting for capacity; serve only once a replica is ready.
+        _wait_for_ready_replica(deployment, account_id, timeout, deadline=deadline)
         try:
             endpoint["smoke_test"] = _inference_smoke_test(model_route)
         except Exception:
@@ -609,21 +724,136 @@ class FireworksProvider:
         _json_dump(receipt, endpoint)
         return endpoint
 
+    def _deploy_preview(self, run_dir: Path, account_id: str, model: str, deployment: str, output_model_id: str,
+                        deployment_shape: str | None) -> dict[str, Any]:
+        promoted = _saved_promotion(run_dir, output_model_id)
+        if deployment_shape:
+            shape: dict[str, Any] = {"name": deployment_shape, "source": "explicit"}
+        elif promoted:
+            _require_shape_matching()
+            shape = _match_deployment_shape(model, account_id)
+        else:
+            shape = {"source": "matched_after_promotion",
+                     "note": "the checkpoint is promoted first, then its validated deployment shapes are matched"}
+        return {"status": "preview", "model": model, "deployment": deployment,
+                "promotion": "saved" if promoted else "pending", "deployment_shape": shape,
+                "next_command": "rerun with --confirm to promote, create the deployment, and smoke test it"}
+
     def undeploy(self, account_id: str, deployment_id: str, *, confirm: bool) -> None:
         _require_confirm(confirm, "deployment deletion")
         _validate_resource_id(deployment_id, "deployment id")
-        _run(
-            [
-                "firectl",
-                "deployment",
-                "delete",
-                f"accounts/{account_id}/deployments/{deployment_id}",
-                "--account-id",
-                account_id,
-                "--ignore-checks",
-                "--wait",
-            ]
+        handoff = ["smithtune", "undeploy", "--provider", "fireworks", "--account-id", account_id,
+                   "--deployment-id", deployment_id, "--confirm"]
+        _run_firectl_change(
+            ["firectl", "deployment", "delete", f"accounts/{account_id}/deployments/{deployment_id}",
+             "--account-id", account_id, "--ignore-checks", "--wait"],
+            "delete the deployment", handoff, agent_safe_allowed=False,
         )
+
+
+def _run_firectl_change(command: list[str], action: str, handoff: list[str], *, agent_safe_allowed: bool,
+                       timeout: float | None = None) -> None:
+    """Run a mutating firectl command; hand it to the user when firectl refuses agents."""
+    try:
+        result = _run(command, capture=True, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        output = f"{exc.stdout or ''}\n{exc.stderr or ''}"
+        if "cannot run inside an AI agent" in output:
+            account = command[command.index("--account-id") + 1]
+            # firectl allows some changes on accounts listed in FIRECTL_AGENT_SAFE_ACCOUNTS; deletes never.
+            option = (f" If your team allows agents to change this account, set FIRECTL_AGENT_SAFE_ACCOUNTS={account} instead."
+                      if agent_safe_allowed else " firectl never lets agents do this, even on agent-safe accounts.")
+            raise PipelineError(
+                f"Fireworks blocks firectl from changing resources inside an AI agent, so smithtune cannot {action} here. "
+                f"Run this yourself in a terminal outside the agent: {shlex.join(handoff)}.{option}"
+            ) from None
+        if "code = AlreadyExists" in output:
+            raise PipelineError(
+                f"cannot {action}: it already exists in Fireworks. Choose a new --deployment-id, "
+                "or stop the existing one with smithtune undeploy first"
+            ) from None
+        detail = next((line.strip() for line in output.splitlines() if "fail" in line.lower() or "error" in line.lower()), "")
+        raise PipelineError(f"firectl could not {action}" + (f": {detail[:300]}" if detail else "")) from None
+    for line in (result.stdout or "").splitlines()[-3:]:
+        print(line, file=sys.stderr)
+
+
+def _require_shape_matching() -> None:
+    installed = firectl_version()
+    if installed is None or installed < MIN_FIRECTL_SHAPE_MATCH:
+        found = ".".join(map(str, installed)) if installed else "unknown"
+        raise PipelineError(
+            f"automatic deployment shape selection needs firectl {'.'.join(map(str, MIN_FIRECTL_SHAPE_MATCH))} or newer "
+            f"(found {found}); run `firectl upgrade`, or pass --deployment-shape"
+        )
+
+
+def _match_deployment_shape(model: str, account_id: str) -> dict[str, Any]:
+    """Use the first validated shape the server matches for this account (its preference order)."""
+    try:
+        result = _run(["firectl", "deployment-shape-version", "match", "--account-id", account_id,
+                       "--model", model, "-o", "json"], capture=True)
+        shapes = json.loads(result.stdout)
+    except subprocess.CalledProcessError as exc:
+        raise PipelineError(f"firectl could not match a deployment shape for {model}; pass --deployment-shape") from exc
+    except ValueError as exc:
+        raise PipelineError("firectl returned invalid deployment shape JSON; pass --deployment-shape") from exc
+    if not isinstance(shapes, list):
+        raise PipelineError("firectl returned invalid deployment shape JSON; pass --deployment-shape")
+    validated = [shape for shape in shapes if isinstance(shape, dict) and shape.get("validated") is True
+                 and shape.get("latest_validated") is True and isinstance(shape.get("snapshot"), dict)
+                 and isinstance(shape["snapshot"].get("name"), str)]
+    if not validated:
+        raise PipelineError(f"no validated deployment shape is available to this account for {model}; pass --deployment-shape")
+    chosen = validated[0]["snapshot"]
+    return {"name": chosen["name"], "version": validated[0].get("name"), "display_name": chosen.get("display_name"),
+            "accelerator": f"{chosen.get('accelerator_count')}x {chosen.get('accelerator_type')}", "source": "matched",
+            "alternatives": [shape["snapshot"].get("display_name") for shape in validated[1:]]}
+
+
+def _describe_shape(shape: dict[str, Any]) -> str:
+    if shape["source"] == "explicit":
+        return f"{shape['name']} (from --deployment-shape)"
+    return f"{shape.get('display_name') or shape['name']} ({shape.get('accelerator')}; matched by firectl)"
+
+
+def _saved_promotion(run_dir: Path, output_model_id: str) -> bool:
+    receipt = run_dir / "promotion.json"
+    if not receipt.exists():
+        return False
+    saved = _load_json(receipt)
+    promotions = [saved, *saved.get("previous_promotions", [])] if isinstance(saved, dict) else []
+    return any(isinstance(item, dict) and item.get("output_model_id") == output_model_id for item in promotions)
+
+
+def _wait_for_ready_replica(deployment: str, account_id: str, timeout: float, *, deadline: float) -> None:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = _run(["firectl", "deployment", "get", deployment, "--account-id", account_id, "-o", "json"],
+                          capture=True, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            break
+        try:
+            state = json.loads(result.stdout)
+        except ValueError as exc:
+            raise PipelineError("firectl returned invalid deployment JSON") from exc
+        ready = (state.get("replica_stats") or {}).get("ready_replica_count") or 0
+        if state.get("state") in {"FAILED", "DELETING", "DELETED"}:
+            raise PipelineError(f"Fireworks deployment is {state.get('state')}; inspect it in Fireworks")
+        if time.monotonic() >= deadline:
+            break
+        if ready > 0:
+            return
+        print(f"Waiting for a ready replica (state {state.get('state')}, ready replicas {ready})...", file=sys.stderr)
+        time.sleep(min(READY_POLL_SECONDS, max(0, deadline - time.monotonic())))
+    raise PipelineError(
+        f"Fireworks deployment {deployment} has no ready replica confirmed within {int(timeout)}s of creation "
+        "(capacity may be pending); stop it with smithtune undeploy "
+        f"--provider fireworks --account-id {account_id} --deployment-id {deployment.rsplit('/', 1)[1]} --confirm"
+    )
 
 
 def _validate_resource_id(value: str, label: str) -> None:
@@ -652,7 +882,7 @@ def _inference_smoke_test(model_route: str) -> dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with open_without_redirects(request, timeout=180) as response:
             body = json.load(response)
     except urllib.error.HTTPError as exc:
         raise PipelineError(f"inference smoke test failed with HTTP {exc.code}") from exc

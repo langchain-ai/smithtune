@@ -14,7 +14,7 @@ from smithtune.models import resolve_prepared_model
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
-from test_pipeline import example, loaded_contract, message, write_raw
+from tests.test_pipeline import example, loaded_contract, message, write_raw
 
 
 def reasoning(text="recorded reasoning"):
@@ -58,7 +58,10 @@ def test_default_omits_reasoning_without_changing_source_or_tool_interactions(tm
     assert "opaque" not in serialized
 
 
-@pytest.mark.parametrize("model", [fireworks.DEFAULT_MODEL, baseten.DEFAULT_MODEL, fireworks.MODEL_SPECS["kimi-k3"]])
+@pytest.mark.parametrize("model", [
+    fireworks.DEFAULT_MODEL, baseten.DEFAULT_MODEL, fireworks.MODEL_SPECS["kimi-k3"],
+    fireworks.MODEL_SPECS["glm-5p3-flash"],
+])
 def test_preserve_requires_opt_in_and_keeps_readable_text_separate(model):
     source = trajectory()
     preserved = dataset.prepare_sft_rows([source], reasoning_policy="preserve", model=model)[0]["messages"]

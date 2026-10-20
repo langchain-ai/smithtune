@@ -1,16 +1,17 @@
 """The trajectory UI response is the only automatic tool/provenance source."""
 import copy
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from smithtune import curation, dataset, triage, triage_source
 from smithtune.providers.base import PipelineError
-from test_assistant_bindings import tool
-from test_per_assistant_preparation import example
-from test_triage import API, source, uid
-from trajectory_fixtures import items
+from tests.test_assistant_bindings import tool
+from tests.test_per_assistant_preparation import example
+from tests.test_triage import API, source, uid
+from tests.trajectory_fixtures import items
 
 
 def test_ui_pages_preserve_messages_and_global_assistant_positions():
@@ -41,10 +42,43 @@ def test_ui_pages_preserve_messages_and_global_assistant_positions():
     assert [(b["message_index"], len(b["tools"])) for b in result["source"]["assistant_runs"]] == [(2, 1), (4, 0)]
     assert result["source"]["assistant_runs"][-1]["run_id"] == "second-run"
     assert requests == [
-        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True}},
-        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True}, "cursor": "page-2"},
+        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True, "tool_definitions": True}},
+        {"project_id": uid(101), "trace_id": uid(1), "format": "ui", "include": {"system_messages": True, "tool_definitions": True}, "cursor": "page-2"},
     ]
     assert wire == original
+
+
+def gated_trajectory_api(wire):
+    """Serve /v1/trajectory like LangSmith: tool definitions only when requested."""
+    def api(command, *, input, **kwargs):
+        body = json.loads(input)
+        page = copy.deepcopy(wire)
+        if not body.get("include", {}).get("tool_definitions"):
+            for entry in page:
+                entry["message"].pop("available_tools", None)
+        return SimpleNamespace(stdout=json.dumps({"items": page, "next_cursor": None}))
+    return api
+
+
+def test_tool_definitions_are_requested_from_a_gated_trajectory_api():
+    messages = [{"role": "human", "content": "Find a result."}, {"role": "ai", "content": "Answer."}]
+    api = gated_trajectory_api(items(messages, trace_id=uid(1), tools=[tool()]))
+    result = curation._fetch_trajectory(uid(100), uid(101), {"key": "trace_id", "id": uid(1)}, runner=api)
+    assert result["training_error"] is None
+    assert [len(b["tools"]) for b in result["source"]["assistant_runs"]] == [1]
+
+
+def test_a_response_without_tool_definitions_is_not_read_as_no_tools():
+    messages = [{"role": "human", "content": "Find a result."}, {"role": "ai", "content": "Answer."}]
+    wire = items(messages, trace_id=uid(1), tools=[tool()])
+    for entry in wire:
+        entry["message"].pop("available_tools", None)
+
+    def api(*args, **kwargs):
+        return SimpleNamespace(stdout=json.dumps({"items": wire, "next_cursor": None}))
+
+    result = curation._fetch_trajectory(uid(100), uid(101), {"key": "trace_id", "id": uid(1)}, runner=api)
+    assert "unknown tool availability" in (result["training_error"] or "")
 
 
 @pytest.mark.parametrize("retain_empty", [False, True])
@@ -74,7 +108,7 @@ def test_empty_page_with_continuation_is_not_an_empty_trajectory(tmp_path):
 
 
 @pytest.mark.parametrize("scope", ["trace", "thread"])
-def test_foreign_trace_metadata_stops_snapshot_before_judging(tmp_path, scope):
+def test_foreign_trace_metadata_is_excluded_before_judging(tmp_path, scope):
     api = API()
     if scope == "trace":
         api.root_pages[0][0]["thread_id"] = None
@@ -88,9 +122,12 @@ def test_foreign_trace_metadata_stops_snapshot_before_judging(tmp_path, scope):
             response.stdout = json.dumps(body)
         return response
 
-    with pytest.raises(PipelineError, match="another trace"):
-        triage_source.snapshot(source(), tmp_path, runner=foreign)
-    assert not (tmp_path / "snapshot.json").exists()
+    frozen = triage_source.snapshot(source(), tmp_path, runner=foreign)
+    unit, = frozen["units"]
+    assert "outside its source" in unit["training_error"]
+    # Foreign messages are never kept, judged, or uploaded.
+    assert unit["example"]["inputs"]["messages"] == []
+    assert unit["example"]["metadata"].get("smithtune_source") is None
 
 
 def test_missing_assistant_metadata_is_saved_and_excluded_before_council(tmp_path):
@@ -130,6 +167,28 @@ def test_unbound_export_requires_exact_source_messages(change):
     enriched, errors = dataset.capture_example_bindings([value], "workspace", runner=api)
     assert enriched == [] and "messages differ" in errors[0]["reason"]
     assert "smithtune_source" not in value["metadata"]
+
+
+def test_unbound_export_fetch_limit_excludes_only_oversized_example():
+    values = [example(i, thread=f"thread-{i}") for i in (1, 2)]
+    for value in values:
+        del value["metadata"]["smithtune_source"]
+    requests = []
+    def api(command, *, input, **kwargs):
+        assert command[2] == "/v1/trajectory"
+        body = json.loads(input)
+        requests.append(body)
+        if body["thread_id"] == "thread-1":
+            raise subprocess.CalledProcessError(1, command, output=
+                "HTTP 400: trajectory view exceeded response data size limit. Narrow the requested trajectory page")
+        return SimpleNamespace(stdout=json.dumps({
+            "items": items(values[1]["inputs"]["messages"]), "next_cursor": None}))
+    enriched, errors = dataset.capture_example_bindings(values, "workspace", runner=api)
+    assert len(enriched) == len(errors) == 1
+    assert enriched[0]["id"] == values[1]["id"]
+    assert errors[0]["example_id"] == values[0]["id"]
+    assert "trajectory fetch limit" in errors[0]["reason"]
+    assert len(requests) == 3 and requests[1] == {**requests[0], "page_size": 1}
 
 
 def test_unbound_exports_route_same_thread_to_its_own_project_and_workspace():

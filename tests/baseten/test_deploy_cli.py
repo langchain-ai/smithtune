@@ -62,7 +62,6 @@ def test_baseten_deploy_rejects_missing_and_foreign_options(monkeypatch, capsys,
 
 @pytest.mark.parametrize("extra", [
     ["--accelerator", "H200:1"], ["--max-seq-len", "32768"],
-    ["--deployment-timeout", "1800"],
 ])
 def test_fireworks_rejects_baseten_deployment_options(capsys, extra):
     with pytest.raises(SystemExit):
@@ -78,7 +77,7 @@ def test_fireworks_deploy_and_undeploy_defaults_unchanged(monkeypatch):
               "--output-model-id", "model", "--deployment-id", "deployment",
               "--deployment-shape", "shape", "--confirm"])
     provider.deploy.assert_called_once_with(
-        Path("run"), "account", "model", "deployment", "shape", confirm=True,
+        Path("run"), "account", "model", "deployment", "shape", confirm=True, timeout=1800,
     )
     cli.main(["undeploy", "--account-id", "account", "--deployment-id", "deployment", "--confirm"])
     provider.undeploy.assert_called_once_with("account", "deployment", confirm=True)
@@ -306,8 +305,9 @@ def test_temporary_evaluation_rejects_invalid_options_before_provisioning(tmp_pa
 def test_temporary_evaluation_requires_credentials_before_provisioning(tmp_path, temporary_baseten, monkeypatch, capsys, missing):
     _, events, plan, _, _ = temporary_baseten
     monkeypatch.delenv(missing)
+    judge = ["--judge-model", "anthropic/claude-sonnet-5"] if missing == "ANTHROPIC_API_KEY" else []
     with pytest.raises(SystemExit):
-        cli.main([*temporary_args(tmp_path), "--confirm"])
+        cli.main([*temporary_args(tmp_path), "--confirm", *judge])
     assert missing in capsys.readouterr().err
     plan.assert_not_called()
     assert events == []
@@ -328,7 +328,7 @@ def test_temporary_evaluation_checks_selected_judge_credential(tmp_path, tempora
 def test_temporary_mode_rejects_missing_run_or_wrong_provider(tmp_path, capsys, command, provider):
     with pytest.raises(SystemExit):
         cli.main([command, "--provider", provider, "--serving-mode", "temporary", "--output-dir", str(tmp_path)])
-    assert ("requires --run-dir" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
+    assert ("requires --run-dir" if provider == "baseten" else "uses the saved training mode") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("mode", ["existing", "temporary"])
@@ -343,7 +343,7 @@ def test_baseten_evaluation_requires_separate_training_and_output_directories(tm
 def test_existing_mode_rejects_temporary_baseten_settings(tmp_path, capsys, provider):
     with pytest.raises(SystemExit):
         cli.main(["eval-plan", "--provider", provider, "--serving-mode", "existing", "--output-dir", str(tmp_path), "--accelerator", "H200:1"])
-    assert ("requires --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the serverless sampler") in capsys.readouterr().err
+    assert ("requires --provider baseten --serving-mode temporary" if provider == "baseten" else "uses the saved training mode") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("filename", ["evaluation-config.json", "results.jsonl"])
@@ -444,3 +444,17 @@ def test_temporary_retry_uses_corrected_context_before_resume_validation(tmp_pat
     evaluate.side_effect = evaluate_lazily
     cli.main([*temporary_args(tmp_path), "--max-seq-len", "32768", "--confirm"])
     assert events[-1] == ("exit",)
+
+
+def test_runtime_errors_are_reported_without_the_usage_banner(monkeypatch, capsys):
+    def fail(*_args, **_kwargs):
+        raise cli.BasetenRuntimeError("Baseten deployment readiness timed out")
+
+    monkeypatch.setattr(cli.baseten_deployment, "deploy", fail)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["deploy", "--provider", "baseten", "--run-dir", "run",
+                  "--accelerator", "H100:4", "--max-seq-len", "32768", "--confirm"])
+    assert error.value.code == 2
+    err = capsys.readouterr().err
+    assert err.endswith("smithtune: error: Baseten deployment readiness timed out\n")
+    assert "usage:" not in err

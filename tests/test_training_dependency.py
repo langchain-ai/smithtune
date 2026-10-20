@@ -1,6 +1,6 @@
 """Verify the installed upstream cookbook and its renderer without network calls."""
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 from importlib import metadata, resources
 import json

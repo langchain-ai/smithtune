@@ -1,6 +1,6 @@
 """Native prefix masks, changing history, and provider datum boundaries."""
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 import copy
 from dataclasses import replace
@@ -15,7 +15,7 @@ from smithtune.native_rendering import NativePrefixRenderer
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
-from test_hf_rendering import MESSAGES, TOOLS, _loss_spans, _tokenizer
+from tests.test_hf_rendering import MESSAGES, TOOLS, _loss_spans, _tokenizer
 
 
 MODEL = baseten.MODEL_SPECS["qwen3p5-9b"]
@@ -164,7 +164,7 @@ def test_muse_rejects_shapes_the_cookbook_cannot_preserve(monkeypatch, stage, sh
 
 
 def test_actual_native_boundary_masks_each_target_with_changing_tools():
-    from test_assistant_bindings import example
+    from tests.test_assistant_bindings import example
     row, = dataset.prepare_sft_rows([example()[0]])
     renderer = _renderer()
     rows = rendering.render_row_tokens(row, MODEL, renderer=renderer)
@@ -176,3 +176,38 @@ def test_actual_native_boundary_masks_each_target_with_changing_tools():
         text = renderer.tokenizer.decode(datum.token_ids)
         assert ('unused' in text) == (i == 1)
         assert supervised.endswith('<|im_end|>\n')
+
+
+@pytest.mark.parametrize("policy", ["omit", "preserve"])
+def test_fireworks_glm_masks_each_assistant_target_and_preserves_replay_history(monkeypatch, policy):
+    import training.utils.tokenizers
+    from smithtune.bindings import training_targets
+    from tests.test_reasoning_policy import trajectory
+
+    tokenizer = _tokenizer()
+    tokenizer.add_special_tokens({"additional_special_tokens": [
+        "[gMASK]", "[sop]", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+    ]})
+    monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: tokenizer)
+    model = fireworks.MODEL_SPECS["glm-5p3-flash"]
+    renderer = rendering.load_training_renderer(model)
+    row, = dataset.prepare_sft_rows([trajectory()], model=model, reasoning_policy=policy)
+    before = copy.deepcopy(row)
+    datums = rendering.render_row_tokens(row, model, renderer=renderer, include_loss_mask=True)
+    assert row == before
+    assert len(datums) == (3 if policy == "preserve" else 2)
+    targets = "".join("".join(_loss_spans(datum, tokenizer)) for datum in datums)
+    assert targets.count("lookup") == 1
+    assert targets.count("<|observation|>") == 1
+    assert targets.count("<|user|>") == (2 if policy == "preserve" else 1)
+    assert "policy" not in targets and "look up x" not in targets and "result" not in targets
+    assert ("recorded reasoning" in targets) == (policy == "preserve")
+    assert ("answer reasoning" in targets) == (policy == "preserve")
+    assert "answer" in targets
+
+    final_target = list(training_targets(row))[-1]
+    prompt = rendering.replay_prompt(final_target["messages"][:-1], final_target["tools"], model, renderer).to_ints()
+    assert datums[-1].token_ids[:len(prompt)] == prompt
+    assert not any(datums[-1].token_weights[:len(prompt)])
+    assert ("recorded reasoning" in tokenizer.decode(prompt)) == (policy == "preserve")
+    assert "answer reasoning" not in tokenizer.decode(prompt)

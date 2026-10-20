@@ -14,6 +14,10 @@ class PipelineError(ValueError):
     """A local input or state error shared across provider adapters."""
 
 
+class TerminationRequested(BaseException):
+    """A SIGTERM requested orderly training lifecycle cleanup."""
+
+
 ReasoningPolicy = Literal["omit", "preserve"]
 
 
@@ -36,6 +40,7 @@ class ModelSpec:
     supports_reasoning_content: bool = False
     template_sha256: str = ""
     rendering_version: str = ""
+    reasoning_effort: str | None = None
 
     @property
     def training_context_limit(self) -> int:
@@ -76,6 +81,11 @@ class ModelSpec:
             raise PipelineError("template_sha256 must be empty or a lowercase SHA-256 digest")
         if not isinstance(self.rendering_version, str):
             raise PipelineError("rendering_version must be a string")
+        if self.reasoning_effort is not None:
+            if not isinstance(self.reasoning_effort, str) or self.reasoning_effort not in {"low", "high", "max"}:
+                raise PipelineError("reasoning_effort must be low, high, or max")
+            if self.provider != "fireworks" or self.renderer != "glm53_flash_preserve_thinking":
+                raise PipelineError("--reasoning-effort is supported only for Fireworks GLM-5.3-Flash")
 
 
 @dataclass(frozen=True)
@@ -83,23 +93,30 @@ class CommonSFTSettings:
     """Training settings supported by every provider adapter."""
 
     max_epochs: int = 5
-    early_stopping_patience: int = 1
+    early_stopping_patience: int | None = None
     early_stopping_min_delta: float = 0.0
     learning_rate: float = 1e-4
     batch_size: int = 32
     seed: int = 42
+    validation_every_steps: int | None = None
 
     def validate(self) -> None:
         if self.max_epochs < 1:
             raise PipelineError("max_epochs must be positive")
-        if self.early_stopping_patience < 1:
-            raise PipelineError("early_stopping_patience must be positive")
+        if self.early_stopping_patience is not None and (
+            type(self.early_stopping_patience) is not int or self.early_stopping_patience < 1
+        ):
+            raise PipelineError("early_stopping_patience must be a positive integer")
         if self.early_stopping_min_delta < 0:
             raise PipelineError("early_stopping_min_delta cannot be negative")
         if self.learning_rate <= 0 or self.batch_size < 1:
             raise PipelineError("learning_rate and batch_size must be positive")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
             raise PipelineError("seed must be a non-negative integer")
+        if self.validation_every_steps is not None and (
+            type(self.validation_every_steps) is not int or self.validation_every_steps < 1
+        ):
+            raise PipelineError("validation_every_steps must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -108,6 +125,7 @@ class ModelOptions:
 
     model: str | None = None
     max_seq_len: int | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +135,9 @@ class TrainingOptions(CommonSFTSettings):
     lora_rank: int | None = None
     lora_alpha: int | None = None
     pipeline_depth: int | None = None
+    training_mode: str | None = None
+    training_shape: str | None = None
+    provisioning_timeout: float | None = None
     microbatch_token_budget: int | None = None
     max_spend_usd: float | None = None
     hourly_rate_usd: float | None = None
@@ -156,7 +177,13 @@ class TrainingProvider(Protocol):
         """Apply provider preparation policy to shared trajectory preparation."""
 
     def plan(self, data_dir: Path, run_id: str, settings: Any) -> dict[str, Any]:
-        """Return a reviewable plan without provisioning resources."""
+        """Return a reviewable plan without provisioning resources.
+
+        execution.requires_active_client is a boolean for this resolved workflow:
+        true when Smithtune must keep running to drive the requested training
+        and evaluation work. Detached launch uses this value; adapters with
+        multiple execution modes resolve it here.
+        """
 
     def train(
         self,

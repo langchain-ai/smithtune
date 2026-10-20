@@ -1,1 +1,1 @@
-"""Fireworks provider modules; implementations are imported on demand."""
+"""Fireworks training, sampling, and deployment integration."""

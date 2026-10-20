@@ -1,12 +1,11 @@
 import copy
+import io
 import json
-import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
-from urllib.parse import unquote, urlsplit
 from uuid import UUID
+from urllib.error import HTTPError
 
 import pytest
 
@@ -16,7 +15,7 @@ from smithtune.dataset_artifacts import load_conversation
 from smithtune.inference_contract import json_sha256
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks.provider import DEFAULT_MODEL
-from trajectory_fixtures import items
+from tests.trajectory_fixtures import items
 
 
 def uid(n):
@@ -63,7 +62,7 @@ class API:
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
         elif path == "/v1/trajectory":
-            assert body["include"] == {"system_messages": True}
+            assert body["include"] == {"system_messages": True, "tool_definitions": True}
             assert body["format"] == "ui"
             if "thread_id" in body:
                 value = self.trajectory_pages[body.get("cursor")]
@@ -162,6 +161,52 @@ def test_empty_trajectory_is_rejected_without_stopping_pull_or_resume(tmp_path):
     selected, = triage.selected_examples(tmp_path)
     assert selected["id"] == valid["example"]["id"]
     assert selected["inputs"] == valid["example"]["inputs"]
+
+
+@pytest.mark.parametrize("oversized_cursor", [None, "next"])
+def test_fetch_limit_excludes_whole_trajectory_and_survives_resume(tmp_path, oversized_cursor):
+    api = API()
+    api.root_pages[0].append({"trace_id": uid(3), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
+    requests = []
+
+    def runner(command, **kwargs):
+        body = json.loads(kwargs.get("input") or "{}")
+        if command[2] == "/v1/trajectory" and body.get("thread_id") == "conversation-a":
+            requests.append(body)
+            if body.get("cursor") == oversized_cursor:
+                raise subprocess.CalledProcessError(1, command, output=
+                    "HTTP 400: trajectory view exceeded response data size limit. "
+                    "Narrow the requested trajectory page; private source content")
+        return api(command, **kwargs)
+
+    frozen = triage_source.snapshot(source(), tmp_path, runner=runner)
+    excluded, valid = frozen["units"]
+    assert excluded["example"]["inputs"]["messages"] == []
+    assert "smithtune_source" not in excluded["example"]["metadata"]
+    assert "trajectory fetch limit" in excluded["training_error"]
+    assert "page_size=1" in excluded["training_error"]
+    assert "private source content" not in excluded["training_error"]
+    assert valid["training_error"] is None
+    failed = [request for request in requests if request.get("cursor") == oversized_cursor]
+    assert len(failed) == 2 and failed[1] == {**failed[0], "page_size": 1}
+    assert dataset_workflow._download_summary(frozen)["exclusion_reasons"] == {"trajectory_fetch_limit": 1}
+
+    # An interruption before snapshot completion must not retry the permanent exclusion.
+    (tmp_path / "snapshot.json").unlink()
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("saved exclusion or completed trajectory was fetched again")
+    resumed = triage_source.snapshot(source(), tmp_path, runner=unexpected_read)
+    assert list(resumed["units"]) == [excluded, valid]
+
+    def judge_valid(slot, prompt, tokens):
+        assert json.loads(prompt[1]["content"])["untrusted_trajectory"] == valid["example"]["inputs"]["messages"]
+        return judge_call(slot, prompt, tokens)
+    result = triage.run_triage(source(), tmp_path, runner=unexpected_read, judge_call=judge_valid, confirm=True)
+    assert result["filtered_training"] == 1 and result["kept"] == 1
+    dataset_workflow.run("push", tmp_path, name="within-limits", confirm=True, runner=api)
+    assert len(api.imported) == 1
+    assert api.imported[0]["inputs"] == valid["example"]["inputs"]
 
 
 def test_snapshot_retries_failed_reads(tmp_path, monkeypatch):
@@ -264,7 +309,7 @@ def tool_conversation(name="lookup", args=None, result=True, repeat=False):
 
 
 @pytest.mark.parametrize("kwargs,error", [
-    ({"name": "missing_tool"}, "unknown tool missing_tool"),
+    ({"name": "missing_tool"}, "unknown tool in recorded tool call"),
     ({"args": {"limit": "many"}}, "do not match its JSON Schema"),
     ({"result": False}, "unmatched tool calls or results"),
     ({"repeat": True}, "repeats tool call id"),
@@ -446,7 +491,7 @@ def test_standalone_traces_are_labeled(tmp_path):
     result = run(tmp_path, api)
     assert result["kept"] == 1
     assert json.loads((tmp_path / "labels.jsonl").read_text()) == {
-        "trajectory_id": triage_source.load_snapshot(tmp_path)["units"][0]["example"]["id"], "keep": 1, "reason": "3/3 judges voted 1. The answer completes the request.",
+        "trajectory_id": triage_source.load_snapshot(tmp_path)["units"][0]["example"]["id"], "keep": 1, "reason": "2/2 judges voted 1. The answer completes the request.",
     }
 
 
@@ -492,7 +537,8 @@ def test_failed_judge_is_incomplete_then_retried(tmp_path):
 
 def config(tmp_path, count=2):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"judges": [{"name": f"judge-{i}", "provider": "fireworks", "model": "accounts/fireworks/models/example"} for i in range(count)]}))
+    path.write_text(json.dumps({"judges": [{"name": f"judge-{i}", "provider": "fireworks", "model": "accounts/fireworks/models/example"} for i in range(count)],
+                               "rules": ["Keep trajectories that complete the request."]}))
     return path
 
 
@@ -621,23 +667,15 @@ def test_cli_default_run_directories_are_unique_and_can_resume(tmp_path, monkeyp
     assert "requires a saved directory" in capsys.readouterr().err
 
 
-def test_coordinator_skill_changes_require_a_new_run(tmp_path, monkeypatch):
-    resource_dir = tmp_path / "resources"
-    skill_path = resource_dir / "skills/sft-trace-triage/SKILL.md"
-    skill_path.parent.mkdir(parents=True)
-    current = triage.files("smithtune").joinpath("skills/sft-trace-triage/SKILL.md").read_text()
-    skill_path.write_text(current)
+def test_coordinator_prompt_changes_require_a_new_run(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(triage.load_config(None)))
     run_dir = tmp_path / "run"
-    with monkeypatch.context() as patch:
-        patch.setattr(triage, "files", lambda _: resource_dir)
-        run(run_dir, runner_mode="deepagent", config_path=config_path)
+    run(run_dir, runner_mode="deepagent", config_path=config_path)
     saved_votes = (run_dir / "judgments.jsonl").read_bytes()
     assert run(run_dir, runner_mode="deepagent", config_path=config_path)["status"] == "complete"
     assert (run_dir / "judgments.jsonl").read_bytes() == saved_votes
-    skill_path.write_text(current.replace("strict majority", "unanimous vote"))
-    monkeypatch.setattr(triage, "files", lambda _: resource_dir)
+    monkeypatch.setattr(triage, "COORDINATOR_PROMPT", triage.COORDINATOR_PROMPT.replace("strict majority", "unanimous vote"))
     with pytest.raises(PipelineError, match="different input.*new output directory"):
         run(run_dir, runner_mode="deepagent", config_path=config_path)
 
@@ -688,23 +726,34 @@ def test_judge_output_is_a_score_and_reason(change):
         triage_judges.validate_judgment({"keep": 1, "reason": "complete", **change})
 
 
-def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path):
+@pytest.mark.parametrize("body", [
+    {"error": {"code": "context_length_exceeded"}},
+    {"error": {"message": "Input length 880063 exceeds maximum allowed token limit 262112"}},
+    {"detail": "Input is too long: 880063 tokens, limit 262112"},
+    {"error": "Input token count 880063 exceeds the limit of 262112 tokens"},
+    {"detail": [{"msg": "The input (880063 tokens) is longer than the model's context length (262112 tokens)."}]},
+])
+@pytest.mark.parametrize("http_error", [False, True])
+def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_path, body, http_error):
     api = API()
     api.trajectory_pages[None]["messages"][1]["content"] = "x" * 20_000
     calls = []
 
-    class ContextError(Exception):
-        status_code = 400
-        body: ClassVar[dict] = {"error": {"code": "context_length_exceeded"}}
-
     def reject(judge, prompt, tokens):
         assert json.loads(prompt[-1]["content"])["untrusted_trajectory"][1]["content"] == "x" * 20_000
         calls.append(judge["name"])
-        raise ContextError()
+        if http_error:
+            error = HTTPError("https://example.invalid/chat/completions", 400, "Bad Request", {},
+                              io.BytesIO(json.dumps(body).encode()))
+            raise PipelineError("triage judge failed with HTTP 400") from error
+        error = RuntimeError("provider error")
+        error.status_code, error.body = 400, body
+        raise error
 
-    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True)
+    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=reject, confirm=True,
+                              sleeper=lambda _: pytest.fail("context rejection retried"))
     assert result["incomplete"] == 0 and result["filtered_context"] == 1
-    assert len(calls) == 3
+    assert len(calls) == 2
     label = json.loads((tmp_path / "labels.jsonl").read_text())
     assert label["keep"] == 0 and "context window" in label["reason"]
     assert triage.run_triage(source(), tmp_path, confirm=True,
@@ -713,37 +762,27 @@ def test_provider_context_rejection_filters_without_shortening_or_retrying(tmp_p
         triage.selected_examples(tmp_path)
 
 
-def test_skill_export_works_outside_checkout(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    result = triage.export_skill(tmp_path)
-    entry = Path(result["skill"])
-    assert entry.read_text().startswith("---\nname: sft-trace-triage")
-    skill_dir = entry.parent.resolve()
-    pending, visited = [entry], set()
-    while pending:
-        document = pending.pop()
-        if document in visited:
-            continue
-        visited.add(document)
-        for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", document.read_text()):
-            link = urlsplit(target)
-            if link.scheme or link.netloc or not link.path:
-                continue
-            referenced = (document.parent / unquote(link.path)).resolve()
-            assert referenced.is_relative_to(skill_dir), f"Skill reference leaves export: {target}"
-            assert referenced.is_file(), f"Missing exported skill reference: {target}"
-            if referenced.suffix == ".md":
-                pending.append(referenced)
-    assert {"SKILL.md", "judge.md", "discovery.md"} <= {path.name for path in visited}
-    exported = json.loads((tmp_path / "sft-trace-triage/config.example.json").read_text())
-    assert exported == triage.load_config(None) == triage.council_settings(tmp_path / "new")["config"]
-    assert [(j["provider"], j["model"]) for j in exported["judges"]] == [
-        ("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"),
-        ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
-        ("openai", "gpt-5.6-terra"),
+def test_default_council_is_packaged_without_selection_criteria(tmp_path):
+    config = triage.DEFAULT_COUNCIL
+    assert config["rules"] == []
+    assert [(j["provider"], j["model"]) for j in config["judges"]] == [
+        ("baseten", "deepseek-ai/DeepSeek-V4.1-Flash"),
+        ("baseten", "zai-org/GLM-5.3-Flash"),
     ]
-    with pytest.raises(PipelineError, match="already exists"):
-        triage.export_skill(tmp_path)
+
+
+@pytest.mark.no_default_rule
+def test_council_review_requires_selection_criteria(tmp_path):
+    with pytest.raises(PipelineError, match="--rubric FILE or --rule TEXT"):
+        run(tmp_path / "none")
+    assert run(tmp_path / "rule", config={**triage.load_config(None), "rules": ["Keep complete answers."]})["status"] == "complete"
+    assert run(tmp_path / "rubric", selection_rubric="Keep complete answers.")["status"] == "complete"
+
+
+def test_judge_prompt_ships_no_default_quality_criteria():
+    prompt = triage_judges.JUDGE_PROMPT
+    assert "untrusted data" in prompt and "selection criteria supplied below" in prompt
+    assert "Use 1 when" not in prompt and "Use 0 for" not in prompt
 
 
 def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
@@ -753,10 +792,10 @@ def test_cli_triage_and_dataset_handoff(tmp_path, monkeypatch, capsys):
     cli.main(["dataset", "pull", str(tmp_path), "--workspace-id", uid(100), "--project-id", uid(101),
               "--start-time", source()["start_time"], "--end-time", source()["end_time"]])
     capsys.readouterr()
-    cli.main(["dataset", "triage", str(tmp_path), "--judges", "deepseek-v4.1-flash,glm-5.3-flash,gpt-5.6-terra",
-              "--rule", "Keep supported answers."])
+    cli.main(["dataset", "triage", str(tmp_path), "--judges",
+              "baseten:deepseek-ai/DeepSeek-V4.1-Flash,baseten:zai-org/GLM-5.3-Flash", "--rule", "Keep supported answers."])
     plan = json.loads(capsys.readouterr().out)["triage"]
-    assert plan["judges"] == 3 and plan["runner"] == "deepagent"
+    assert plan["judges"] == 2 and plan["runner"] == "deepagent"
     assert plan["config"]["rules"] == ["Keep supported answers."]
     assert plan["config"]["judges"] == triage.load_config(None)["judges"]
     cli.main(["dataset", "triage", str(tmp_path), "--confirm"])
@@ -851,7 +890,6 @@ def test_source_pagination_is_bounded(tmp_path, monkeypatch):
     ("openai", "https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
     ("baseten", "https://inference.baseten.co/v1/chat/completions", "BASETEN_API_KEY"),
     ("anthropic", "https://api.anthropic.com/v1/messages", "ANTHROPIC_API_KEY"),
-    ("anthropic-gateway", "https://gateway.smith.langchain.com/anthropic/v1/messages", "LANGSMITH_GATEWAY_API_KEY"),
 ])
 def test_judge_transport_routes_credentials_to_the_selected_provider(monkeypatch, provider, url, key):
     from smithtune import inference
@@ -891,9 +929,8 @@ def test_paid_and_remote_writes_require_confirmation(tmp_path, monkeypatch):
         triage.run_triage(source(), tmp_path, runner=API())
     with pytest.raises(PipelineError, match="requires --confirm"):
         triage.create_triaged_dataset(tmp_path, "selected", confirm=False)
-    monkeypatch.setenv("FIREWORKS_API_KEY", "test-credential")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(PipelineError, match="OPENAI_API_KEY"):
+    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+    with pytest.raises(PipelineError, match="BASETEN_API_KEY"):
         triage.run_triage(source(), tmp_path, runner=API(), confirm=True)
     assert not (tmp_path / "triage-config.json").exists()
     assert not (tmp_path / "judgments.jsonl").exists()
@@ -967,7 +1004,7 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     plan = json.loads((tmp_path / "plan.json").read_text())
     assert plan["selected_traces"] == 3 and plan["source_traces"] == 3
     assert plan["trajectories"] == 2
-    assert plan["judge_tasks"] == len(seen) == (3 if media_turn else 6)
+    assert plan["judge_tasks"] == len(seen) == (2 if media_turn else 4)
     assert summary["filtered_multimodal"] == int(media_turn is not None)
     labels = [json.loads(line) for line in (tmp_path / "labels.jsonl").read_text().splitlines()]
     assert len(labels) == 2
@@ -975,7 +1012,7 @@ def test_council_judges_distinct_full_conversations_and_filters_any_turn(tmp_pat
     assert {e["id"] for e in examples} == {label["trajectory_id"] for label in labels if label["keep"]}
     for example in examples:
         judged = [e for _, e in seen if e == example["inputs"]["messages"]]
-        assert len(judged) == 3
+        assert len(judged) == 2
         assert all(e == example["inputs"]["messages"] for e in judged)
 
 
@@ -998,6 +1035,16 @@ def test_old_trace_votes_cannot_be_reused_or_imported(tmp_path):
     (400, {"error": {"message": "prompt is too long: 120000 tokens > 100000 maximum"}}, True),
     (429, {"message": "Rate limit reached"}, False),
     (400, {"message": "max_tokens exceeds the output limit"}, False),
+    (422, {"detail": "Input length 880063 exceeds maximum allowed token limit 262112"}, True),
+    (400, {"detail": "Output token count exceeds the limit of 4096 tokens"}, False),
+    (400, {"detail": "Input token budget exceeded for this account"}, False),
+    (400, {"detail": "Input token budget exceeded the account limit"}, False),
+    (400, {"detail": "Input token count 880063 exceeds the account limit of 262112"}, False),
+    (400, {"detail": "Input validation error: requested output tokens exceed the maximum allowed output length"}, False),
+    (429, {"error": "Input token count 880063 exceeds the limit of 262112 tokens"}, False),
+    (503, {"message": "prompt is too long"}, False),
+    (401, {"error": {"code": "context_length_exceeded"}}, False),
+    (400, {"error": {"code": {}, "message": "Invalid request"}}, False),
 ])
 def test_only_context_rejections_filter_trajectories(status, body, expected):
     error = RuntimeError("provider error")
@@ -1016,27 +1063,108 @@ def test_old_snapshot_requires_fresh_system_message_capture(tmp_path):
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_snapshot_rejects_new_turns_before_saving(tmp_path, monkeypatch, resume):
+@pytest.mark.parametrize("growth", ["before_read", "between_pages", "after_read"])
+def test_snapshot_keeps_growing_threads_and_resumes_saved_content(tmp_path, resume, growth):
     api = API()
-    # Identical query timestamps must not let the final check reuse cached IDs.
-    monkeypatch.setattr(triage_source, "_utc_now", lambda: "2026-09-15T00:00:00+00:00")
+    api.root_pages[0].append({"trace_id": uid(4), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
+    changed = interrupted = False
 
-    def new_turn(command):
-        if command[2] == "/v1/trajectory" and len(api.thread_roots) == 2:
-            if resume:
-                raise KeyboardInterrupt()
-            api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
-            api.trajectory_pages["next"]["messages"] += messages(3)
+    def grow():
+        nonlocal changed
+        changed = True
+        api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+        api.trajectory_pages["next"]["messages"] += messages(3)
 
-    api.failure = new_turn
+    def runner(command, **kwargs):
+        nonlocal interrupted
+        if command[2] != "/v1/trajectory":
+            return api(command, **kwargs)
+        body = json.loads(kwargs["input"])
+        if "thread_id" not in body:
+            return api(command, **kwargs)
+        if resume and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt()
+        if not changed and growth == "before_read":
+            grow()
+        response = api(command, **kwargs)
+        if not changed and (growth == "between_pages" or body.get("cursor") == "next"):
+            grow()
+        return response
+
     if resume:
         with pytest.raises(KeyboardInterrupt):
-            triage_source.snapshot(source(), tmp_path, runner=api)
-        resume = False  # Interrupt only the first attempt; grow during the next read.
-    with pytest.raises(PipelineError, match="conversation-a changed during download"):
+            triage_source.snapshot(source(), tmp_path, runner=runner)
+    frozen = triage_source.snapshot(source(), tmp_path, runner=runner)
+    growing, stable = frozen["units"]
+    included = growth != "after_read"
+    expected_messages = SYSTEM + messages(1) + messages(2) + (messages(3) if included else [])
+    expected_traces = [uid(1), uid(2)] + ([uid(3)] if included else [])
+    assert growing["example"]["inputs"]["messages"] == expected_messages
+    assert growing["trace_ids"] == expected_traces
+    assert growing["example"]["metadata"]["triage_trace_ids"] == expected_traces
+    assert [run["trace_id"] for run in growing["example"]["metadata"]["smithtune_source"]["assistant_runs"]] == expected_traces
+    assert [record["trace_id"] for record in growing["traces"]] == expected_traces
+    assert growing["training_error"] is None and stable["training_error"] is None
+    assert dataset_workflow._download_summary(frozen)["excluded"] == 0
+
+    # Completed downloads survive interruption and further changes to the live thread.
+    (tmp_path / "snapshot.json").unlink()
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("completed trajectory was fetched again")
+    resumed = triage_source.snapshot(source(), tmp_path, runner=unexpected_read)
+    assert list(resumed["units"]) == [growing, stable]
+    result = triage.run_triage(source(), tmp_path, runner=unexpected_read, judge_call=judge_call, confirm=True)
+    assert result["filtered_training"] == 0 and result["kept"] == 2
+    dataset_workflow.run("push", tmp_path, name="growing-trajectories", confirm=True, runner=api)
+    assert len(api.imported) == 2
+    assert growing["example"]["inputs"] in [example["inputs"] for example in api.imported]
+    assert stable["example"]["inputs"] in [example["inputs"] for example in api.imported]
+
+
+def test_growing_thread_with_incomplete_tool_exchange_is_filtered_before_judging(tmp_path):
+    api = API()
+    api.root_pages[0].append({"trace_id": uid(4), "thread_id": None,
+                             "start_time": "2026-09-02T01:00:00Z"})
+    def grow(command):
+        if command[2] == "/v1/trajectory" and len(api.thread_roots) == 2:
+            api.thread_roots.append({**api.thread_roots[-1], "id": uid(3), "trace_id": uid(3)})
+            api.trajectory_pages["next"]["messages"] += [
+                {"role": "tool", "content": "result without its call", "tool_call_id": "missing"},
+                *messages(3),
+            ]
+    api.failure = grow
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    invalid, valid = frozen["units"]
+    assert "unmatched tool calls or results" in invalid["training_error"]
+    assert invalid["example"]["inputs"]["messages"]
+    def judge_valid(slot, prompt, tokens):
+        assert json.loads(prompt[1]["content"])["untrusted_trajectory"] == valid["example"]["inputs"]["messages"]
+        return judge_call(slot, prompt, tokens)
+    result = triage.run_triage(source(), tmp_path, runner=api, judge_call=judge_valid, confirm=True)
+    assert result["filtered_training"] == 1 and result["kept"] == 1
+
+
+def test_foreign_trace_evidence_excludes_only_that_trajectory(tmp_path):
+    api = API()
+    api.trajectory_pages["next"]["messages"] += messages(3)
+    frozen = triage_source.snapshot(source(), tmp_path, runner=api)
+    assert (tmp_path / "snapshot.json").exists()
+    excluded = [u for u in frozen["units"] if u["training_error"]]
+    assert excluded and all("outside its source" in u["training_error"] for u in excluded)
+    assert all(u["example"]["metadata"].get("smithtune_source") is None for u in excluded)
+    assert all(u["example"]["inputs"]["messages"] == [] for u in excluded)
+    summary = dataset_workflow._download_summary(frozen)
+    assert summary["exclusion_reasons"].get("foreign_trace_evidence") == len(excluded)
+
+
+def test_snapshot_still_rejects_a_thread_query_for_another_thread(tmp_path):
+    api = API()
+    api.thread_roots[0]["thread_id"] = "another-thread"
+    with pytest.raises(PipelineError, match="thread source query returned another thread"):
         triage_source.snapshot(source(), tmp_path, runner=api)
     assert not (tmp_path / "snapshot.json").exists()
-    assert not list((tmp_path / "conversations").glob("*.json"))
 
 
 def test_baseten_council_settings_record_models_and_reasoning(tmp_path):
@@ -1046,3 +1174,9 @@ def test_baseten_council_settings_record_models_and_reasoning(tmp_path):
     assert plan["reasoning"]["baseten"] == "none"
     assert plan["reasoning"]["zai-org/GLM-5.3-Flash"] == "low"
     assert triage.council_settings(tmp_path)["config"] == settings["config"]
+
+
+def test_baseten_aliases_match_the_default_council(tmp_path):
+    settings = triage.council_settings(tmp_path, judges=["baseten-deepseek-v4.1-flash", "baseten-glm-5.3-flash"])
+    assert [(j["provider"], j["model"]) for j in settings["config"]["judges"]] == [
+        (j["provider"], j["model"]) for j in triage.DEFAULT_COUNCIL["judges"]]

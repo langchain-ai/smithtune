@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -86,7 +86,7 @@ class FakeAdamParams:
 class FakeTrainer:
     run_id = "baseten-run-1"
 
-    def __init__(self, validation_losses=(1.0, 0.8, 0.9)) -> None:
+    def __init__(self, validation_losses=(1.0, 0.8, 0.9, 1.0, 1.1)) -> None:
         self.validation_losses = iter(validation_losses)
         self.forward_backward_sizes: list[int] = []
         self.forward_sizes: list[int] = []
@@ -182,7 +182,8 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
         "max_dropped_training_rows": 1,
         "effective_batch_size": 32,
         "max_epochs": 5,
-        "early_stopping_patience": 1,
+        "validation_every_steps": None,
+        "early_stopping_patience": None,
         "early_stopping_min_delta": 0.0,
         "seed": 42,
         "replicas": 1,
@@ -242,6 +243,7 @@ def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options
         replicas=2,
         spend_reserve_fraction=0.2,
         max_dropped_training_rows=0,
+        validation_every_steps=4,
     )
     assert provider.settings_from_options(options) == baseten.BasetenSFTSettings(
         max_epochs=2,
@@ -255,6 +257,7 @@ def test_settings_resolution_uses_baseten_defaults_and_retains_supported_options
         replicas=2,
         spend_reserve_fraction=0.2,
         max_dropped_training_rows=0,
+        validation_every_steps=4,
     )
 
 
@@ -408,6 +411,151 @@ def test_capability_preflight_refuses_a_missing_model():
         )
 
 
+def _capability_response(**overrides):
+    entry = {
+        "model_name": "Qwen/Qwen3.8-27B",
+        "max_seq_len": 262_144,
+        "max_enabled_seq_len": 262_144,
+        "max_context_length": 262_144,
+        "supports_vision_language": False,
+        "enabled": True,
+        "enablement_details": None,
+    }
+    entry.update(overrides)
+    return {"supported_models": [entry]}
+
+
+def _fetch_capability(response, required=131_072):
+    return baseten.fetch_model_capability(
+        "Qwen/Qwen3.8-27B",
+        required,
+        api_key="fake-key",
+        opener=lambda request, timeout: io.BytesIO(json.dumps(response).encode()),
+    )
+
+
+def test_capability_preflight_keeps_the_enablement_fields_for_an_enabled_model():
+    capability = _fetch_capability(_capability_response(max_enabled_seq_len=131_072))
+
+    assert capability.enabled is True
+    assert capability.max_seq_len == 262_144
+    assert capability.max_enabled_seq_len == 131_072
+    assert capability.enablement_details is None
+    assert asdict(capability)["max_enabled_seq_len"] == 131_072
+
+
+def test_capability_preflight_refuses_a_model_the_workspace_cannot_run():
+    response = _capability_response(
+        max_seq_len=32_768,
+        max_enabled_seq_len=0,
+        max_context_length=32_768,
+        enabled=False,
+        enablement_details={
+            "reason": "needs_approval",
+            "reason_detail": (
+                "This model is supported, but it requires hardware your "
+                "workspace is not currently approved for."
+            ),
+            "remediation": (
+                "Contact Baseten to have the required hardware approved for "
+                "your workspace."
+            ),
+        },
+    )
+
+    with pytest.raises(baseten.BasetenModelNotEnabled) as failure:
+        _fetch_capability(response, required=32_768)
+
+    message = str(failure.value)
+    assert "requires hardware your workspace is not currently approved for" in message
+    assert "Contact Baseten to have the required hardware approved" in message
+    assert failure.value.reason == "needs_approval"
+    assert failure.value.model == "Qwen/Qwen3.8-27B"
+    assert isinstance(failure.value, baseten.BasetenRuntimeError)
+
+
+def test_disabled_model_is_refused_even_with_a_sufficient_context_limit():
+    # The deprecated catalog ceiling alone would have cleared preflight.
+    response = _capability_response(enabled=False, enablement_details=None)
+
+    with pytest.raises(baseten.BasetenModelNotEnabled, match="not enabled for the model"):
+        _fetch_capability(response)
+
+
+@pytest.mark.parametrize("reason", ["loops_not_enabled", "a_reason_this_client_predates"])
+def test_unrecognized_enablement_reasons_are_reported_verbatim(reason: str):
+    response = _capability_response(
+        enabled=False, enablement_details={"reason": reason},
+    )
+
+    with pytest.raises(baseten.BasetenModelNotEnabled) as failure:
+        _fetch_capability(response)
+
+    assert failure.value.reason == reason
+    assert reason in str(failure.value)
+
+
+def test_enabled_sequence_length_below_the_request_is_refused():
+    response = _capability_response(max_enabled_seq_len=65_536)
+
+    with pytest.raises(
+        baseten.BasetenRuntimeError,
+        match="enabled for 65,536 tokens.*pass --max-seq-len 65536 to prepare",
+    ):
+        _fetch_capability(response, required=131_072)
+
+
+def test_enabled_sequence_length_at_the_request_is_accepted():
+    capability = _fetch_capability(
+        _capability_response(max_enabled_seq_len=131_072), required=131_072
+    )
+
+    assert capability.max_enabled_seq_len == 131_072
+
+
+def test_capability_preflight_accepts_a_response_without_the_enablement_fields():
+    response = {
+        "supported_models": [
+            {
+                "model_name": "Qwen/Qwen3.8-27B",
+                "max_context_length": 262_144,
+                "supports_vision_language": False,
+            }
+        ]
+    }
+
+    capability = _fetch_capability(response)
+
+    assert capability.max_context_length == 262_144
+    assert capability.enabled is None
+    assert capability.max_seq_len is None
+    assert capability.max_enabled_seq_len is None
+    assert capability.enablement_details is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enabled": "true"}, "invalid model enablement flag"),
+        ({"enabled": 1}, "invalid model enablement flag"),
+        ({"enabled": None}, "invalid model enablement flag"),
+        ({"max_enabled_seq_len": None}, "invalid max_enabled_seq_len"),
+        ({"max_enabled_seq_len": -1}, "invalid max_enabled_seq_len"),
+        ({"max_enabled_seq_len": True}, "invalid max_enabled_seq_len"),
+        ({"max_enabled_seq_len": "65536"}, "invalid max_enabled_seq_len"),
+        ({"max_seq_len": None}, "invalid max_seq_len"),
+        ({"max_seq_len": 1.5}, "invalid max_seq_len"),
+        ({"enabled": False, "enablement_details": []}, "invalid model enablement details"),
+        ({"enabled": False, "enablement_details": "needs_approval"}, "invalid model enablement details"),
+        ({"enabled": False, "enablement_details": {"reason": 7}}, "invalid model enablement details"),
+        ({"enabled": False, "enablement_details": {"remediation": " "}}, "invalid model enablement details"),
+    ],
+)
+def test_malformed_enablement_fields_are_rejected(overrides: dict, message: str):
+    with pytest.raises(baseten.BasetenRuntimeError, match=message):
+        _fetch_capability(_capability_response(**overrides))
+
+
 def test_capability_read_retries_a_transient_response_with_bounded_backoff():
     response = {
         "supported_models": [
@@ -447,6 +595,7 @@ def test_capability_read_retries_a_transient_response_with_bounded_backoff():
         ("seed", 7, "seed"),
         ("replicas", 2, "replicas"),
         ("max_dropped_training_rows", 0, "max_dropped_training_rows"),
+        ("validation_every_steps", 4, "validation_every_steps"),
     ],
 )
 def test_baseten_training_policy_is_configurable(
@@ -765,16 +914,20 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
 
     assert result["status"] == "completed"
     assert result["best_epoch"] == 2
+    assert result["best_step"] == 6
+    assert result["best_resumable_state_uri"] == "state://approved-run-state-epoch-2"
     assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-epoch-2"
-    assert result["last_resumable_state_uri"] == "state://approved-run-state-epoch-3"
-    assert result["stopped_early"] is True
-    assert trainer.forward_backward_sizes == [32, 32, 26] * 3
-    assert trainer.forward_sizes == [10, 10, 10]
-    assert len(trainer.optimizer_params) == 9
+    assert result["last_resumable_state_uri"] == "state://approved-run-state-epoch-5"
+    assert result["stopped_early"] is False
+    assert trainer.forward_backward_sizes == [32, 32, 26] * 5
+    assert trainer.forward_sizes == [10] * 5
+    assert len(trainer.optimizer_params) == 15
     assert trainer.save_state_names == [
         "approved-run-state-epoch-1",
         "approved-run-state-epoch-2",
         "approved-run-state-epoch-3",
+        "approved-run-state-epoch-4",
+        "approved-run-state-epoch-5",
     ]
     assert trainer.save_sampler_names == [
         "approved-run-sampler-epoch-1",
@@ -795,8 +948,248 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
         }
     ]
     assert json.loads((run_dir / "run-state.json").read_text())["status"] == "completed"
-    assert len(json.loads((run_dir / "epochs.json").read_text())) == 3
+    assert len(json.loads((run_dir / "epochs.json").read_text())) == 5
+    validations = json.loads((run_dir / "validations.json").read_text())
+    assert [item["step"] for item in validations] == [3, 6, 9, 12, 15]
+    assert all(item["epoch_end"] for item in validations)
     assert json.loads((run_dir / "result.json").read_text()) == result
+
+
+
+def test_plan_estimates_steps_from_all_assistant_targets_without_rendering(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    rows_path = tmp_path / "prepared/train.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    for row in rows:
+        row["messages"].extend([
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call"}]},
+            {"role": "assistant", "reasoning_content": "Consider the answer"},
+            {"role": "assistant", "content": ""},
+        ])
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def unexpected_call(*args, **kwargs):
+        raise AssertionError("free plan must not render or contact Baseten")
+
+    provider = baseten.BasetenProvider(
+        renderer_factory=unexpected_call, render_fn=unexpected_call,
+        service_factory=unexpected_call, capability_resolver=unexpected_call,
+    )
+    plan = provider.plan(tmp_path, "approved-run", baseten.BasetenSFTSettings(
+        max_epochs=2, validation_every_steps=4,
+    ))
+
+    assert plan["training_schedule"] == {
+        "training_units": 270,
+        "training_unit": "assistant_targets",
+        "estimate": True,
+        "steps_per_epoch": 9,
+        "max_optimizer_steps": 18,
+        "expected_validation_passes": 6,
+        "step_unit": "optimizer_updates",
+        "early_stopping_patience_unit": "epochs",
+    }
+
+
+def test_runtime_schedule_counts_retained_rendered_datums_before_provisioning(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[1.0])
+    service = FakeService(trainer)
+
+    def render(row, model, **kwargs):
+        index = int(row["_source"]["example_id"].split("-")[-1])
+        if index == 0:
+            return [_datum(1), _datum(131_073)]
+        if index < 90:
+            return [_datum(1) for _ in range(3)]
+        return [_datum(1)]
+
+    original_create = service.create_lora_training_client
+
+    def create(**kwargs):
+        schedule = json.loads((tmp_path / "run/plan.json").read_text())["training_schedule"]
+        assert schedule == {
+            "training_units": 267,
+            "training_unit": "rendered_datums",
+            "estimate": False,
+            "steps_per_epoch": 9,
+            "max_optimizer_steps": 9,
+            "expected_validation_passes": 1,
+            "step_unit": "optimizer_updates",
+            "early_stopping_patience_unit": "epochs",
+        }
+        return original_create(**kwargs)
+
+    service.create_lora_training_client = create
+    result = _train(_provider(service, FakeManagement(inactive=[True]), render_fn=render),
+                    tmp_path, baseten.BasetenSFTSettings(max_epochs=1))
+
+    assert result["completed_step"] == 9
+    assert result["split"]["train_rows"] == 89
+
+
+def test_step_validation_uses_global_intervals_and_deduplicates_epoch_boundaries(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[1.0, 0.9, 0.8, 0.7, 0.6, 0.5])
+    provider = _provider(FakeService(trainer), FakeManagement(inactive=[True]))
+
+    result = _train(provider, tmp_path, baseten.BasetenSFTSettings(
+        max_epochs=3, validation_every_steps=2,
+    ))
+
+    assert [(item["epoch"], item["step"]) for item in result["validations"]] == [
+        (1, 2), (1, 3), (2, 4), (2, 6), (3, 8), (3, 9),
+    ]
+    assert [item["step"] for item in result["epochs"]] == [3, 6, 9]
+    assert len(trainer.forward_sizes) == 6
+    assert trainer.save_state_names == [
+        f"approved-run-state-step-{step}" for step in (2, 3, 4, 6, 8, 9)
+    ]
+    assert json.loads((tmp_path / "run/validations.json").read_text()) == result["validations"]
+
+
+def test_step_validation_counts_optimizer_updates_after_accumulation(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[1.0, 0.9, 0.8])
+    boundaries = []
+    original_forward = trainer.forward
+
+    def forward(batch, loss):
+        boundaries.append((len(trainer.optimizer_params), sum(trainer.forward_backward_sizes)))
+        return original_forward(batch, loss)
+
+    trainer.forward = forward
+    result = _train(_provider(FakeService(trainer), FakeManagement(inactive=[True])),
+                    tmp_path, baseten.BasetenSFTSettings(
+                        max_epochs=1, validation_every_steps=1, microbatch_token_budget=10,
+                    ))
+
+    assert boundaries == [(1, 32), (2, 64), (3, 90)]
+    assert [item["step"] for item in result["validations"]] == [1, 2, 3]
+    assert len(trainer.forward_backward_sizes) > 3
+
+
+@pytest.mark.parametrize("patience", [None, 1])
+def test_mid_epoch_best_is_retained_and_only_opt_in_epoch_patience_stops_training(tmp_path: Path, patience):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[0.1, 0.8, 0.5, 0.7, 0.4, 0.9])
+    result = _train(_provider(FakeService(trainer), FakeManagement(inactive=[True])),
+                    tmp_path, baseten.BasetenSFTSettings(
+                        max_epochs=3 if patience is None else 5,
+                        validation_every_steps=2, early_stopping_patience=patience,
+                    ))
+
+    assert result["stopped_early"] is (patience is not None)
+    assert [item["validation_loss"] for item in result["epochs"]] == [0.8, 0.7, 0.9]
+    assert result["best_epoch"] == 1
+    assert result["best_step"] == 2
+    assert result["best_resumable_state_uri"] == "state://approved-run-state-step-2"
+    assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-step-2"
+    assert result["last_resumable_state_uri"] == "state://approved-run-state-step-9"
+    state = json.loads((tmp_path / "run/run-state.json").read_text())
+    assert state["best_step"] == 2
+    assert state["best_resumable_state_uri"] == result["best_resumable_state_uri"]
+    assert state["best_sampler_weights_uri"] == result["best_sampler_weights_uri"]
+
+
+@pytest.mark.parametrize("failure_at", ["validation", "state", "sampler", "budget", "interruption"])
+def test_step_validation_preserves_prior_coherent_best_on_later_failure(tmp_path: Path, failure_at):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=[0.5, 0.1])
+    now = 0.0
+    forward = trainer.forward
+    save_state = trainer.save_state
+    save_sampler = trainer.save_weights_for_sampler
+    validated = 0
+
+    def assert_prior_best():
+        saved = json.loads((tmp_path / "run/validations.json").read_text())
+        assert [item["step"] for item in saved] == [2]
+        state = json.loads((tmp_path / "run/run-state.json").read_text())
+        assert state["best_step"] == 2
+
+    def fail_forward(batch, loss):
+        nonlocal validated
+        validated += 1
+        if validated == 2:
+            assert_prior_best()
+            if failure_at == "validation":
+                raise RuntimeError("validation failed")
+            if failure_at == "interruption":
+                raise baseten.TerminationRequested("interrupted")
+        return forward(batch, loss)
+
+    def fail_state(name):
+        nonlocal now
+        if name.endswith("step-3"):
+            assert_prior_best()
+            if failure_at == "state":
+                raise RuntimeError("state failed")
+            if failure_at == "budget":
+                now = 8_100.0
+        return save_state(name)
+
+    def fail_sampler(name):
+        if name.endswith("step-3") and failure_at == "sampler":
+            assert_prior_best()
+            raise RuntimeError("sampler failed")
+        return save_sampler(name)
+
+    trainer.forward = fail_forward
+    trainer.save_state = fail_state
+    trainer.save_weights_for_sampler = fail_sampler
+    management = FakeManagement(inactive=[True])
+    provider = _provider(FakeService(trainer), management, monotonic=lambda: now)
+    settings = baseten.BasetenSFTSettings(
+        max_epochs=2, validation_every_steps=2, max_spend_usd=75.0, hourly_rate_usd=30.0,
+    )
+    if failure_at == "budget":
+        _train(provider, tmp_path, settings)
+    else:
+        exception = baseten.TerminationRequested if failure_at == "interruption" else RuntimeError
+        with pytest.raises(exception):
+            _train(provider, tmp_path, settings)
+
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["status"] == ("budget_stopped" if failure_at == "budget" else "failed")
+    assert result["best_epoch"] == 1
+    assert result["best_step"] == 2
+    assert result["best_resumable_state_uri"] == "state://approved-run-state-step-2"
+    assert result["best_sampler_weights_uri"] == "sampler://approved-run-sampler-step-2"
+    assert result["last_resumable_state_uri"] == result["best_resumable_state_uri"]
+    assert [item["step"] for item in result["validations"]] == [2]
+    assert len(trainer.forward_sizes) <= 2
+    assert trainer.closed is True
+    assert management.deactivated == ["baseten-run-1"]
+
+
+def test_validation_retry_stops_if_budget_expires_during_backoff(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer()
+    now = 0.0
+    attempts = 0
+
+    def forward(batch, loss):
+        nonlocal attempts
+        attempts += 1
+        raise urllib.error.HTTPError("fake", 503, "unavailable", {}, None)
+
+    def backoff(seconds):
+        nonlocal now
+        now = 8_100.0
+
+    trainer.forward = forward
+    provider = _provider(FakeService(trainer), FakeManagement(inactive=[True]),
+                         monotonic=lambda: now, sleeper=backoff)
+    result = _train(provider, tmp_path, baseten.BasetenSFTSettings(
+        validation_every_steps=1, max_spend_usd=75.0, hourly_rate_usd=30.0,
+    ))
+
+    assert result["status"] == "budget_stopped"
+    assert attempts == 1
+    assert len(trainer.optimizer_params) == 1
+    assert result["validations"] == []
+    assert result["best_step"] is None
 
 
 def test_audit_hashes_distinguish_base_models_with_identical_rendering_and_settings(
@@ -837,7 +1230,7 @@ def test_strict_lowest_loss_checkpoint_is_separate_from_min_delta_patience(
         FakeService(trainer), FakeManagement(inactive=[True])
     )
     settings = replace(
-        baseten.BasetenSFTSettings(), early_stopping_min_delta=0.1
+        baseten.BasetenSFTSettings(), early_stopping_min_delta=0.1, early_stopping_patience=1
     )
 
     result = _train(provider, tmp_path, settings)
@@ -1223,6 +1616,64 @@ def test_provisioning_failure_cleans_every_run_under_the_recorded_session(tmp_pa
     assert management.deactivated == ["session-run-1", "session-run-2"]
 
 
+def test_provisioning_failure_records_the_sessions_only_run(tmp_path: Path):
+    _write_prepared_dataset(tmp_path)
+    service = FakeService(FakeTrainer())
+
+    def fail_create(**kwargs):
+        raise RuntimeError("Trainer deployment d1 entered terminal-failure state 'FAILED'")
+
+    service.create_lora_training_client = fail_create
+    management = FakeManagement(session_runs=["session-run-1"], inactive=[True])
+
+    with pytest.raises(
+        baseten.BasetenRuntimeError,
+        match="provisioning failed: Trainer deployment d1 entered terminal-failure",
+    ):
+        _train(_provider(service, management), tmp_path)
+
+    state = json.loads((tmp_path / "run" / "run-state.json").read_text())
+    result = json.loads((tmp_path / "run" / "result.json").read_text())
+    assert state["baseten_run_id"] == result["baseten_run_id"] == "session-run-1"
+    assert state["active_seconds"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        (429, {"Retry-After": "30"}, "Baseten has no capacity to provision this trainer "
+         "(HTTP 429): no H100:4 capacity; retry after 30s"),
+        (429, {}, "Baseten has no capacity to provision this trainer "
+         "(HTTP 429): no H100:4 capacity; retry later"),
+        (403, {}, "Baseten refused to create the trainer (HTTP 403): no H100:4 capacity"),
+    ],
+)
+def test_trainer_creation_http_errors_repeat_basetens_reason(
+    tmp_path: Path, status, headers, expected
+):
+    import httpx
+
+    _write_prepared_dataset(tmp_path)
+    service = FakeService(FakeTrainer())
+    request = httpx.Request("POST", "https://api.baseten.co/v1/loops/trainers")
+    response = httpx.Response(
+        status, json={"detail": "no H100:4 capacity"}, headers=headers, request=request
+    )
+
+    def fail_create(**kwargs):
+        raise httpx.HTTPStatusError("HTTP error", request=request, response=response)
+
+    service.create_lora_training_client = fail_create
+    management = FakeManagement(session_runs=[], inactive=[])
+
+    with pytest.raises(baseten.BasetenRuntimeError) as failure:
+        _train(_provider(service, management), tmp_path)
+
+    assert str(failure.value) == expected
+    assert "api.baseten.co" not in str(failure.value)
+    assert isinstance(failure.value.__cause__, httpx.HTTPStatusError)
+
+
 def test_primary_and_cleanup_failures_remain_visible_together(tmp_path: Path):
     _write_prepared_dataset(tmp_path)
     trainer = FakeTrainer()
@@ -1563,7 +2014,8 @@ def _install_renderer_output(monkeypatch: pytest.MonkeyPatch, tokens=None, weigh
 
 def _row() -> dict:
     return bound_row({
-        "messages": [{"role": "user", "content": "Hello"}],
+        "messages": [{"role": "user", "content": "Hello"},
+                     {"role": "assistant", "content": "Hi"}],
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"},
     })
@@ -1608,7 +2060,7 @@ def _write_raw_dataset(root: Path, *, count: int) -> None:
         "id": "dataset-id", "name": "alternate-model-test", "example_count": count,
     }))
 
-    from test_example_tools import write_empty_tool_snapshot
+    from tests.test_example_tools import write_empty_tool_snapshot
     write_empty_tool_snapshot(root, examples)
 
 

@@ -1,1 +1,1 @@
-"""Baseten provider modules; implementations are imported on demand."""
+"""Baseten training, sampling, and deployment integration."""

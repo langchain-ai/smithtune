@@ -9,9 +9,9 @@ from smithtune.dataset import prepare_sft_rows
 from smithtune.evaluation.replay import build_replay_cases, score_replay_candidate, _judge_input
 from smithtune.providers.base import PipelineError
 from smithtune import rendering
-from test_hf_rendering import _tokenizer, _loss_spans
-from test_training_dependency import CharacterTokenizer
-from trajectory_fixtures import run_items, items
+from tests.test_hf_rendering import _tokenizer, _loss_spans
+from tests.test_training_dependency import CharacterTokenizer
+from tests.trajectory_fixtures import run_items, items
 
 
 def tool(kind='string', name='search'):
@@ -145,7 +145,7 @@ def test_fireworks_real_loader_and_eager_validation_share_target_masks(tmp_path,
     renderer = get_renderer(DEFAULT_MODEL.renderer, tokenizer)
     path = tmp_path / 'conversations.jsonl'
     path.write_text(json.dumps(row) + '\n')
-    monkeypatch.setattr(sft_loop, '_init_render_worker', lambda *_: None)
+    monkeypatch.setattr(sft_loop, '_init_render_worker', lambda *_, **kwargs: None)
     monkeypatch.setitem(sft_loop._worker_state, 'renderer', renderer)
     monkeypatch.setitem(sft_loop._worker_state, 'max_seq_len', DEFAULT_MODEL.max_seq_len)
     monkeypatch.setattr(resource_autosizing, 'select_render_worker_count', lambda **_: 0)

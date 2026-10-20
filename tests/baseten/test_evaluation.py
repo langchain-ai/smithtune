@@ -1,5 +1,5 @@
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 import copy
 import io
 import json
@@ -14,7 +14,7 @@ from smithtune.evaluation import replay as evaluation
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
-from test_pipeline import loaded_contract, tool_call, write_manifest
+from tests.test_pipeline import loaded_contract, tool_call, write_manifest
 
 
 def endpoint():
@@ -195,7 +195,8 @@ def test_cli_plans_evaluates_and_resumes_existing_baseten_endpoint(tmp_path, mon
     cli.main(arguments("eval-plan", data, output))
     assert json.loads(capsys.readouterr().out)["baseten_endpoint"] == identity
     assert requests == []
-    argv = [*arguments("evaluate", data, output), "--base-model", "base-checkpoint", "--confirm", "--concurrency", "1"]
+    argv = [*arguments("evaluate", data, output), "--base-model", "base-checkpoint", "--confirm", "--concurrency", "1",
+            "--judge-model", "anthropic/claude-sonnet-5"]
     cli.main(argv)
     summary = json.loads(capsys.readouterr().out)
     assert summary["baseten_endpoint"] == identity

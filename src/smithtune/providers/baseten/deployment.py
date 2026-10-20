@@ -221,7 +221,7 @@ def _smoke(endpoint: BasetenEndpoint, checkpoint_name: str) -> int:
 def deploy(run_dir: Path, *, accelerator: str, max_seq_len: int,
            timeout: float = 1800, confirm: bool) -> dict:
     """Deploy or resume one owned endpoint; failed creates are never blindly retried."""
-    _require_confirm(confirm, "Baseten dedicated deployment and smoke-test inference")
+    _require_confirm(confirm, "Baseten dedicated deployment and smoke-test inference", provider="Baseten")
     settings = _settings(accelerator, max_seq_len, timeout)
     identity = _training_identity(run_dir)
     path = run_dir / "endpoint.json"
@@ -284,7 +284,7 @@ def deploy(run_dir: Path, *, accelerator: str, max_seq_len: int,
 @exclusive_output("run_dir")
 def undeploy(run_dir: Path, *, confirm: bool) -> dict:
     """Stop only the recorded serving deployment, retaining checkpoint and config."""
-    _require_confirm(confirm, "Baseten deployment deactivation")
+    _require_confirm(confirm, "Baseten deployment deactivation", provider="Baseten")
     receipt = _receipt(run_dir)
     endpoint = _endpoint(receipt)
     try:
@@ -329,7 +329,7 @@ def plan(run_dir: Path, *, accelerator: str | None = None, max_seq_len: int | No
 def temporary(run_dir: Path, *, accelerator: str | None = None, max_seq_len: int | None = None,
               timeout: float = 1800, confirm: bool):
     """Keep the same resource IDs on resume and release owned compute on exit."""
-    _require_confirm(confirm, "temporary Baseten dedicated deployment and evaluation")
+    _require_confirm(confirm, "temporary Baseten dedicated deployment and evaluation", provider="Baseten")
     with output_lock(run_dir):
         config = plan(run_dir, accelerator=accelerator, max_seq_len=max_seq_len,
                       timeout=timeout)

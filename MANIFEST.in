@@ -1,4 +1,4 @@
 include CONTRIBUTING.md
 recursive-include tests *.py *.json
-include docs/trace-labeling-audit.md
+include LICENSE
 include docs/data-rights-and-permitted-use.md

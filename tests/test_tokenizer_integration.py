@@ -2,16 +2,18 @@
 
 from dataclasses import replace
 import copy
+import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
 from smithtune.hf_rendering import _normalize_messages
-from smithtune.rendering import load_training_renderer, render_row_tokens, resolve_rendering_model
+from smithtune.rendering import load_training_renderer, render_row_tokens, replay_prompt, resolve_rendering_model
 
 
 pytestmark = pytest.mark.skipif(
@@ -128,3 +130,58 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
     for sentinel in ("FIRST_REASON", "FIRST_ANSWER", "FOLLOWUP_ANSWER", "LAST_REASON"):
         assert target.count(sentinel) == 1
     assert "FIRST_USER" not in target and "SECOND_USER" not in target
+
+
+@pytest.mark.parametrize("tool_call", [False, True])
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
+def test_fireworks_glm_replay_uses_native_prompts_and_parses_completions(tmp_path, tool_call, stop_reason, effort):
+    from smithtune.providers.fireworks.sampling import FireworksReplaySampler
+
+    model = replace(fireworks.MODEL_SPECS["glm-5p3-flash"], reasoning_effort=effort)
+    renderer = load_training_renderer(model)
+    tools = [{"type": "function", "function": {
+        "name": "weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }}]
+    messages = [
+        {"role": "user", "content": "Paris weather?"},
+        {"role": "assistant", "content": "Let me check.", "reasoning_content": "HISTORY_REASON"},
+        {"role": "user", "content": "Please continue."},
+    ]
+    prompt = replay_prompt(messages, tools, model, renderer).to_ints()
+    native_prompt = renderer.tokenizer.apply_chat_template(
+        messages, tools=tools, tokenize=True, return_dict=False,
+        add_generation_prompt=True, clear_thinking=False,
+        reasoning_effort=effort,
+    )
+    assert prompt == native_prompt
+    text = "Consider café 🐢 東京</think>Checking."
+    if tool_call:
+        text += '<tool_call>weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>'
+    if stop_reason == "stop":
+        text += "<|observation|>" if tool_call else "<|user|>"
+    tokens = renderer.tokenizer.encode(text, add_special_tokens=False)
+
+    def sample(**kwargs):
+        assert kwargs["prompt"].to_ints() == native_prompt
+        assert kwargs["sampling_params"].stop == renderer.get_stop_sequences()
+        return SimpleNamespace(result=lambda: SimpleNamespace(
+            sequences=[SimpleNamespace(tokens=tokens, stop_reason=stop_reason)],
+        ))
+
+    service = SimpleNamespace(
+        training_session_id="test-session",
+        create_sampling_client=lambda **kwargs: SimpleNamespace(sample=sample, close=lambda: None),
+    )
+    sampler = FireworksReplaySampler(model, "test-checkpoint", tmp_path, service=service, snapshot="test-snapshot")
+    with sampler:
+        candidate = sampler.generate("test-checkpoint", messages, 256, request_contract=SimpleNamespace(tools=tools))
+    assert candidate["sampling"]["format_valid"] is (stop_reason == "stop")
+    if stop_reason == "stop":
+        assert candidate["content"] == "Checking."
+        assert candidate["reasoning_content"] == "Consider café 🐢 東京"
+        if tool_call:
+            assert candidate["tool_calls"][0]["function"]["name"] == "weather"
+            assert json.loads(candidate["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+        else:
+            assert not candidate.get("tool_calls")

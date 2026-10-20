@@ -8,10 +8,10 @@ from uuid import UUID
 
 import pytest
 
-from smithtune import cli, curation, dataset, dataset_import, dataset_workflow, triage
+from smithtune import cli, dataset, dataset_import, dataset_workflow, triage
 from smithtune.dataset_artifacts import load_conversation
 from smithtune.providers.base import PipelineError
-from binding_fixtures import bound_example
+from tests.binding_fixtures import bound_example
 
 
 def uid(n):
@@ -29,7 +29,7 @@ def example(n, turns=1, **metadata):
 
 class API:
     def __init__(self, existing=()):
-        from test_curation import API as SourceAPI
+        from tests.test_curation import API as SourceAPI
 
         self.source = SourceAPI()
         self.existing = list(existing)
@@ -194,15 +194,15 @@ def test_missing_incoming_source_does_not_mark_complete(tmp_path):
 @pytest.mark.parametrize("targets", [["--name", "new", "--dataset-id", uid(200)]])
 def test_cli_rejects_conflicting_destinations(targets):
     with pytest.raises(SystemExit) as exc:
-        cli._parser().parse_args(["dataset", "create", *targets])
+        cli._parser().parse_args(["dataset", "push", *targets])
     assert exc.value.code == 2
 
 
 def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
     from smithtune.triage_source import load_snapshot
-    from test_triage import API as SourceAPI, source
+    from tests.test_triage import API as SourceAPI, source
 
-    dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), **{key: value for key, value in source().items() if key != "seed"})
+    dataset_workflow.run("pull", tmp_path, runner=SourceAPI(), no_triage=True, **{key: value for key, value in source().items() if key != "seed"})
     old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
     old.update(id=uid(1), dataset_id=uid(200))
     old["inputs"]["messages"] = old["inputs"]["messages"][:3]
@@ -218,7 +218,7 @@ def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
 
 
 def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypatch, capsys):
-    from test_triage import run
+    from tests.test_triage import run
 
     run(tmp_path)
     incoming, = triage.selected_examples(tmp_path)
@@ -242,7 +242,7 @@ def test_fresh_triage_updates_messages_and_contract_together(tmp_path, monkeypat
 
 
 def test_failed_triage_never_reaches_destination(tmp_path):
-    from test_triage import API as SourceAPI, source
+    from tests.test_triage import API as SourceAPI, source
 
     triage.run_triage(source(), tmp_path, runner=SourceAPI(), judge_call=lambda *_: {"keep": 1}, confirm=True, attempts=1)
     api = API()
@@ -285,7 +285,7 @@ def test_duplicate_incoming_cannot_create_second_example(tmp_path):
 
 
 def test_fresh_triage_can_label_unchanged_ordinary_example(tmp_path):
-    from test_triage import run
+    from tests.test_triage import run
 
     run(tmp_path)
     incoming, = triage.selected_examples(tmp_path)
@@ -296,37 +296,3 @@ def test_fresh_triage_can_label_unchanged_ordinary_example(tmp_path):
     result = triage.create_triaged_dataset(tmp_path, dataset_id=uid(200), confirm=True, runner=api)
     assert result["updated"] == 1
     assert api.writes[0][2]["metadata"]["smithtune_triage"] == incoming["metadata"]["smithtune_triage"]
-
-
-def test_failed_upload_retains_completed_bounded_downloads(tmp_path, monkeypatch):
-    from threading import Event
-
-    from test_curation import API as SourceAPI, root, select
-
-    select(tmp_path, SourceAPI([[root(n, f"thread-{n}") for n in range(1, 6)]]))
-    second_started = Event()
-    fetched = []
-
-    def fetch(workspace, project, item, **kwargs):
-        fetched.append(item["id"])
-        if item["id"] == "thread-1":
-            assert second_started.wait(5)
-        else:
-            second_started.set()
-        value = example(1)
-        return {"messages": value["inputs"]["messages"], "source": value["metadata"]["smithtune_source"],
-                "training_error": None, "trace_ids": [uid(1)]}
-
-    monkeypatch.setattr(curation, "_fetch_trajectory", fetch)
-    api = API()
-
-    def fail(*args):
-        raise subprocess.CalledProcessError(1, "langsmith", stderr="HTTP 504")
-
-    api.before_write = fail
-    with pytest.raises(PipelineError, match="HTTP 504"):
-        curation._import_selection(selection=tmp_path / "selection.json", dataset_id=uid(200), concurrency=2, runner=api)
-    assert set(fetched) == {"thread-1", "thread-2"}
-    saved = [load_conversation(path) for path in (tmp_path / "conversations").glob("*.json")]
-    assert {item["example"]["metadata"]["source_scope_id"] for item in saved} == set(fetched)
-    assert len(api.writes) == 1

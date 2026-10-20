@@ -1,6 +1,6 @@
 """Sampler routing, training handoff, and durable replay integration."""
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 
 import json
 from types import SimpleNamespace
@@ -13,8 +13,8 @@ from smithtune.evaluation import replay as evaluation
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.baseten import sampling as baseten_sampling
 from smithtune.providers.base import PipelineError
-from test_baseten_evaluation import replay_data
-from test_baseten_provider import FakeManagement, FakeService, FakeTrainer, _provider, _write_prepared_dataset
+from tests.baseten.test_evaluation import replay_data
+from tests.baseten.test_provider import FakeManagement, FakeService, FakeTrainer, _provider, _write_prepared_dataset
 
 
 CHECKPOINT = "bt://loops:run123/sampler_weights/best-epoch-2"
@@ -62,7 +62,8 @@ def test_default_standalone_evaluation_routes_best_checkpoint_to_sampler(tmp_pat
     sampler = object()
     constructor = Mock(return_value=sampler)
     evaluate = Mock(return_value={"serving_mode": "sampler"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+    # The default judge runs on Baseten Model APIs.
+    monkeypatch.setenv("BASETEN_API_KEY", "test-only")
     monkeypatch.setattr(baseten_sampling, "BasetenReplaySampler", constructor)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", evaluate)
     monkeypatch.setattr(cli.baseten_deployment, "load_endpoint", Mock(side_effect=AssertionError("unexpected endpoint")))
@@ -86,7 +87,7 @@ def test_standalone_preflight_never_constructs_sampler_on_failure(tmp_path, monk
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     args = ["evaluate", "--provider", "baseten", "--run-dir", str(run), "--data-dir", str(data)]
     if failure == "missing_judge":
-        args.append("--confirm")
+        args += ["--confirm", "--judge-model", "anthropic/claude-sonnet-5"]
     with pytest.raises(SystemExit):
         cli.main(args)
     constructor.assert_not_called()
@@ -160,9 +161,15 @@ def test_training_cli_forwards_requested_replay_settings(tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize("replay_fails", [False, True])
-def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monkeypatch, replay_fails):
+@pytest.mark.parametrize("interval", [None, 2])
+def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monkeypatch, replay_fails, interval):
     data = training_data(tmp_path, monkeypatch)
-    trainer = FakeTrainer(validation_losses=(1.0, 0.8, 0.9))
+    trainer = FakeTrainer(validation_losses=(1.0, 0.8, 0.9) if interval is None else (1.0, 0.8, 0.1, 0.9))
+    expected_checkpoint = (
+        "sampler://approved-run-sampler-epoch-2" if interval is None
+        else "sampler://approved-run-sampler-step-4"
+    )
+    expected_step = 6 if interval is None else 4
     service = FakeService(trainer)
     management = FakeManagement(inactive=[True])
     provider = _provider(service, management)
@@ -176,17 +183,20 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
 
     def sampler(model, checkpoint, output):
         assert trainer.closed and management.deactivated == [trainer.run_id]
-        assert checkpoint == "sampler://approved-run-sampler-epoch-2"
+        assert checkpoint == expected_checkpoint
         assert output == run / "replay"
         assert json.loads((run / "result.json").read_text())["status"] == "completed"
         events.append("sampler")
         return object()
 
     def replay(*args, **kwargs):
-        assert args[2] == "sampler://approved-run-sampler-epoch-2"
+        assert args[2] == expected_checkpoint
         assert kwargs["base_model"] == baseten.DEFAULT_MODEL.base_model
         assert kwargs["confirm"] is True
-        assert kwargs["training"] == {"parent_training_run_id": "approved-run", "checkpoint_epoch": 2}
+        assert kwargs["training"] == {
+            "parent_training_run_id": "approved-run", "checkpoint_epoch": 2,
+            "checkpoint_step": expected_step,
+        }
         events.append("replay")
         if replay_fails:
             raise PipelineError("judge failed after training")
@@ -196,15 +206,17 @@ def test_train_replays_best_checkpoint_only_after_trainer_cleanup(tmp_path, monk
     monkeypatch.setattr(baseten_sampling, "BasetenReplaySampler", sampler)
     monkeypatch.setattr(evaluation, "run_replay_evaluation", replay)
     options = dict(confirm=True, init_from_checkpoint=None, replay=REPLAY)
+    settings = baseten.BasetenSFTSettings(max_epochs=3 if interval is None else 2,
+                                         validation_every_steps=interval)
     if replay_fails:
         with pytest.raises(PipelineError, match="after training"):
-            provider.train(data, run, "approved-run", baseten.BasetenSFTSettings(), **options)
+            provider.train(data, run, "approved-run", settings, **options)
     else:
-        provider.train(data, run, "approved-run", baseten.BasetenSFTSettings(), **options)
+        provider.train(data, run, "approved-run", settings, **options)
     result = json.loads((run / "result.json").read_text())
     assert result["status"] == "completed"
     assert result["best_epoch"] == 2
-    assert result["last_resumable_state_uri"].endswith("epoch-3")
+    assert result["last_resumable_state_uri"].endswith("epoch-3" if interval is None else "step-6")
     assert result["replay_status"] == ("incomplete" if replay_fails else "completed")
     assert json.loads((run / "run-state.json").read_text())["replay_status"] == result["replay_status"]
     assert events == ["calibrate", "sampler", "replay"]

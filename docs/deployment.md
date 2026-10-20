@@ -16,16 +16,16 @@ run_dir='./runs/my-sft'
 data_dir='./data/my-sft'
 ```
 
-Install the optional deployment tools:
+Add the deployment tools, keeping the council support from the README installation:
 
 ```bash
-uv tool install --upgrade --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/main/overrides.txt \
-  'smithtune[baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git'
+uv tool install --force --python 3.12 \
+  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.3/overrides.txt \
+  'smithtune[deepagents,baseten-deploy] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.3'
 ```
 
-Set `BASETEN_API_KEY`. Evaluation also requires `LANGSMITH_API_KEY` for dataset
-access and experiment publication, plus `ANTHROPIC_API_KEY` for the default judge.
+Set `BASETEN_API_KEY`; the default judge also uses it. Evaluation also requires
+`LANGSMITH_API_KEY` for dataset access and experiment publication.
 Supported Baseten models are public and do not require a Hugging Face token.
 Choose GPUs explicitly: `H200:1`
 below is an example, not a verified allocation for every model.
@@ -69,8 +69,8 @@ outcome without saved IDs, inspect Baseten before retrying. Keep the receipt.
 ### Evaluate an existing Baseten endpoint
 
 After [deploying your Loops checkpoint](https://docs.baseten.co/loops/deploy-checkpoints),
-evaluate its dedicated chat endpoint using `BASETEN_API_KEY`, `LANGSMITH_API_KEY`,
-and, for the default judge, `ANTHROPIC_API_KEY`:
+evaluate its dedicated chat endpoint using `BASETEN_API_KEY` (also used by the
+default judge) and `LANGSMITH_API_KEY`:
 
 ```bash
 smithtune evaluate \
@@ -93,15 +93,17 @@ lower of that limit and the preparation limit, including the output budget.
 Use `eval-plan` with the same data and endpoint options, without `--confirm`, to
 preview cases. Add `--base-model '<served-base-model-name>'` to compare a base
 route available on the **same endpoint**. Open the printed LangSmith comparison link to review results; rerun the same
-command to resume. No Fireworks key is needed with an Anthropic judge.
+command to resume. No Fireworks key is needed with the default Baseten judge or an Anthropic judge.
 This path uses an existing deployment and leaves it running; manage externally
 created deployments in Baseten. Training support alone does not verify a model's
 serving configuration.
 
 ## Deploy a Fireworks checkpoint
 
-Install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) and set
-`FIREWORKS_API_KEY`. Use a Fireworks training run.
+Install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl) **1.8.5 or
+newer** (`firectl version`; upgrade with `firectl upgrade`) and set
+`FIREWORKS_API_KEY`. Use a Fireworks training run. `smithtune doctor` reports the
+installed firectl version and whether automatic shape selection is available.
 
 Use `deploy` when you want an endpoint for repeated use. It automatically promotes
 the selected checkpoint to a named Fireworks model, then starts the endpoint;
@@ -113,30 +115,58 @@ deploy -> use endpoint -> undeploy
 ```
 
 ```bash
-run_dir='runs/my-sft'
+run_dir='./runs/my-sft'
 account_id='<your-fireworks-account>'
-run_id='my-sft'
+output_model_id='my-sft'
 deployment_id='my-sft'
-deployment_shape='<compatible-deployment-shape>'
+
+# Preview: shows the model, whether it is promoted yet, and the deployment shape.
+smithtune deploy --provider fireworks \
+  --run-dir "$run_dir" --account-id "$account_id" \
+  --output-model-id "$output_model_id" --deployment-id "$deployment_id"
 
 smithtune deploy --provider fireworks \
   --run-dir "$run_dir" --account-id "$account_id" \
-  --output-model-id "$run_id" --deployment-id "$deployment_id" \
-  --deployment-shape "$deployment_shape" --confirm
+  --output-model-id "$output_model_id" --deployment-id "$deployment_id" --confirm
 ```
 
-`--account-id` must be the account that owns the training checkpoint. A matching
-saved promotion is reused, including one created with standalone `promote`.
-If deployment creation fails after promotion succeeds, retrying does not promote
-again. An existing deployment or a promotion with an uncertain outcome still
-needs inspection in Fireworks before retrying.
+**Deployment shape.** A shape fixes the hardware and serving configuration. By
+default, `deploy` promotes the checkpoint first (the model must exist before
+Fireworks can match shapes for it), then runs
+`firectl deployment-shape-version match --account-id <account> --model accounts/<account>/models/<output-model-id>`
+and uses the first validated shape it returns. That list is already restricted to
+shapes your account can deploy and excludes Multi-LoRA-only shapes, so it fits a
+live-merge deployment. The chosen shape and the alternatives are saved in
+`"$run_dir/endpoint.json"`. Once the model is promoted, the preview shows the
+shape it will use. To choose yourself, pass `--deployment-shape <shape>`, or
+`--deployment-shape default` to let Fireworks pick (firectl 1.8.8+).
 
-Standalone `smithtune promote --run-dir "$run_dir" --output-model-id "$run_id" --confirm`
-remains available to register a model without starting an endpoint.
+**Coding agents.** firectl refuses to create or delete deployments when it runs
+inside an AI agent (Claude Code, Cursor, and others). From an agent, `deploy
+--confirm` promotes the checkpoint, matches the shape, and then stops with the
+exact `smithtune deploy ... --deployment-shape <shape> --confirm` command to run
+in your own terminal; `undeploy` does the same. The printed command pins the
+matched shape, so it also works with firectl older than 1.8.5. If your team
+allows agents to create deployments on the account, set
+`FIRECTL_AGENT_SAFE_ACCOUNTS=<account>` (firectl's own allowlist). firectl never
+lets agents delete deployments, even on agent-safe accounts, so `undeploy`
+always needs a person.
+
+**Readiness.** A deployment can report `READY` while still waiting for capacity.
+`deploy` waits until `replica_stats.ready_replica_count > 0` before its smoke test.
+`--deployment-timeout` (default 1800 seconds) covers deployment creation and
+readiness polling together, after promotion and shape selection. If startup times
+out, it saves the endpoint details and prints cleanup guidance. A creation timeout
+has an unknown outcome: inspect the deployment before retrying.
+
+`--account-id` must be the account that owns the training checkpoint. A matching
+saved promotion is reused. If deployment creation fails after promotion
+succeeds, retrying does not promote again. An existing deployment or a promotion with an uncertain outcome still
+needs inspection in Fireworks before retrying.
 
 For replay, use [`evaluate --run-dir`](../README.md#evaluate-a-trained-model). The serverless sampler
 uses the saved training checkpoint independently of this production endpoint.
 
 ```bash
-smithtune undeploy --account-id "$account_id" --deployment-id "$deployment_id" --confirm
+smithtune undeploy --provider fireworks --account-id "$account_id" --deployment-id "$deployment_id" --confirm
 ```

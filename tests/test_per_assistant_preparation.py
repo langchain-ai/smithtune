@@ -8,8 +8,8 @@ from smithtune import dataset
 from smithtune.artifacts import _json_dump, _load_jsonl
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks.provider import DEFAULT_MODEL
-from binding_fixtures import bound_example
-from test_assistant_bindings import example as changing_example
+from tests.binding_fixtures import bound_example
+from tests.test_assistant_bindings import example as changing_example
 
 
 def example(index, *, thread=None, project='project-1'):
@@ -27,7 +27,7 @@ def write_empty_tool_snapshot(root, examples, dataset_id='dataset-id', workspace
 
 
 def test_prepare_exported_bindings_offline_and_override_preserves_evidence(tmp_path, monkeypatch):
-    from test_pipeline import write_raw
+    from tests.test_pipeline import write_raw
     from smithtune.bindings import tool_contract
     value, _ = changing_example()
     write_raw(tmp_path, [value])
@@ -64,7 +64,7 @@ def test_invalid_target_schema_excludes_whole_conversation():
 
 
 def test_automatic_capture_uses_same_verified_mapping(tmp_path):
-    from curation_fakes import API, SOURCE
+    from tests.curation_fakes import API, SOURCE
     api = API()
     value, _ = changing_example()
     del value['metadata']['smithtune_source']
@@ -80,7 +80,7 @@ def test_old_prepared_meaning_requires_repreparation():
 
 
 def test_unbound_export_reports_mapping_failures_and_preserves_other_examples():
-    from curation_fakes import API, SOURCE
+    from tests.curation_fakes import API, SOURCE
     api = API()
     value, _ = changing_example()
     del value['metadata']['smithtune_source']
@@ -94,7 +94,7 @@ def test_unbound_export_reports_mapping_failures_and_preserves_other_examples():
 
 def test_interrupted_binding_capture_reuses_completed_examples(tmp_path, monkeypatch):
     from smithtune import curation
-    from test_assistant_bindings import example as source_example
+    from tests.test_assistant_bindings import example as source_example
     first, _ = source_example()
     source = first['metadata']['smithtune_source']
     second = copy.deepcopy(first)
@@ -128,8 +128,8 @@ def test_interrupted_binding_capture_reuses_completed_examples(tmp_path, monkeyp
 def test_pull_upload_prepare_and_replay_preserve_changing_tools(tmp_path, monkeypatch, triaged):
     from smithtune import dataset_workflow, triage_source
     from smithtune.evaluation.replay import build_replay_cases
-    from curation_fakes import API, SOURCE
-    from test_pipeline import write_raw
+    from tests.curation_fakes import API, SOURCE
+    from tests.test_pipeline import write_raw
     api = API()
     def judge(_judge, messages, _tokens):
         import json
@@ -137,9 +137,11 @@ def test_pull_upload_prepare_and_replay_preserve_changing_tools(tmp_path, monkey
         assert [len(b['tools']) for b in evidence['untrusted_assistant_tool_bindings']] == [1, 2, 0]
         return {'keep': 1, 'reason': 'Complete answer.'}
     directory = tmp_path / 'curation'
-    result = dataset_workflow.run('create', directory, runner=api, judge_call=judge, confirm=True,
-                                  name='changing-tools', filter='eq(name,"agent")', **SOURCE,
-                                  **({'rules': ['Keep complete answers.']} if triaged else {}))
+    dataset_workflow.run('pull', directory, runner=api, filter='eq(name,"agent")', no_triage=not triaged, **SOURCE)
+    if triaged:
+        dataset_workflow.run('triage', directory, runner=api, judge_call=judge, confirm=True,
+                             rules=['Keep complete answers.'])
+    result = dataset_workflow.run('push', directory, runner=api, confirm=True, name='changing-tools')
     assert result['created'] == 1
     frozen = triage_source.load_snapshot(directory)
     uploaded, = api.examples.values()
@@ -178,7 +180,7 @@ def test_existing_dataset_requires_unchanged_tool_history(change):
 def test_completed_binding_cache_rejects_changed_identity_or_content(tmp_path, monkeypatch, change):
     import json
     from smithtune.inference_contract import json_sha256
-    from test_pipeline import write_raw
+    from tests.test_pipeline import write_raw
     unbound = example(1)
     del unbound['metadata']['smithtune_source']
     write_raw(tmp_path, [unbound])
@@ -205,7 +207,7 @@ def test_completed_binding_cache_rejects_changed_identity_or_content(tmp_path, m
 
 def test_binding_capture_retries_transient_source_reads(monkeypatch):
     import subprocess
-    from curation_fakes import API, SOURCE
+    from tests.curation_fakes import API, SOURCE
     from smithtune import triage_source
     api = API()
     value, _ = changing_example()

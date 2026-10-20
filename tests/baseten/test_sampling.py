@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune.providers.baseten import sampling as sampling
+from smithtune.providers.baseten import sampling
 from smithtune.artifacts import _json_dump
 from smithtune.providers.base import PipelineError
 from smithtune.providers.baseten.provider import DEFAULT_MODEL
-from test_pipeline import write_manifest
+from tests.test_pipeline import write_manifest
 
 
 CHECKPOINT = "bt://loops:run-1/sampler_weights/best-2"

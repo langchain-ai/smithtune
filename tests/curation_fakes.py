@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
-from test_assistant_bindings import example
-from trajectory_fixtures import run_items
+from tests.test_assistant_bindings import example
+from tests.trajectory_fixtures import run_items
 
 
 def uid(n):
@@ -58,7 +58,7 @@ class API:
         elif route.startswith('/api/v1/sessions/'):
             value = {'id': PROJECT, 'start_time': '2026-08-01T00:00:00+00:00'}
         elif route == '/v1/trajectory':
-            assert body['include'] == {'system_messages': True}
+            assert body['include'] == {'system_messages': True, 'tool_definitions': True}
             self.trajectory_requests += 1
             offset = int(body.get('cursor', '0'))
             assert body['format'] == 'ui'

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from binding_fixtures import bound_row, bound_example
+from tests.binding_fixtures import bound_row, bound_example
 
 import copy
 import io
@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -16,7 +17,7 @@ import pytest
 
 from smithtune import artifacts, capabilities
 from smithtune import dataset as dataset_ops
-from smithtune.evaluation import replay as replay
+from smithtune.evaluation import replay
 from smithtune import inference as inference_transport
 from smithtune import inference_contract
 from smithtune import cli as pipeline
@@ -65,7 +66,7 @@ def write_raw(root: Path, examples: list[dict], dataset_id: str = "dataset-id", 
     if not any(part.get("type") == "tool_call" for ex in examples
                for msg in ex["inputs"]["messages"] if isinstance(msg["content"], list)
                for part in msg["content"]):
-        from test_example_tools import write_empty_tool_snapshot
+        from tests.test_example_tools import write_empty_tool_snapshot
         write_empty_tool_snapshot(root, examples, dataset_id, workspace_id)
 
 
@@ -177,70 +178,6 @@ def test_download_dataset_pages_past_one_hundred(tmp_path: Path):
     assert all(any("dataset-id" in argument for argument in command) for command in commands)
     dataset_ops.validate_trajectories(returned, 205)
     assert all(row["_source"]["source_scope_id"] for row in dataset_ops.prepare_sft_rows(returned))
-
-
-def test_capture_contract_fetches_raw_invocation_parameters(tmp_path: Path):
-    run = {
-        "id": "run-id",
-        "trace_id": "trace-id",
-        "session_id": "project-id",
-        "name": "ChatModel",
-        "run_type": "llm",
-        "start_time": "2026-09-03T12:00:00Z",
-        "extra": {
-            "metadata": {"ls_provider": "provider", "ls_model_name": "model"},
-            "invocation_params": {
-                "temperature": 0,
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "lookup",
-                            "description": "Look up a value.",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    }
-                ],
-            },
-        },
-    }
-    commands = []
-
-    def runner(command, capture=False):
-        if not command[2].startswith("/api/v1/sessions/"):
-            commands.append(command)
-        if command[2] == "/api/v1/runs/run-id":
-            return SimpleNamespace(stdout=json.dumps(run))
-        if command[2].startswith("/api/v1/sessions/"):
-            return SimpleNamespace(stdout=json.dumps({"id": command[2].rsplit("/", 1)[1],
-                                                      "start_time": "2026-09-01T00:00:00Z"}))
-        body = json.loads(command[command.index("--body") + 1])
-        if body.get("ids") == ["trace-id"] or body.get("is_root"):
-            result = {"id": "trace-id", "session_id": "project-id",
-                      "extra": {"metadata": {"thread_id": "thread-id"}}}
-        else:
-            result = run
-        from test_tool_capture import page
-        return SimpleNamespace(stdout=json.dumps(page([result])))
-
-    output = tmp_path / "contract.json"
-    summary = dataset_ops.capture_inference_contract(
-        "workspace-id",
-        "run-id",
-        output,
-        runner=runner,
-    )
-    contract = inference_contract.load_inference_contract(output)
-    request_body = json.loads(commands[1][commands[1].index("--body") + 1])
-
-    assert commands[1][:3] == ["langsmith", "api", "/api/v2/runs/query"]
-    assert commands[0][commands[0].index("--workspace") + 1] == "workspace-id"
-    assert request_body["ids"] == ["trace-id"]
-    assert "EXTRA" in request_body["selects"]
-    assert "INPUTS" not in request_body["selects"]
-    assert "system_prompt" not in json.loads(output.read_text())
-    assert summary["contract_sha256"] == contract.contract_sha256
-    assert summary["source_run_id"] == "run-id"
 
 
 def test_tool_call_conversion_preserves_ids_and_arguments():
@@ -834,19 +771,6 @@ def test_prepare_cli_accepts_one_dataset_and_fraction_controls(monkeypatch):
     assert args.validation_fraction == 0.0
     assert args.test_fraction == 1.0
 
-    capture = parser.parse_args(
-        [
-            "capture-contract",
-            "--workspace-id",
-            "workspace-id",
-            "--run-id",
-            "run-id",
-            "--output",
-            "contract.json",
-        ]
-    )
-    assert capture.output == Path("contract.json")
-
 
 def test_model_context_rejects_complete_long_example(monkeypatch: pytest.MonkeyPatch):
     import training.renderer
@@ -1129,7 +1053,8 @@ def test_replay_context_counts_tool_declarations(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("system_prompt", [None, "a different recorded policy"])
-def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy, system_prompt):
+@pytest.mark.parametrize("parsed_arguments", [False, True])
+def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy, system_prompt, parsed_arguments):
     data_dir = tmp_path / "data"
     contract = loaded_contract(tmp_path, legacy=legacy)
     write_manifest(data_dir, contract=contract)
@@ -1167,11 +1092,18 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
             evidence = json.loads(messages[1]["content"])
             candidate = evidence["candidate_next_action"]["tool_calls"][0]["function"]
             reference = evidence["untrusted_trajectory"]["reference_next_action"]["tool_calls"][0]["function"]
-            passed = candidate["name"] == reference["name"] and candidate["arguments"] == reference["arguments"]
+            arguments = candidate["arguments"]
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            passed = candidate["name"] == reference["name"] and arguments == json.loads(reference["arguments"])
             return {"role": "assistant", "content": json.dumps({"pass": passed, "reason": "tool check"})}
         assert messages == expected_prefix
         candidate_contracts.append(request_contract)
-        return tool_call("lookup" if model == "tuned-model" else "wrong")
+        candidate = tool_call("lookup" if model == "tuned-model" else "wrong")
+        if parsed_arguments:
+            function = candidate["tool_calls"][0]["function"]
+            function["arguments"] = json.loads(function["arguments"])
+        return candidate
 
     summary = replay.run_replay_evaluation(
         data_dir,
@@ -1281,7 +1213,8 @@ def test_replay_resume_rejects_a_different_model_set(
         )
 
 
-def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_path: Path):
+@pytest.mark.parametrize("parsed_arguments", [False, True])
+def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_path: Path, parsed_arguments):
     contract = loaded_contract(tmp_path)
     reference = tool_call("lookup")
     case = {
@@ -1289,13 +1222,17 @@ def test_deterministic_metrics_score_tool_decisions_arguments_and_schema(tmp_pat
         "reference": reference,
     }
 
-    exact = replay.score_replay_candidate(case, copy.deepcopy(reference), contract)
+    candidate = copy.deepcopy(reference)
+    if parsed_arguments:
+        function = candidate["tool_calls"][0]["function"]
+        function["arguments"] = json.loads(function["arguments"])
+    exact = replay.score_replay_candidate(case, candidate, contract)
     wrong_name = replay.score_replay_candidate(case, tool_call("missing"), contract)
     malformed = tool_call("lookup")
     malformed["tool_calls"][0]["function"]["arguments"] = "not-json"
     malformed_score = replay.score_replay_candidate(case, malformed, contract)
     wrong_type = tool_call("lookup")
-    wrong_type["tool_calls"][0]["function"]["arguments"] = '{"query":1}'
+    wrong_type["tool_calls"][0]["function"]["arguments"] = {"query": 1} if parsed_arguments else '{"query":1}'
     wrong_type_score = replay.score_replay_candidate(case, wrong_type, contract)
     text_score = replay.score_replay_candidate(
         case,
@@ -1454,6 +1391,7 @@ def test_fireworks_inference_uses_recorded_messages_with_contract_tools(
             json.dumps({"choices": [{"message": {"role": "assistant", "content": "done"}}]}).encode()
         )
 
+    monkeypatch.setattr(inference_transport, "open_without_redirects", fake_urlopen)
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "session-id")
@@ -1515,7 +1453,7 @@ def test_anthropic_judge_calls_anthropic_directly(monkeypatch: pytest.MonkeyPatc
     assert result["content"].startswith("{")
 
 
-def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.MonkeyPatch):
+def test_anthropic_judge_ignores_custom_headers(monkeypatch: pytest.MonkeyPatch):
     captured = {}
 
     class Response(io.BytesIO):
@@ -1532,7 +1470,7 @@ def test_anthropic_judge_ignores_gateway_custom_headers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "direct-key")
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"gateway-key"}')
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", '{"X-Api-Key":"other-key"}')
 
     inference_transport._chat_completion(
         "anthropic/claude-sonnet-5",
@@ -1573,6 +1511,7 @@ def test_inference_transport_reports_failures_as_pipeline_errors(
             raise failure
         return Response(failure)
 
+    monkeypatch.setattr(inference_transport, "open_without_redirects", fake_urlopen)
     monkeypatch.setattr(inference_transport.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "session-id")
@@ -1582,13 +1521,13 @@ def test_inference_transport_reports_failures_as_pipeline_errors(
         inference_transport._chat_completion(model, [{"role": "user", "content": "hi"}], 16)
 
 
-def test_claude_sonnet_5_is_the_default_judge(monkeypatch):
+def test_baseten_glm_flash_is_the_default_judge(monkeypatch):
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     args = pipeline._parser().parse_args(
         ["evaluate", "--output-dir", "evaluation", "--tuned-model", "tuned"]
     )
 
-    assert args.judge_model == "anthropic/claude-sonnet-5"
+    assert args.judge_model == "baseten/zai-org/GLM-5.3-Flash"
 
 
 def test_judge_marks_reference_tool_results_as_future_evidence():
@@ -1684,7 +1623,7 @@ def test_plan_uses_manifest_model_and_sft_defaults(tmp_path: Path):
     assert plan["base_model"] == "accounts/fireworks/models/kimi-k3"
     assert plan["config"]["renderer"] == "kimi_k3"
     assert plan["config"]["max_epochs"] == 5
-    assert plan["config"]["early_stopping_patience"] == 1
+    assert plan["config"]["early_stopping_patience"] is None
     assert plan["config"]["loss_target"] == "each assistant target once, with zero loss on history"
     assert "train_on_what" not in plan["config"]
     assert plan["dataset"]["validation_rows"] == 1
@@ -1873,30 +1812,35 @@ def test_serverless_checkpoint_refs_use_training_session_api(monkeypatch: pytest
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
     monkeypatch.setenv("FIREWORKS_SESSION_ID", "00000000-0000-0000-0000-000000000000")
 
-    result = fireworks._epoch_checkpoints("session-1")
+    result = fireworks._epoch_checkpoints("session-1", "step-4", run_id=run_id, state_path=f"account-id/{run_id}/step-4")
 
     assert calls == ["accounts/account-id/trainingSessions/session-1"]
     assert result["resume_checkpoint"] == f"account-id/{run_id}/step-4"
     assert result["promotable_checkpoint"].endswith(f"{run_id}-step-4-abcd1234")
 
 
-def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("model", [
+    fireworks.DEFAULT_MODEL,
+    *[replace(fireworks.MODEL_SPECS["glm-5p3-flash"], reasoning_effort=effort) for effort in ("low", "high", "max")],
+], ids=lambda model: f"{model.name}-{model.reasoning_effort}")
+def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model):
     import smithtune.providers.fireworks.training as runtime
 
     metadata_calls = []
     renderer_calls = []
-    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", lambda model, context: (
-        metadata_calls.append((model, context)) or
-        capabilities.FireworksModelCapability(model, "Qwen/Qwen3.8-27B", 131_072, True)
+    monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", lambda base_model, context: (
+        metadata_calls.append((base_model, context)) or
+        capabilities.FireworksModelCapability(base_model, model.tokenizer_model, model.max_seq_len, True)
     ))
     monkeypatch.setattr(fireworks, "load_training_renderer", lambda model: renderer_calls.append(model))
     data_dir = tmp_path / "data"
-    write_manifest(data_dir)
+    write_manifest(data_dir, model=model)
     events = []
 
     class Session:
-        def __init__(self, config, run_dir):
+        def __init__(self, config, run_dir, *, reasoning_effort=None):
             self.config = config
+            assert reasoning_effort == model.reasoning_effort
             assert config.epochs == 5
             assert config.seed == 42
             assert config.pipeline_depth == 4
@@ -1927,8 +1871,8 @@ def test_training_keeps_one_session_and_selects_best_epoch(tmp_path: Path, monke
     assert events == ["open", 1, 2, 3, "complete", "close"]
     assert result["best"]["epoch"] == 2
     assert len({epoch["job_id"] for epoch in result["epochs"]}) == 1
-    assert metadata_calls == [(fireworks.DEFAULT_MODEL.base_model, 131_072)]
-    assert renderer_calls == [fireworks.DEFAULT_MODEL]
+    assert metadata_calls == [(model.base_model, model.max_seq_len)]
+    assert renderer_calls == [model]
 
 
 def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1978,7 +1922,10 @@ def test_promotion_uses_best_checkpoint_and_planned_model(tmp_path: Path, monkey
 def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     commands = []
     monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
-    monkeypatch.setattr(fireworks, "_run", lambda command, **kwargs: commands.append(command))
+    from tests.fireworks.fakes import FakeFirectl
+    firectl = FakeFirectl()
+    commands = firectl.commands
+    monkeypatch.setattr(fireworks, "_run", firectl)
     def smoke_test(route):
         saved = json.loads((tmp_path / "endpoint.json").read_text())
         assert saved["model"] == route
@@ -2012,7 +1959,8 @@ def test_mocked_deployment_returns_official_endpoint(tmp_path: Path, monkeypatch
 def test_failed_deployment_smoke_test_retains_receipt(tmp_path, monkeypatch, error):
     monkeypatch.setattr(fireworks.FireworksProvider, "promote", lambda *args, **kwargs: None)
     monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
-    monkeypatch.setattr(fireworks, "_run", lambda *args, **kwargs: None)
+    from tests.fireworks.fakes import FakeFirectl
+    monkeypatch.setattr(fireworks, "_run", FakeFirectl())
 
     def fail(route):
         assert json.loads((tmp_path / "endpoint.json").read_text())["model"] == route
@@ -2040,8 +1988,9 @@ def test_mutating_steps_require_confirmation(tmp_path: Path):
         )
     with pytest.raises(PipelineError, match="--confirm"):
         fireworks.FireworksProvider().promote(tmp_path / "run", "model-id", confirm=False)
-    with pytest.raises(PipelineError, match="--confirm"):
-        fireworks.FireworksProvider().deploy(tmp_path, "account", "model-id", "deployment-id", "shape", confirm=False)
+    # Deploy previews without --confirm and creates nothing.
+    assert fireworks.FireworksProvider().deploy(
+        tmp_path, "account", "model-id", "deployment-id", "shape", confirm=False)["status"] == "preview"
     with pytest.raises(PipelineError, match="--confirm"):
         replay.run_replay_evaluation(tmp_path, tmp_path / "eval", "tuned", "judge", confirm=False)
 
@@ -2058,11 +2007,9 @@ def test_source_uses_official_provider_urls_and_no_embedded_secret():
             fireworks,
         )
     )
-    assert "gateway.smith.langchain.com/fireworks" not in source
     assert "https://api.fireworks.ai/training/v1/serverless" in source
     assert "https://api.fireworks.ai/inference/v1" in source
     assert "https://api.anthropic.com" in source
-    assert "https://gateway.smith.langchain.com/anthropic" in source
     assert "fw_" not in source
     assert "lsv2_pt_" not in source
 

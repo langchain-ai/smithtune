@@ -54,7 +54,7 @@ def _write_raw_dataset(root, count=100):
         encoding="utf-8",
     )
 
-    from test_example_tools import write_empty_tool_snapshot
+    from tests.test_example_tools import write_empty_tool_snapshot
     write_empty_tool_snapshot(root, examples)
 
 
@@ -207,6 +207,7 @@ print(json.dumps(plan))
     )
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
+    assert plan["execution"]["requires_active_client"] is True
     assert plan["base_model"] == manifest["model"]["base_model"]
     assert plan["dataset"]["train_rows"] == manifest["split"]["train"]
 
@@ -418,8 +419,8 @@ def test_fireworks_provider_train_rejects_a_baseten_prepared_manifest(tmp_path):
 
 @pytest.mark.parametrize("provider", ["baseten", "fireworks"])
 def test_cli_cross_workspace_preparation(tmp_path, monkeypatch, capsys, provider):
-    from test_example_tools import example
-    from binding_fixtures import bound_example
+    from tests.test_example_tools import example
+    from tests.binding_fixtures import bound_example
 
     monkeypatch.setattr(pipeline, "get_version", lambda: "0.1.0")
     module = baseten if provider == "baseten" else fireworks

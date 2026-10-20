@@ -1,17 +1,19 @@
 
-from binding_fixtures import bound_row
+from tests.binding_fixtures import bound_row
 import copy
+import io
 import json
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
 
 from smithtune import cli
 from smithtune.evaluation import replay as evaluation
-from smithtune.providers.fireworks import sampling as sampling
+from smithtune.providers.fireworks import sampling
 from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks.provider import DEFAULT_MODEL
-from test_pipeline import write_manifest
+from tests.test_pipeline import write_manifest
 
 
 CHECKPOINT = "account/run-" + "a" * 32 + "/epoch-2"
@@ -126,6 +128,35 @@ def test_partial_sampler_startup_closes_resources(tmp_path, monkeypatch):
     assert events == ["closed"]
 
 
+def test_glm_sampler_keeps_reasoning_separate_from_visible_answer_and_tools(tmp_path, monkeypatch):
+    from training.renderer import get_renderer
+    from smithtune.providers.fireworks.provider import MODEL_SPECS
+    from tests.test_hf_rendering import _tokenizer
+
+    model = MODEL_SPECS["glm-5p3-flash"]
+    tokenizer = _tokenizer()
+    tokenizer.add_special_tokens({"additional_special_tokens": [
+        "[gMASK]", "[sop]", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+    ]})
+    renderer = get_renderer(model.renderer, tokenizer)
+    monkeypatch.setattr(sampling, "load_training_renderer", lambda _: renderer)
+    completion = ('Consider café 🐢 東京</think>Checking.'
+                  '<tool_call>weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call><|observation|>')
+    sequence = SimpleNamespace(tokens=tokenizer.encode(completion, add_special_tokens=False), stop_reason="stop")
+    sampler = SimpleNamespace(
+        sample=lambda **kwargs: Future(SimpleNamespace(sequences=[sequence])), close=lambda: None,
+    )
+    service = SimpleNamespace(training_session_id="glm-session", create_sampling_client=lambda **kwargs: sampler)
+    adapter = sampling.FireworksReplaySampler(model, CHECKPOINT, tmp_path, service=service, snapshot="snapshot")
+    with adapter:
+        candidate = adapter.generate(CHECKPOINT, [{"role": "user", "content": "Paris weather?"}], 256)
+    assert candidate["content"] == "Checking."
+    assert candidate["reasoning_content"] == "Consider café 🐢 東京"
+    assert candidate["tool_calls"][0]["function"]["name"] == "weather"
+    assert json.loads(candidate["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+    assert candidate["sampling"]["format_valid"] is True
+
+
 def replay_data(tmp_path, monkeypatch):
     data = tmp_path / "data"
     write_manifest(data)
@@ -170,14 +201,22 @@ def test_saved_generations_resume_judging_without_reopening_session(tmp_path, mo
     def score(*args):
         nonlocal fail
         if calls and fail:
-            raise PipelineError("judge unavailable")
+            error = urllib.error.HTTPError(
+                "https://example.invalid/private", 429, "private provider message", {},
+                io.BytesIO(b'{"error":{"code":"insufficient_quota","message":"private prompt"}}'),
+            )
+            raise PipelineError("judge unavailable") from error
         return original_judge(*args)
 
     monkeypatch.setattr(evaluation, "judge_replay_candidate", score)
     options = dict(data_dir=data, output_dir=tmp_path / "replay", tuned_model=CHECKPOINT,
                    judge_model="judge", chat=judge, replay_sampler=Sampler(), confirm=True)
-    with pytest.raises(PipelineError, match="interrupted"):
+    with pytest.raises(PipelineError, match="interrupted") as failure:
         evaluation.run_replay_evaluation(**options)
+    assert "1 cases failed; 0/1 saved" in str(failure.value)
+    assert "provider quota or credit exhausted (HTTP 429)" in str(failure.value)
+    assert "same settings to resume" in str(failure.value)
+    assert "private" not in str(failure.value)
     assert calls == ["open", "generate", "close"]
     assert len(json.loads((tmp_path / "replay/generations.jsonl").read_text())["candidate"]) == 2
     fail = False
@@ -249,7 +288,7 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
     class Session:
         service = object()
 
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             events.append("create")
 
         def __enter__(self):
@@ -290,3 +329,18 @@ def test_judge_failure_prevents_training_or_preserves_completed_checkpoint(tmp_p
     else:
         assert events == ["calibration", "create", "complete", "close"]
         assert "phase: replay_incomplete" in (run / "run.md").read_text()
+
+
+def test_missing_judge_key_fails_before_writing_the_run_directory(tmp_path, monkeypatch):
+    from smithtune.providers.fireworks import provider as fireworks
+
+    data = replay_data(tmp_path, monkeypatch)
+    run = tmp_path / "run"
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-value")
+    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+    replay = {"judge_model": evaluation.DEFAULT_JUDGE_MODEL, "concurrency": 4,
+              "max_points_per_trajectory": None, "max_output_tokens": 256}
+    with pytest.raises(PipelineError, match="BASETEN_API_KEY is not set for the judge"):
+        fireworks.FireworksProvider().train(data, run, "run", fireworks.SFTSettings(max_epochs=1), confirm=True,
+                                            init_from_checkpoint=None, replay=replay)
+    assert not run.exists()
