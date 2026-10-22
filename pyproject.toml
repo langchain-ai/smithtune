@@ -32,7 +32,7 @@ dependencies = [
   "tinker==0.23.0",
   "transformers==5.10.4",
   "trl==1.13.0",
-  "pillow>=12.3,<13",
+  "pillow>=13.0.0,<14",
   "datasets>=5.0.1,<6",
 ]
 
