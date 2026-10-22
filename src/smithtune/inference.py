@@ -104,7 +104,7 @@ class BasetenEndpoint:
 def _post_json(request: urllib.request.Request, label: str, *, opener=None) -> dict[str, Any]:
     """Send one request and return its JSON object without echoing bodies or headers."""
     try:
-        with (opener or urllib.request.urlopen)(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with (opener or open_without_redirects)(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         raise PipelineError(f"{label} failed with HTTP {exc.code}") from exc

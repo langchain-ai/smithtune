@@ -9,7 +9,8 @@ from urllib.response import addinfourl
 
 import pytest
 
-from smithtune import dataset, inference
+from smithtune import dataset, inference, triage_judges
+from smithtune.providers.baseten import provider as baseten
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.providers.fireworks import provider as fireworks
 from smithtune.providers.base import PipelineError
@@ -121,7 +122,7 @@ def test_trajectory_tool_reads_sanitize_both_error_streams(monkeypatch, capsys):
 
 
 @pytest.fixture
-def fireworks_transport(monkeypatch):
+def authenticated_transport(monkeypatch):
     requests = []
     response_status = [200]
     location = ["https://redirect.example.invalid/collect"]
@@ -152,8 +153,8 @@ def call_fireworks(entrypoint):
 @pytest.mark.parametrize("entrypoint", ["smoke", "inference"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 @pytest.mark.parametrize("target", ["https://redirect.example.invalid/collect", "http://redirect.example.invalid/collect"])
-def test_fireworks_refuses_redirects_without_forwarding_credentials(fireworks_transport, entrypoint, status, target):
-    requests, response_status, location = fireworks_transport
+def test_fireworks_refuses_redirects_without_forwarding_credentials(authenticated_transport, entrypoint, status, target):
+    requests, response_status, location = authenticated_transport
     response_status[0] = status
     location[0] = target
     with pytest.raises(PipelineError, match=f"failed with HTTP {status}"):
@@ -164,10 +165,55 @@ def test_fireworks_refuses_redirects_without_forwarding_credentials(fireworks_tr
 
 
 @pytest.mark.parametrize("entrypoint", ["smoke", "inference"])
-def test_fireworks_non_redirect_response_still_works(fireworks_transport, entrypoint):
-    requests, _, _ = fireworks_transport
+def test_fireworks_non_redirect_response_still_works(authenticated_transport, entrypoint):
+    requests, _, _ = authenticated_transport
     result = call_fireworks(entrypoint)
     assert len(requests) == 1
     assert requests[0].get_method() == "POST"
     assert result == ({"http_status": 200, "finish_reason": "stop"} if entrypoint == "smoke"
                       else {"role": "assistant", "content": "ready"})
+
+
+@pytest.mark.parametrize("provider", ["fireworks", "baseten", "openai", "anthropic"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("target", ["https://redirect.example.invalid/collect", "http://redirect.example.invalid/collect"])
+def test_api_judge_refuses_redirects_without_forwarding_credentials(
+    authenticated_transport, monkeypatch, provider, status, target,
+):
+    requests, response_status, location = authenticated_transport
+    response_status[0] = status
+    location[0] = target
+    monkeypatch.setenv(triage_judges.credential_name(provider), "test-only-key")
+    with pytest.raises(PipelineError, match=f"failed with HTTP {status}"):
+        triage_judges.api_judge(
+            {"provider": provider, "model": "model"}, [{"role": "user", "content": PRIVATE}], 16,
+        )
+    assert len(requests) == 1
+    expected_url = ("https://api.anthropic.com/v1/messages" if provider == "anthropic"
+                    else triage_judges.CHAT_ENDPOINTS[provider] + "/chat/completions")
+    assert requests[0].full_url == expected_url
+    assert requests[0].get_method() == "POST"
+    header = "X-api-key" if provider == "anthropic" else "Authorization"
+    assert requests[0].get_header(header) == ("test-only-key" if provider == "anthropic" else "Bearer test-only-key")
+    assert PRIVATE in requests[0].data.decode()
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("target", ["https://redirect.example.invalid/collect", "http://redirect.example.invalid/collect"])
+def test_baseten_management_refuses_redirects_without_forwarding_credentials(
+    authenticated_transport, method, status, target,
+):
+    requests, response_status, location = authenticated_transport
+    response_status[0] = status
+    location[0] = target
+    management = baseten._BasetenManagement(api_key="test-only-key")
+    path = "runs/run123" if method == "GET" else "runs/run123/deactivate"
+    with pytest.raises(urllib.error.HTTPError) as error:
+        management._request(path, method)
+    assert error.value.code == status
+    assert len(requests) == 1
+    assert requests[0].full_url == f"{baseten.BASETEN_API_ROOT}/{path}"
+    assert requests[0].get_method() == method
+    assert requests[0].get_header("Authorization") == "Api-Key test-only-key"
+    assert requests[0].data == (b"{}" if method == "POST" else None)
