@@ -15,8 +15,9 @@ from typing import Any
 
 from smithtune.artifacts import _json_dump, _load_json, _utc_now
 from smithtune.capabilities import open_without_redirects
-from smithtune.dataset import _model_from_manifest, _require_prepared_provider
 from smithtune.providers.base import PipelineError
+from smithtune.providers.baseten import require_api_key
+from smithtune.run_artifacts import load_checkpoint_context, require_matching_base_model
 from smithtune.rendering import load_training_renderer
 
 
@@ -31,11 +32,7 @@ def _resource_id(value: Any) -> str:
 
 
 def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, str]:
-    manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    _require_prepared_provider(manifest, "baseten")
-    model = _model_from_manifest(manifest)
-    plan = _load_json(run_dir / "plan.json")
-    result = _load_json(run_dir / "result.json")
+    model, plan, result = load_checkpoint_context(data_dir, run_dir, provider="baseten")
     if not isinstance(plan, dict) or not isinstance(result, dict) or any(
         item.get("provider") != "baseten" for item in (plan, result)
     ):
@@ -44,16 +41,13 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, str]:
     match = _CHECKPOINT.fullmatch(checkpoint) if isinstance(checkpoint, str) else None
     if not match or match[1] != result.get("baseten_run_id"):
         raise PipelineError("Baseten evaluation requires the saved best sampler checkpoint in --run-dir")
-    if plan.get("base_model") != model.base_model:
-        raise PipelineError("prepared data base model differs from the Baseten training run")
+    require_matching_base_model(model, plan, provider_label="Baseten")
     return model, checkpoint
 
 
 def _request(method: str, path: str, body: dict | None = None) -> dict:
     """Control-plane writes are attempted once; ambiguous outcomes need reconciliation."""
-    key = os.environ.get("BASETEN_API_KEY", "").strip()
-    if not key:
-        raise PipelineError("BASETEN_API_KEY is not set")
+    key = require_api_key().strip()
     request = urllib.request.Request(
         API_ROOT + path, method=method,
         data=json.dumps(body).encode() if body is not None else None,
@@ -74,8 +68,7 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
 
 class _SamplerService:
     def __init__(self):
-        if not os.environ.get("BASETEN_API_KEY", "").strip():
-            raise PipelineError("BASETEN_API_KEY is not set")
+        require_api_key()
         if any(name.startswith("LOOPS_REUSE_") for name in os.environ):
             raise PipelineError("Baseten replay rejects Loops resource-reuse overrides")
         if os.environ.get("LOOPS_BASE_URL", API_ROOT).rstrip("/") != API_ROOT:

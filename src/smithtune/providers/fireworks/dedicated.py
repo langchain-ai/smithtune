@@ -14,6 +14,7 @@ from pathlib import Path
 
 from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.providers.base import PipelineError
+from smithtune.providers.fireworks import require_api_key
 from smithtune.providers.fireworks.provider import CLIENT_SOURCE, FIREWORKS_BASE_URL, _promotable_checkpoint, _set_skill_session
 from smithtune.providers.fireworks.sampling import FireworksReplaySampler
 from smithtune.providers.fireworks.training import ServerlessTraining, _CheckpointSaveClient
@@ -28,10 +29,9 @@ def validate_shape_name(name: str, *, versioned: bool = False) -> None:
 
 
 def _client_options():
-    if not os.environ.get("FIREWORKS_API_KEY", "").strip():
-        raise PipelineError("FIREWORKS_API_KEY is not set; dedicated shape discovery requires read-only account access")
+    key = require_api_key(message="FIREWORKS_API_KEY is not set; dedicated shape discovery requires read-only account access")
     _set_skill_session()
-    return dict(api_key=os.environ["FIREWORKS_API_KEY"], base_url=FIREWORKS_BASE_URL,
+    return dict(api_key=key, base_url=FIREWORKS_BASE_URL,
                 additional_headers={"X-Fireworks-Client-Source": CLIENT_SOURCE,
                                     "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]})
 

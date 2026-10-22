@@ -9,7 +9,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 import urllib.error
@@ -481,15 +480,10 @@ class FireworksProvider:
                 deployment="trainer deleted on exit; checkpoints remain subject to Fireworks retention; promotion and permanent serving are separate",
             )
         if replay is not None:
-            from smithtune.evaluation.replay import prepare_replay_evaluation
+            from smithtune.evaluation.replay import preview_replay_for_plan
 
-            if replay["concurrency"] < 1:
-                raise PipelineError("evaluation concurrency must be positive")
-            with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
-                preview = prepare_replay_evaluation(
-                    data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
-                )
-            value["replay"] = {**preview, **replay, "serving_mode": settings.training_mode, "evaluated_models": 2}
+            preview = preview_replay_for_plan(data_dir, replay)
+            value["replay"] = {**preview, "serving_mode": settings.training_mode, "evaluated_models": 2}
             if settings.training_mode == "dedicated":
                 value["replay"]["cost"] = "separate temporary base and tuned inference deployments, time-billed in addition to the trainer until cleanup"
         return value

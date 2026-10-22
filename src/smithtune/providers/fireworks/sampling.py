@@ -10,9 +10,10 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
-from smithtune.artifacts import _json_dump, _load_json, _utc_now
-from smithtune.dataset import _model_from_manifest, _require_prepared_provider
+from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.providers.base import PipelineError
+from smithtune.providers.fireworks import require_api_key
+from smithtune.run_artifacts import load_checkpoint_context, require_matching_base_model
 from smithtune.providers.fireworks.provider import CLIENT_SOURCE, TRAINING_BASE_URL, _set_skill_session
 from smithtune.rendering import load_training_renderer, replay_prompt
 
@@ -20,22 +21,17 @@ from smithtune.rendering import load_training_renderer, replay_prompt
 def create_service():
     from fireworks.training.sdk import FiretitanServiceClient
 
-    if not os.environ.get("FIREWORKS_API_KEY", "").strip():
-        raise PipelineError("FIREWORKS_API_KEY is not set")
+    key = require_api_key()
     _set_skill_session()
     return FiretitanServiceClient(
-        api_key=os.environ["FIREWORKS_API_KEY"], base_url=TRAINING_BASE_URL,
+        api_key=key, base_url=TRAINING_BASE_URL,
         default_headers={"X-Fireworks-Client-Source": CLIENT_SOURCE,
                          "X-Fireworks-Session-Id": os.environ["FIREWORKS_SESSION_ID"]},
     )
 
 
 def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, Any]]:
-    manifest = _load_json(data_dir / "prepared" / "manifest.json")
-    _require_prepared_provider(manifest, "fireworks")
-    model = _model_from_manifest(manifest)
-    plan = _load_json(run_dir / "plan.json")
-    result = _load_json(run_dir / "result.json")
+    model, plan, result = load_checkpoint_context(data_dir, run_dir, provider="fireworks")
     best = result.get("best") if isinstance(result, dict) else None
     checkpoint = best.get("resume_checkpoint") if isinstance(best, dict) else None
     mode = plan.get("training_mode", "serverless")
@@ -47,8 +43,7 @@ def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, A
         checkpoint_parts(checkpoint)
     elif not isinstance(checkpoint, str) or re.fullmatch(r"[a-zA-Z0-9_-]+/run-[0-9a-f]{32}/[a-zA-Z0-9_-]+", checkpoint) is None:
         raise PipelineError("Fireworks evaluation requires a saved training checkpoint in --run-dir")
-    if plan.get("base_model") != model.base_model:
-        raise PipelineError("prepared data base model differs from the Fireworks training run")
+    require_matching_base_model(model, plan, provider_label="Fireworks")
     config = plan.get("config", {})
     if model.renderer == "glm53_flash_preserve_thinking" and (
         (config.get("reasoning_effort") or "max") != (model.reasoning_effort or "max")
