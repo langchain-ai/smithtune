@@ -219,6 +219,24 @@ def test_training_provider_registry_returns_adapters():
         get_provider("missing")
 
 
+@pytest.mark.parametrize("provider,credential", [
+    ("baseten", "BASETEN_API_KEY"), ("fireworks", "FIREWORKS_API_KEY"),
+])
+@pytest.mark.parametrize("value", [None, "", " \t "])
+def test_judge_credentials_reject_missing_or_blank_provider_key(monkeypatch, provider, credential, value):
+    from smithtune.evaluation.replay import validate_judge_credentials
+
+    for name in ("BASETEN_API_KEY", "FIREWORKS_API_KEY"):
+        monkeypatch.setenv(name, "other-provider-test-key")
+    if value is None:
+        monkeypatch.delenv(credential)
+    else:
+        monkeypatch.setenv(credential, value)
+
+    with pytest.raises(PipelineError, match=f"^{credential} is not set for the judge$"):
+        validate_judge_credentials(f"{provider}/test-model")
+
+
 @pytest.mark.parametrize("provider", ["fireworks", "baseten"])
 @pytest.mark.parametrize("explicit_paths", [False, True])
 def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider, explicit_paths):

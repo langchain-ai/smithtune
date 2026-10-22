@@ -5,8 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +30,8 @@ from smithtune.inference import (
 )
 from smithtune.inference_contract import ContractError, InferenceContract
 from smithtune.providers.base import PipelineError
+from smithtune.providers.baseten import require_api_key as require_baseten_key
+from smithtune.providers.fireworks import require_api_key as require_fireworks_key
 from smithtune.providers.fireworks.provider import _require_confirm, _set_skill_session
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS, validate_reasoning_support, validate_replay_context
 
@@ -67,10 +69,9 @@ def validate_judge_credentials(judge_model: str) -> None:
     if provider in ANTHROPIC_ENDPOINTS:
         anthropic_connection(provider)
     elif provider == "baseten":
-        if not os.environ.get("BASETEN_API_KEY", "").strip():
-            raise PipelineError("BASETEN_API_KEY is not set for the judge")
-    elif not os.environ.get("FIREWORKS_API_KEY", "").strip():
-        raise PipelineError("FIREWORKS_API_KEY is not set for the judge")
+        require_baseten_key(message="BASETEN_API_KEY is not set for the judge")
+    else:
+        require_fireworks_key(message="FIREWORKS_API_KEY is not set for the judge")
 
 
 def training_metadata(run_dir: Path | None) -> dict:
@@ -214,6 +215,17 @@ def _case_contract(
     if example_id not in example_contracts:
         raise PipelineError(f"replay example {example_id} has no captured tool schemas")
     return example_contracts[example_id]
+
+
+def preview_replay_for_plan(data_dir: Path, replay: dict[str, Any]) -> dict[str, Any]:
+    """Preview held-out replay without retaining evaluation artifacts."""
+    if replay["concurrency"] < 1:
+        raise PipelineError("evaluation concurrency must be positive")
+    with tempfile.TemporaryDirectory(prefix="smithtune-eval-plan-") as temporary:
+        preview = prepare_replay_evaluation(
+            data_dir, Path(temporary), replay["max_points_per_trajectory"], replay["max_output_tokens"],
+        )
+    return {**preview, **replay}
 
 
 def prepare_replay_evaluation(
@@ -639,8 +651,11 @@ def run_replay_evaluation(
         raise PipelineError("evaluation concurrency must be positive")
     sampler_provider = replay_sampler.config["provider"] if replay_sampler is not None else None
     candidate_credential = "BASETEN_API_KEY" if baseten_endpoint or sampler_provider == "baseten" else "FIREWORKS_API_KEY"
-    if chat is None and not os.environ.get(candidate_credential, "").strip():
-        raise PipelineError(f"{candidate_credential} is not set")
+    if chat is None:
+        if candidate_credential == "BASETEN_API_KEY":
+            require_baseten_key()
+        else:
+            require_fireworks_key()
     judge_url = judge_endpoint(judge_model)
     if chat is None:
         validate_judge_credentials(judge_model)

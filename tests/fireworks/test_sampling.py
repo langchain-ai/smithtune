@@ -168,6 +168,50 @@ def replay_data(tmp_path, monkeypatch):
     return data
 
 
+def test_training_replay_preview_is_offline_and_preserves_requested_settings(tmp_path, monkeypatch):
+    from smithtune.providers.fireworks import provider as fireworks
+
+    data = replay_data(tmp_path, monkeypatch)
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+    replay = {"judge_model": evaluation.DEFAULT_JUDGE_MODEL, "concurrency": 2,
+              "max_points_per_trajectory": 1, "max_output_tokens": 128}
+    files_before = set(data.rglob("*"))
+    plan = fireworks.FireworksProvider().plan(data, "preview", fireworks.SFTSettings(), replay=replay)
+
+    assert plan["replay"].items() >= replay.items()
+    assert plan["replay"]["cases"] == 1
+    assert plan["replay"]["serving_mode"] == "serverless"
+    assert plan["replay"]["evaluated_models"] == 2
+    assert set(data.rglob("*")) == files_before
+    with pytest.raises(PipelineError, match="evaluation concurrency must be positive"):
+        fireworks.FireworksProvider().plan(data, "preview", fireworks.SFTSettings(),
+                                          replay={**replay, "concurrency": 0})
+
+
+def test_saved_checkpoint_requires_matching_prepared_provider_and_base_model(tmp_path):
+    data, run = tmp_path / "data", tmp_path / "run"
+    write_manifest(data)
+    run.mkdir()
+    (run / "plan.json").write_text(json.dumps({"base_model": DEFAULT_MODEL.base_model}))
+    (run / "result.json").write_text(json.dumps({"best": {"resume_checkpoint": CHECKPOINT}}))
+
+    model, best = sampling.checkpoint_from_run(data, run)
+    assert model == DEFAULT_MODEL
+    assert best["resume_checkpoint"] == CHECKPOINT
+
+    (run / "plan.json").write_text(json.dumps({"base_model": "different"}))
+    with pytest.raises(PipelineError, match="prepared data base model differs from the Fireworks training run"):
+        sampling.checkpoint_from_run(data, run)
+
+    manifest_path = data / "prepared/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["provider"]["name"] = "baseten"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(PipelineError, match="prepared provider mismatch: expected fireworks"):
+        sampling.checkpoint_from_run(data, run)
+
+
 def test_saved_generations_resume_judging_without_reopening_session(tmp_path, monkeypatch):
     data = replay_data(tmp_path, monkeypatch)
     calls = []
