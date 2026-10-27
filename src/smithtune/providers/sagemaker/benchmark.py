@@ -19,7 +19,7 @@ from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker import sha256_file
 from smithtune.training.contracts import model_revision
 from smithtune.training.hf_sft import (
-    _loss, configure_lora, failure_diagnostics, gpu_diagnostics, read_bundle,
+    _loss, configure_lora, enable_chunked_loss, failure_diagnostics, gpu_diagnostics, read_bundle,
     render_conversations, report_stage,
 )
 from smithtune.rendering import load_training_renderer
@@ -198,7 +198,8 @@ def run(input_dir: Path, model_dir: Path, *, device="cuda:0"):
         dtype=torch.float32 if device == "cpu" else torch.bfloat16, attn_implementation="sdpa",
     )
     base.config.use_cache = False
-    model = configure_lora(base, rank).to(device)
+    model = configure_lora(base, rank, settings.lora_targets).to(device)
+    enable_chunked_loss(model)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model_dir.mkdir(parents=True, exist_ok=True)
     result = {"schema_version": 1, "operation": "synthetic_context_benchmark", "synthetic_only": True,

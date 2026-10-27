@@ -711,8 +711,8 @@ class BasetenProvider:
 
     def settings_from_options(self, options: TrainingOptions) -> BasetenSFTSettings:
         """Resolve Baseten defaults and reject Fireworks-only settings."""
-        if any(getattr(options, name) is not None for name in ("aws_config", "aws_trainer", "aws_max_cases")):
-            raise PipelineError("--aws-config/--aws-trainer/--aws-max-cases requires --provider sagemaker")
+        if any(getattr(options, name) is not None for name in ("aws_config", "aws_trainer", "aws_max_cases", "aws_lora_targets")):
+            raise PipelineError("--aws-config/--aws-trainer/--aws-max-cases/--aws-lora-targets requires --provider sagemaker")
         if any(getattr(options, name) is not None for name in (
             "lora_alpha", "pipeline_depth", "training_mode", "training_shape", "provisioning_timeout",
         )):

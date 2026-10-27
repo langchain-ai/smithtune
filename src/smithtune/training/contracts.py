@@ -28,13 +28,23 @@ CPU_TRAINING_PROFILES = frozenset({"qwen3p5-0p8b-test"})
 WORKER_DEVICES = ("cpu", "cuda:0")
 PREPARED_FILES = ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl")
 OPTIONAL_BUNDLE_FILES = ("evaluation/cases.jsonl", "evaluation/settings.json")
-LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
+# Module-name suffixes inside the language model's decoder layers. The vision
+# encoder, embeddings and lm_head are never adapted: the chunked loss reads the
+# head weight directly and would silently drop an adapter on it.
+LORA_TARGET_SETS = {
+    "attention": ("q_proj", "k_proj", "v_proj", "o_proj"),
+    "all-linear": ("q_proj", "k_proj", "v_proj", "o_proj", "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a",
+                   "out_proj", "gate_proj", "up_proj", "down_proj"),
+}
+LORA_TARGET_MODULES = LORA_TARGET_SETS["attention"]
+LOSS_IMPLEMENTATION = "trl-chunked-nll;chunk=256;ignored-positions-skipped"
 
 
 @dataclass(frozen=True)
 class WorkerSettings(CommonSFTSettings):
-    trainer_backend: str = "torch"
+    trainer_backend: str = "trl"
     device: str = "cuda:0"
+    lora_targets: str = "attention"
 
     def validate(self):
         for name in ("max_epochs", "early_stopping_patience", "batch_size", "seed"):
@@ -55,6 +65,8 @@ class WorkerSettings(CommonSFTSettings):
             raise PipelineError("trainer_backend must be torch or trl")
         if self.device not in WORKER_DEVICES:
             raise PipelineError("device must be cpu or cuda:0")
+        if self.lora_targets not in LORA_TARGET_SETS:
+            raise PipelineError("lora_targets must be attention or all-linear")
 
 
 def model_revision(spec: ModelSpec) -> str:
@@ -68,9 +80,9 @@ def describe_sft_job(model: ModelSpec, settings: CommonSFTSettings, *, lora_rank
                      prepared_manifest_uri: str) -> dict:
     """Describe the training intent the worker checks against its implemented recipe.
 
-    The target names are suffixes; this model recipe restricts them to the
-    language model's attention modules, excluding the vision encoder.
-    Backend and cloud execution settings stay outside this description.
+    The target names are suffixes inside the language model's decoder layers,
+    never the vision encoder, embeddings or lm_head. Backend, device and cloud
+    execution settings stay outside this description.
     """
     model.validate()
     settings.validate()
@@ -84,7 +96,8 @@ def describe_sft_job(model: ModelSpec, settings: CommonSFTSettings, *, lora_rank
         "prepared_manifest_uri": prepared_manifest_uri,
         "settings": {item.name: getattr(settings, item.name) for item in fields(CommonSFTSettings)},
         "lora_rank": lora_rank, "lora_alpha": 2 * lora_rank,
-        "target_modules": list(LORA_TARGET_MODULES), "target_parameters": [],
+        "target_modules": list(LORA_TARGET_SETS[getattr(settings, "lora_targets", "attention")]), "target_parameters": [],
+        "loss": LOSS_IMPLEMENTATION,
     }
 
 

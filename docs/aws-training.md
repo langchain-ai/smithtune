@@ -246,13 +246,22 @@ AWS's input/output paths. The [architecture guide](open-training.md) explains wh
 can be reused by Vertex. Training intent uses the same `SFTJobSpec` contract as
 Jake's Vertex scaffold; AWS compute settings remain separate. New bundles include
 this description and the worker checks it against the implemented recipe. Older
-pilot bundles remain supported. Add `--aws-trainer trl` to **both** `plan` and `train` to
-select the experimental `SFTTrainer` backend. The default remains the reference
-Torch loop. TRL is configured to consume pre-rendered IDs and labels without
-packing, truncation or chat-template rewriting. Small CPU tests establish gradient
-and update parity. A full-size GPU smoke established TRL operation,
-but numerical parity at that size and equivalence with Fireworks/Baseten's private
-optimizers have not been measured.
+pilot bundles remain supported. The default backend is TRL's `SFTTrainer`,
+configured to consume pre-rendered IDs and labels without packing, truncation or
+chat-template rewriting; `--aws-trainer torch` on **both** `plan` and `train`
+selects the reference loop used by the parity tests. Both backends use TRL's
+chunked next-token loss: positions without a training target never reach
+`lm_head`, and scored positions are projected in 256-token checkpointed chunks,
+so full-vocabulary logits are never materialized. Small CPU tests establish
+loss, gradient and update parity with the full-logits objective; the memory
+saving at long context is still to be measured on a GPU. Equivalence with
+Fireworks/Baseten's private optimizers has not been measured.
+
+`--aws-lora-targets` chooses the adapted modules inside the language model's
+decoder layers: `attention` (q/k/v/o, the default) or `all-linear` (adds the
+linear-attention projections and the MLP). The vision encoder, embeddings and
+`lm_head` are never adapted. Changing targets changes memory and what is
+learned, so repeat measurements after changing them.
 
 The worker validates file checksums and the preparation renderer version, then
 rerenders the saved canonical conversations. Each microbatch is one rendered
@@ -261,10 +270,9 @@ assistant tokens in that optimizer group, including its final partial batch.
 HF performs the causal label shift once. This specifies our objective; it does
 not claim numerical equivalence with providers' private optimizer implementations.
 
-The initial LoRA recipe targets the language model's full-attention
+The default LoRA recipe targets the language model's full-attention
 `q_proj/k_proj/v_proj/o_proj` modules, with alpha `2 × rank`, no adapter dropout,
 AdamW, constant learning rate, zero weight decay and gradient clipping at 1.0.
-Linear-attention and MLP adapters are not included in this initial recipe.
 The lowest validation loss chooses the best checkpoint; patience and minimum
 delta independently determine when to stop.
 
