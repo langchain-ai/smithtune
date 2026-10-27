@@ -17,6 +17,7 @@ import time
 from smithtune.artifacts import _json_dump, _load_json
 from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker import sha256_file
+from smithtune.training.contracts import model_revision
 from smithtune.training.hf_sft import (
     _loss, configure_lora, failure_diagnostics, gpu_diagnostics, read_bundle,
     render_conversations, report_stage,
@@ -193,7 +194,7 @@ def run(input_dir: Path, model_dir: Path, *, device="cuda:0"):
     set_seed(settings.seed)
     report_stage("loading_model")
     base = AutoModelForImageTextToText.from_pretrained(
-        spec.base_model, revision=spec.tokenizer_revision, trust_remote_code=False,
+        spec.base_model, revision=model_revision(spec), trust_remote_code=False,
         dtype=torch.float32 if device == "cpu" else torch.bfloat16, attn_implementation="sdpa",
     )
     base.config.use_cache = False

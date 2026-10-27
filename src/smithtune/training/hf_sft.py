@@ -17,7 +17,7 @@ import shutil
 
 from smithtune.artifacts import _json_dump, _load_json
 from smithtune.providers.base import ModelSpec, PipelineError
-from smithtune.training.contracts import LORA_TARGET_MODULES, PREPARED_FILES, describe_sft_job, load_prepared, sha256_file, write_artifact_manifest, WorkerSettings
+from smithtune.training.contracts import LORA_TARGET_MODULES, PREPARED_FILES, describe_sft_job, load_prepared, model_revision, sha256_file, write_artifact_manifest, WorkerSettings
 from smithtune.rendering import load_training_renderer, render_row_tokens
 
 
@@ -287,12 +287,14 @@ def train_loop(model, train_rows: list[list[Example]], validation_rows: list[lis
     return {"best_epoch": best_epoch, "best_validation_loss": best_loss, "epochs": history, "optimizer_steps": steps}
 
 
-def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str = "cuda:0") -> dict:
+def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str | None = None) -> dict:
     import torch
     from transformers import AutoModelForImageTextToText, set_seed
 
     report_stage("read_bundle")
     bundle, spec, rows, settings, rank = read_bundle(input_dir)
+    # The bundle decides the device: the planner chose it from the instance type.
+    device = settings.device if device is None else device
     report_stage("cuda_preflight")
     if device != "cpu" and not torch.cuda.is_available():
         raise PipelineError("the training worker requires a CUDA GPU; unit smoke tests run the loop on CPU")
@@ -306,7 +308,7 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str =
     validation_rows = render_conversations(rows["validation"], spec, renderer)
     report_stage("loading_model")
     base = AutoModelForImageTextToText.from_pretrained(
-        spec.base_model, revision=spec.tokenizer_revision, dtype=torch.float32 if device == "cpu" else torch.bfloat16,
+        spec.base_model, revision=model_revision(spec), dtype=torch.float32 if device == "cpu" else torch.bfloat16,
         trust_remote_code=False, attn_implementation="sdpa",
     )
     base.config.use_cache = False
@@ -342,7 +344,7 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str =
     base.config.save_pretrained(model_dir / "base_config")
     result.update({
         "provider": spec.provider, "schema_version": 1, "run_id": bundle["run_id"],
-        "base_model": spec.base_model, "base_model_revision": spec.tokenizer_revision,
+        "base_model": spec.base_model, "base_model_revision": model_revision(spec),
         "artifact_type": "peft_lora_adapter", "adapter_path": "adapter",
         "bundle": bundle, "model": _load_json(input_dir / "prepared" / "manifest.json")["model"],
         "loss_reduction": "mean_over_active_tokens_per_optimizer_group",

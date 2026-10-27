@@ -126,6 +126,18 @@ Create a local `aws-job.json` with real customer resource references:
 }
 ```
 
+### Pipeline tests on CPU instances
+
+The `qwen3p5-0p8b-test` profile uses the pinned Qwen3.5-9B tokenizer, chat
+template and renderer with the much smaller `Qwen/Qwen3.5-0.8B` weights, so the
+whole job lifecycle (staging, submission, training, export, collection) can be
+exercised on a CPU instance for cents. Prepare with
+`--model qwen3p5-0p8b-test` and set `instance_type` to an `ml.m*`, `ml.c*` or
+`ml.r*` type (for example `ml.m5.2xlarge`); the planner then runs the worker on
+`cpu`. CPU types are rejected for every other profile, instance preferences
+must be all-CPU or all-GPU, and nothing measured on CPU transfers to GPU runs.
+`ml.t*` burstable types are not accepted.
+
 The instance above passed the short synthetic smoke; it is **not a long-context
 hardware recommendation**. Choose hardware and a runtime budget before paid
 execution. The worker uses GPU 0 only, even if the selected instance has more
