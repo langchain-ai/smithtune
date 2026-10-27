@@ -650,11 +650,17 @@ def run_replay_evaluation(
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
     sampler_provider = replay_sampler.config["provider"] if replay_sampler is not None else None
-    candidate_credential = "BASETEN_API_KEY" if baseten_endpoint or sampler_provider == "baseten" else "FIREWORKS_API_KEY"
+    if baseten_endpoint or sampler_provider == "baseten":
+        candidate_credential = "BASETEN_API_KEY"
+    elif sampler_provider == "sagemaker":
+        # Answers were generated inside the training job; only the judge needs a key.
+        candidate_credential = None
+    else:
+        candidate_credential = "FIREWORKS_API_KEY"
     if chat is None:
         if candidate_credential == "BASETEN_API_KEY":
             require_baseten_key()
-        else:
+        elif candidate_credential == "FIREWORKS_API_KEY":
             require_fireworks_key()
     judge_url = judge_endpoint(judge_model)
     if chat is None:

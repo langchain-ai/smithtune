@@ -17,7 +17,7 @@ import shutil
 
 from smithtune.artifacts import _json_dump, _load_json
 from smithtune.providers.base import ModelSpec, PipelineError
-from smithtune.training.contracts import LORA_TARGET_MODULES, PREPARED_FILES, describe_sft_job, load_prepared, model_revision, sha256_file, write_artifact_manifest, WorkerSettings
+from smithtune.training.contracts import LORA_TARGET_MODULES, OPTIONAL_BUNDLE_FILES, PREPARED_FILES, describe_sft_job, load_prepared, model_revision, sha256_file, write_artifact_manifest, WorkerSettings
 from smithtune.rendering import load_training_renderer, render_row_tokens
 
 
@@ -157,10 +157,13 @@ def read_bundle(input_dir: Path):
     bundle = _load_json(input_dir / "bundle.json")
     if not isinstance(bundle, dict) or bundle.get("schema_version") != 1:
         raise PipelineError("unsupported training bundle version")
-    if not isinstance(bundle.get("files"), dict) or set(bundle["files"]) != set(PREPARED_FILES):
-        raise PipelineError("bundle must identify every prepared file")
-    for name in PREPARED_FILES:
-        if sha256_file(input_dir / "prepared" / name) != bundle["files"][name]:
+    files = bundle.get("files")
+    if (not isinstance(files, dict) or not set(PREPARED_FILES) <= set(files)
+            or not set(files) - set(PREPARED_FILES) <= set(OPTIONAL_BUNDLE_FILES)):
+        raise PipelineError("bundle must identify every prepared file and only known optional files")
+    for name, expected in files.items():
+        path = input_dir / ("prepared" if name in PREPARED_FILES else ".") / name
+        if sha256_file(path) != expected:
             raise PipelineError(f"training bundle checksum mismatch: {name}")
     manifest, rows = load_prepared(input_dir)
     raw = dict(bundle["settings"])
@@ -287,12 +290,15 @@ def train_loop(model, train_rows: list[list[Example]], validation_rows: list[lis
     return {"best_epoch": best_epoch, "best_validation_loss": best_loss, "epochs": history, "optimizer_steps": steps}
 
 
-def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str | None = None) -> dict:
+def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str | None = None,
+        deadline: float | None = None) -> dict:
     import torch
     from transformers import AutoModelForImageTextToText, set_seed
+    from smithtune.training.evaluation import read_evaluation
 
     report_stage("read_bundle")
     bundle, spec, rows, settings, rank = read_bundle(input_dir)
+    evaluation = read_evaluation(input_dir, bundle)
     # The bundle decides the device: the planner chose it from the instance type.
     device = settings.device if device is None else device
     report_stage("cuda_preflight")
@@ -329,6 +335,8 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str |
         # The complete marker is written last. Only a marked epoch is coherent.
         _json_dump(destination / "complete.json", {"record": record, "bundle": bundle})
         _json_dump(checkpoint_dir / "latest.json", {"epoch": record["epoch"]})
+        # The adapter the export will select, synchronized before the final upload.
+        _json_dump(checkpoint_dir / "selection.json", {"best_epoch": state["best_epoch"], "completed_epoch": record["epoch"]})
 
     report_stage("training")
     if settings.trainer_backend == "trl":
@@ -352,7 +360,115 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str |
         "lora_targets": "language attention q_proj,k_proj,v_proj,o_proj; alpha=2*rank",
         "max_sequence_tokens": max(len(item.input_ids) for group in [*train_rows, *validation_rows] for item in group),
         "peak_cuda_memory_bytes": 0 if device == "cpu" else torch.cuda.max_memory_allocated(),
+        "evaluation": {"status": "not_requested"} if evaluation is None else {"status": "pending"},
     })
     _json_dump(model_dir / "result.json", result)
     write_artifact_manifest(model_dir)
+    if evaluation is not None:
+        # Training is complete and exported; evaluation outcome is recorded separately.
+        del model, base
+        result["evaluation"] = evaluate_export(input_dir, model_dir, checkpoint_dir, spec, evaluation,
+                                               device=device, deadline=deadline)
+        _json_dump(model_dir / "result.json", result)
+        write_artifact_manifest(model_dir)
     return result
+
+
+def evaluate_export(input_dir: Path, model_dir: Path, checkpoint_dir: Path, spec: ModelSpec, evaluation, *,
+                    device: str, deadline: float | None = None, adapter_dir: Path | None = None) -> dict:
+    """Generate base and tuned answers from the exported adapter; never raise."""
+    import gc
+    import shutil as _shutil
+    import torch
+    from smithtune.training.evaluation import evaluation_status, generate_predictions, write_evaluation_summary
+
+    settings, cases = evaluation
+    durable = checkpoint_dir / "evaluation"
+    durable.mkdir(parents=True, exist_ok=True)
+    try:
+        report_stage("evaluation_release_training_state")
+        gc.collect()
+        if device != "cpu":
+            torch.cuda.empty_cache()
+        report_stage("evaluation_reload_export")
+        from peft import PeftModel
+        from transformers import AutoModelForImageTextToText
+        from smithtune.training.inference import verify_loaded_adapter
+
+        adapter_dir = adapter_dir or (model_dir / "adapter")
+        renderer = load_training_renderer(spec)
+        base = AutoModelForImageTextToText.from_pretrained(
+            spec.base_model, revision=model_revision(spec), trust_remote_code=False,
+            dtype=torch.float32 if device == "cpu" else torch.bfloat16, attn_implementation="sdpa",
+        ).to(device)
+        model = PeftModel.from_pretrained(base, adapter_dir, is_trainable=False).eval()
+        verify_loaded_adapter(model, adapter_dir)
+        report_stage("evaluation_generation")
+        status = generate_predictions(model, renderer, spec, cases, settings, device=device,
+                                      output_path=durable / "predictions.jsonl", deadline=deadline)
+    except Exception as exc:
+        diagnostic = failure_diagnostics(exc)
+        print(json.dumps(diagnostic), flush=True)
+        done = len(_safe_predictions(durable / "predictions.jsonl"))
+        status = evaluation_status(done, 2 * len(cases), error_kind=diagnostic["error_kind"])
+        status["failed_stage"] = diagnostic["stage"]
+    report_stage("evaluation_export")
+    write_evaluation_summary(durable / "evaluation.json", status, settings)
+    exported = model_dir / "evaluation"
+    if exported.exists():
+        _shutil.rmtree(exported)
+    exported.mkdir()
+    for name in ("predictions.jsonl", "evaluation.json"):
+        if (durable / name).exists():
+            _shutil.copyfile(durable / name, exported / name)
+    _shutil.copyfile(input_dir / "evaluation/cases.jsonl", exported / "cases.jsonl")
+    _shutil.copyfile(input_dir / "evaluation/settings.json", exported / "settings.json")
+    print(json.dumps({"smithtune_event": "evaluation", **status}), flush=True)
+    return status
+
+
+def run_evaluation_only(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str | None = None,
+                        deadline: float | None = None) -> dict:
+    """Generate answers for a collected export without training; resumes saved answers."""
+    import torch
+    from smithtune.training.contracts import verify_artifact
+    from smithtune.training.evaluation import read_evaluation
+
+    report_stage("read_bundle")
+    bundle, spec, _rows, settings, _rank = read_bundle(input_dir)
+    device = settings.device if device is None else device
+    evaluation = read_evaluation(input_dir, bundle)
+    if evaluation is None:
+        raise PipelineError("evaluation-only jobs need bundled evaluation cases")
+    report_stage("verify_export")
+    exported, exported_spec = verify_artifact(input_dir / "export")
+    prepared_subset = {name: bundle["files"][name] for name in PREPARED_FILES}
+    if {name: exported["bundle"]["files"].get(name) for name in PREPARED_FILES} != prepared_subset or exported_spec != spec:
+        raise PipelineError("export does not match this bundle's prepared data and model")
+    report_stage("cuda_preflight")
+    if device != "cpu" and not torch.cuda.is_available():
+        raise PipelineError("the evaluation worker requires a CUDA GPU unless the bundle selects cpu")
+    print(json.dumps({"smithtune_event": "runtime", **gpu_diagnostics()}), flush=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted((input_dir / "export").rglob("*")):
+        if path.is_file() and path.relative_to(input_dir / "export").parts[0] != "evaluation":
+            target = model_dir / path.relative_to(input_dir / "export")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+    result = dict(exported)
+    result["evaluation"] = evaluate_export(input_dir, model_dir, checkpoint_dir, spec, evaluation, device=device,
+                                           deadline=deadline, adapter_dir=input_dir / "export/adapter")
+    result["evaluation_job"] = {"operation": "evaluation_only", "source_run_id": exported["run_id"]}
+    _json_dump(model_dir / "result.json", result)
+    write_artifact_manifest(model_dir)
+    return result
+
+
+def _safe_predictions(path: Path) -> dict:
+    from smithtune.training.evaluation import load_predictions
+
+    try:
+        return load_predictions(path)
+    except PipelineError:
+        return {}

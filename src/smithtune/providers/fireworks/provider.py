@@ -322,8 +322,8 @@ class FireworksProvider:
         return model
 
     def settings_from_options(self, options: TrainingOptions) -> SFTSettings:
-        if options.aws_config is not None or options.aws_trainer is not None:
-            raise PipelineError("--aws-config/--aws-trainer requires --provider sagemaker")
+        if any(getattr(options, name) is not None for name in ("aws_config", "aws_trainer", "aws_max_cases")):
+            raise PipelineError("--aws-config/--aws-trainer/--aws-max-cases requires --provider sagemaker")
         if any(value is not None for value in (
             options.microbatch_token_budget, options.max_spend_usd, options.hourly_rate_usd,
             options.replicas, options.spend_reserve_fraction, options.max_dropped_training_rows

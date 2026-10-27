@@ -344,12 +344,13 @@ def _parser() -> argparse.ArgumentParser:
         )
         sagemaker_group.add_argument("--aws-config", type=Path, help="SageMaker job configuration JSON; see docs/aws-training.md")
         sagemaker_group.add_argument("--aws-trainer", choices=("torch", "trl"), help="SageMaker worker backend (default: the validated torch reference loop)")
+        sagemaker_group.add_argument("--aws-max-cases", type=int, help="guard on replay cases answered inside the job with --evaluate (default: 50)")
     aws = sub.add_parser("aws", help="experimental SageMaker job, artifact and endpoint lifecycle")
     aws_sub = aws.add_subparsers(dest="aws_command", required=True)
-    for name in ("status", "stop", "wait", "collect", "deploy-plan", "deploy", "endpoint-status", "invoke", "undeploy", "endpoint-smoke"):
+    for name in ("status", "stop", "wait", "collect", "evaluate-job", "deploy-plan", "deploy", "endpoint-status", "invoke", "undeploy", "endpoint-smoke"):
         action = aws_sub.add_parser(name)
         action.add_argument("--run-dir", type=Path, required=True)
-        if name in {"stop", "wait", "deploy", "invoke", "undeploy", "endpoint-smoke"}:
+        if name in {"stop", "wait", "evaluate-job", "deploy", "invoke", "undeploy", "endpoint-smoke"}:
             action.add_argument("--confirm", action="store_true")
         if name in {"deploy-plan", "deploy", "endpoint-smoke"}:
             action.add_argument("--endpoint-config", type=Path, required=True)
@@ -368,9 +369,17 @@ def _aws_command(args):
     from smithtune.providers.sagemaker.artifacts import collect
     from smithtune.providers.sagemaker.monitoring import wait_for_training
     if args.aws_command in {"status", "stop"}:
-        return SageMakerProvider().status(args.run_dir, stop=args.aws_command == "stop", confirm=getattr(args, "confirm", False))
+        value = SageMakerProvider().status(args.run_dir, stop=args.aws_command == "stop", confirm=getattr(args, "confirm", False))
+        if (args.run_dir / "result.json").exists():
+            result = _load_json(args.run_dir / "result.json")
+            value["training"] = {"status": "complete", "best_epoch": result.get("best_epoch")}
+            value["evaluation"] = result.get("evaluation", {"status": "not_requested"})
+        return value
     if args.aws_command == "collect":
         return collect(args.run_dir)
+    if args.aws_command == "evaluate-job":
+        from smithtune.providers.sagemaker.provider import submit_evaluation_job
+        return submit_evaluation_job(args.run_dir, confirm=args.confirm)
     if args.aws_command == "wait":
         return wait_for_training(args.run_dir, timeout=args.timeout or 600, stop_if_queued=args.stop_if_queued, confirm=args.confirm)
     if args.aws_command in {"deploy-plan", "deploy", "endpoint-smoke"}:
@@ -558,6 +567,55 @@ def _run_fireworks_evaluation(args):
     )
 
 
+def _run_sagemaker_evaluation(args):
+    """Judge and publish the answers a SageMaker job generated; nothing is sampled here."""
+    from smithtune.providers.sagemaker.sampling import PrecomputedSampler, checkpoint_from_run
+
+    if args.serving_mode not in (None, "sampler") or any(value is not None for value in (
+        args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model, args.accelerator,
+    )) or args.deployment_timeout != 600:
+        raise PipelineError("SageMaker evaluation uses --run-dir and the answers generated in the job; omit endpoint and deployment options")
+    if args.run_dir is None:
+        raise PipelineError("SageMaker evaluation requires --run-dir containing the collected training run")
+    if args.run_dir.resolve() == args.output_dir.resolve():
+        raise PipelineError("--run-dir and --output-dir must be different directories")
+    model, checkpoint, artifact_dir, summary = checkpoint_from_run(args.data_dir, args.run_dir)
+    if summary["status"] == "not_requested":
+        raise PipelineError("this run generated no evaluation answers; train with --evaluate, or run smithtune aws evaluate-job after collecting")
+    settings = summary["settings"]
+    if args.max_output_tokens not in (DEFAULT_REPLAY_MAX_TOKENS, settings.max_new_tokens):
+        raise PipelineError(f"the job generated answers with max_output_tokens={settings.max_new_tokens}; omit or match --max-output-tokens")
+    if args.max_points_per_trajectory not in (None, settings.max_points_per_trajectory):
+        raise PipelineError(f"the job generated answers with max_points_per_trajectory={settings.max_points_per_trajectory}; omit or match it")
+    if args.command == "eval-plan":
+        with output_lock(args.output_dir):
+            value = replay_evaluation.prepare_replay_evaluation(
+                args.data_dir, args.output_dir, settings.max_points_per_trajectory, settings.max_new_tokens,
+            )
+            value.update(serving_mode="precomputed", evaluated_models=2, checkpoint=checkpoint,
+                         evaluation={key: value_ for key, value_ in summary.items() if key != "settings"},
+                         cost="no serving resources; judge calls only")
+            _json_dump(args.output_dir / "plan.json", value)
+            return value
+    if summary["status"] != "complete":
+        raise PipelineError(
+            f"the job's evaluation is {summary['status']} ({summary.get('completed', 0)} of {summary.get('total', '?')} answers); "
+            "run smithtune aws evaluate-job --run-dir ... --confirm, then aws wait on the new job and aws collect on this run"
+        )
+    if args.base_model not in (None, model.base_model):
+        raise PipelineError("SageMaker replay compares the adapter with its own base model")
+    if not args.confirm:
+        raise PipelineError("judge inference requires --confirm")
+    replay_evaluation.validate_judge_credentials(args.judge_model)
+    sampler = PrecomputedSampler(model, checkpoint, artifact_dir)
+    return replay_evaluation.run_replay_evaluation(
+        args.data_dir, args.output_dir, checkpoint, args.judge_model,
+        base_model=model.base_model, concurrency=args.concurrency,
+        max_points_per_trajectory=settings.max_points_per_trajectory, max_output_tokens=settings.max_new_tokens,
+        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
+    )
+
+
 def _run_baseten_sampler_evaluation(args):
     from smithtune.providers.baseten.sampling import BasetenReplaySampler, checkpoint_from_run
 
@@ -639,8 +697,8 @@ def main(argv: list[str] | None = None) -> None:
                 return
         command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
         activity.enter_context(command_status(f"Running {command}"))
-        if getattr(args, "provider", None) == "sagemaker" and args.command in {"deploy", "eval-plan", "evaluate", "undeploy"}:
-            raise PipelineError("Use smithtune aws deploy-plan/deploy/invoke/undeploy for SageMaker endpoints; LangSmith replay is not implemented yet")
+        if getattr(args, "provider", None) == "sagemaker" and args.command in {"deploy", "undeploy"}:
+            raise PipelineError("Use smithtune aws deploy-plan/deploy/invoke/undeploy for SageMaker endpoints")
         if args.command == "status":
             value = controller.status(args.run_dir)
         elif args.command == "logs":
@@ -764,6 +822,12 @@ def main(argv: list[str] | None = None) -> None:
                     args.run_dir, *fireworks_options, confirm=args.confirm,
                     timeout=args.deployment_timeout if args.deployment_timeout is not None else 1800,
                 )
+        elif args.command in ("eval-plan", "evaluate") and args.provider == "sagemaker":
+            if args.output_dir is None:
+                if args.run_dir is None:
+                    raise PipelineError("supply --run-dir or --output-dir")
+                args.output_dir = args.run_dir / "replay"
+            value = _run_sagemaker_evaluation(args)
         elif args.command in ("eval-plan", "evaluate") and args.provider == "fireworks":
             if args.output_dir is None:
                 if args.run_dir is None:

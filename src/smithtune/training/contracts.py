@@ -27,6 +27,7 @@ MODEL_REVISIONS = {
 CPU_TRAINING_PROFILES = frozenset({"qwen3p5-0p8b-test"})
 WORKER_DEVICES = ("cpu", "cuda:0")
 PREPARED_FILES = ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl")
+OPTIONAL_BUNDLE_FILES = ("evaluation/cases.jsonl", "evaluation/settings.json")
 LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 

@@ -10,7 +10,7 @@ import tempfile
 from smithtune.artifacts import _json_dump, _load_json, output_lock
 from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker import AWSJobConfig, SageMakerProvider, split_s3_uri
-from smithtune.training.contracts import artifact_files, read_result, sha256_file, verify_artifact, write_artifact_manifest
+from smithtune.training.contracts import PREPARED_FILES, artifact_files, read_result, sha256_file, verify_artifact, write_artifact_manifest
 
 MAX_ARTIFACT_BYTES = 2 * 1024**3
 
@@ -25,7 +25,9 @@ def _collected_artifacts(target: Path, result: dict) -> dict:
         "metrics_uri": (resolved / "result.json").as_uri(), "result_manifest_uri": (resolved / "artifact.json").as_uri(),
     }
     return {"status": "verified", "artifact_dir": str(target), "source_run_id": result["run_id"],
-            "artifacts": artifacts}
+            "training": {"status": "complete", "best_epoch": result.get("best_epoch"),
+                         "best_validation_loss": result.get("best_validation_loss")},
+            "evaluation": result.get("evaluation", {"status": "not_requested"}), "artifacts": artifacts}
 
 
 def extract_archive(archive: Path, destination: Path):
@@ -57,8 +59,9 @@ def extract_archive(archive: Path, destination: Path):
 def collect(run_dir: Path, *, provider=None) -> dict:
     provider = provider or SageMakerProvider()
     receipt = provider.status(run_dir)
-    if receipt["status"] != "Completed" or not receipt.get("model_artifacts"):
-        raise PipelineError("artifact collection requires a completed training job")
+    # A job stopped after export (for example during answer generation) still uploads its model directory.
+    if receipt["status"] not in {"Completed", "Stopped"} or not receipt.get("model_artifacts"):
+        raise PipelineError("artifact collection requires a completed training job, or a stopped job that already exported its model")
     config = AWSJobConfig(**receipt["aws"])
     expected_bucket, expected_prefix = split_s3_uri(config.s3_prefix)
     bucket, key = split_s3_uri(receipt["model_artifacts"])
@@ -69,6 +72,7 @@ def collect(run_dir: Path, *, provider=None) -> dict:
         if target.exists():
             result, _spec = verify_artifact(target)
             _verify_origin(result, run_dir, receipt)
+            result = _refresh_evaluation(run_dir, target, result, receipt, config, provider)
             return _collected_artifacts(target, result)
         with tempfile.TemporaryDirectory(prefix=".collect-", dir=run_dir) as scratch:
             scratch = Path(scratch)
@@ -97,7 +101,65 @@ def collect(run_dir: Path, *, provider=None) -> dict:
             })
             os.replace(extracted, target)
             os.replace(scratch / "collection.json", run_dir / "collection.json")
+        result = _refresh_evaluation(run_dir, target, result, receipt, config, provider)
         return _collected_artifacts(target, result)
+
+
+def _refresh_evaluation(run_dir, target, result, receipt, config, provider):
+    """Prefer answers synchronized from the job's checkpoint prefix when they go further.
+
+    A stopped job or a later evaluation-only job leaves its progress there; the
+    final model archive may predate it.
+    """
+    from smithtune.training.evaluation import load_predictions
+
+    bucket, prefix = split_s3_uri(config.s3_prefix)
+    base = f"{prefix}/{receipt['job_name']}/checkpoints/evaluation/"
+    local = target / "evaluation"
+    try:
+        client = provider._session(config).client("s3")
+        heads = {}
+        for name in ("predictions.jsonl", "evaluation.json"):
+            try:
+                heads[name] = client.head_object(Bucket=bucket, Key=base + name)
+            except Exception as exc:
+                code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+                if code not in {"404", "NoSuchKey", "NotFound"}:
+                    raise
+        if "predictions.jsonl" not in heads:
+            _publish_result(run_dir, target, result)
+            return result
+        if not 0 < heads["predictions.jsonl"]["ContentLength"] <= MAX_ARTIFACT_BYTES:
+            raise PipelineError("unexpected predictions size in the checkpoint prefix")
+        with tempfile.TemporaryDirectory(prefix=".evaluation-", dir=run_dir) as scratch:
+            scratch = Path(scratch)
+            for name in heads:
+                client.download_file(bucket, base + name, str(scratch / name))
+            remote = load_predictions(scratch / "predictions.jsonl", repair=True)
+            current = load_predictions(local / "predictions.jsonl") if (local / "predictions.jsonl").exists() else {}
+            if len(remote) > len(current):
+                local.mkdir(exist_ok=True)
+                for name in heads:
+                    os.replace(scratch / name, local / name)
+                if "evaluation.json" in heads:
+                    summary = _load_json(local / "evaluation.json")
+                    result["evaluation"] = {key: summary[key] for key in ("status", "completed", "total") if key in summary}
+                    for key in ("reason", "error_kind"):
+                        if key in summary:
+                            result["evaluation"][key] = summary[key]
+                _json_dump(target / "result.json", result)
+                write_artifact_manifest(target)
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(f"could not read evaluation progress from the checkpoint prefix ({type(exc).__name__})") from None
+    _publish_result(run_dir, target, result)
+    return result
+
+
+def _publish_result(run_dir, target, result):
+    # The run root copy lets shared checkpoint helpers read the selected epoch.
+    _json_dump(run_dir / "result.json", result)
 
 
 def _verify_origin(result, run_dir, receipt):
@@ -106,7 +168,8 @@ def _verify_origin(result, run_dir, receipt):
             or result.get("model") != _load_json(run_dir / "input/prepared/manifest.json")["model"]):
         raise PipelineError("model export does not match the saved training inputs")
     for name, digest in bundle["files"].items():
-        if sha256_file(run_dir / "input/prepared" / name) != digest:
+        path = run_dir / "input" / ("prepared" if name in PREPARED_FILES else ".") / name
+        if sha256_file(path) != digest:
             raise PipelineError("saved training input was changed")
 
 
