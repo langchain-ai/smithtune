@@ -23,5 +23,6 @@ data/
 data-*/
 runs/
 *.controller/
+artifacts/
 .superpowers/
 docs/superpowers/

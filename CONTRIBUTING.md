@@ -18,6 +18,30 @@ status reports local process health and discovers available run artifacts.
 Adapters that intercept SIGTERM for cleanup raise the shared
 `providers.base.TerminationRequested` so the controller records an interruption.
 
+The experimental SageMaker adapter lives in `providers/sagemaker/`: `provider.py`
+plans and submits Training Jobs, `execution.py` holds the explicit compute
+settings, `artifacts.py` collects and verifies exports, `deployment.py` and
+`monitoring.py` own the endpoint lifecycle and bounded waits, and `worker.py` is
+the container entrypoint that maps SageMaker's filesystem paths onto the shared
+worker. `smoke.py` and `benchmark.py` are experimental image entrypoints for
+reload-only and context-sizing jobs, not CLI commands. The cloud-neutral recipe
+is `training/hf_sft.py` with an optional `training/trl_trainer.py` backend;
+`training/worker.py` is its local-file CLI, `training/spec.py` holds the shared
+job and artifact descriptions, `training/contracts.py` validates prepared bundles
+and exports, and `training/serving.py` is a pilot single-GPU HTTP server.
+`providers/vertex/` is an unregistered scaffold, not a working CLI provider.
+Rendering for these providers goes through `rendering.uses_hf_renderer`, the same
+native HF/TRL path Baseten uses; keep them aligned rather than adding a format.
+
+Install `--extra aws --extra aws-training` alongside `--extra test` to run the
+mocked AWS and tiny CPU PEFT checks (`tests/test_sagemaker*.py` and
+`tests/test_open_training_*.py`). They do not contact AWS or download model
+weights, and they do not establish GPU memory, latency or full-size TRL parity;
+`tests/test_open_training_serving.py` binds a loopback HTTP socket. See
+[docs/aws-training.md](docs/aws-training.md) for the container contract and
+[docs/open-training.md](docs/open-training.md) for the local-file input/export
+contract shared with the Vertex scaffold.
+
 `evaluation/langsmith.py` publishes versioned splits, saved replay predictions,
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable
 across upload retries. Verify snapshots and create the experiments before paid
