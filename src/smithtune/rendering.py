@@ -15,7 +15,7 @@ SFT_TARGET_POLICY = "last_assistant_message"
 
 # Providers whose training and replay rendering uses the native HF/TRL path
 # rather than the Fireworks cookbook renderers.
-HF_RENDERED_PROVIDERS = frozenset({"baseten", "sagemaker", "vertex", "local"})
+HF_RENDERED_PROVIDERS = frozenset({"baseten", "sagemaker"})
 
 
 DEFAULT_REPLAY_MAX_TOKENS = 4_096
