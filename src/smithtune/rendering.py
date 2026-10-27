@@ -13,15 +13,23 @@ from smithtune.providers.base import ModelSpec, PipelineError
 
 SFT_TARGET_POLICY = "last_assistant_message"
 
+# Providers whose training and replay rendering uses the native HF/TRL path
+# rather than the Fireworks cookbook renderers.
+HF_RENDERED_PROVIDERS = frozenset({"baseten", "sagemaker", "vertex", "local"})
+
 
 DEFAULT_REPLAY_MAX_TOKENS = 4_096
+
+
+def uses_hf_renderer(model: ModelSpec) -> bool:
+    return model.provider in HF_RENDERED_PROVIDERS
 
 
 def rendering_version(model: ModelSpec) -> str:
     """Identify the installed formatting implementation, not just its alias."""
     try:
         transformers_version = metadata.version("transformers")
-        if model.provider == "baseten":
+        if uses_hf_renderer(model):
             from smithtune.hf_rendering import HF_RENDERING_VERSION
             from smithtune.native_rendering import NATIVE_MODELS, NATIVE_RENDERING_VERSION
 
@@ -47,7 +55,7 @@ def load_training_renderer(model: ModelSpec) -> Any:
     renderer_name = resolved_renderer_name(model)
     if model.rendering_version and model.rendering_version != rendering_version(model):
         raise PipelineError("rendering implementation differs from preparation; restore dependencies or prepare again")
-    if model.provider == "baseten":
+    if uses_hf_renderer(model):
         from smithtune.hf_rendering import HFRenderer, load_tokenizer
         from smithtune.native_rendering import NATIVE_MODELS, NativePrefixRenderer
 
@@ -137,7 +145,7 @@ def render_row_tokens(
     _validate_renderer_messages(row["messages"], model)
     result = []
     for target in training_targets(row):
-        if model.provider == "baseten":
+        if uses_hf_renderer(model):
             datums = renderer.render(target["messages"], tools=target["tools"], final_target=True)
         else:
             datums = render_fireworks_target(target, renderer, include_loss_mask=include_loss_mask, reduction=reduction)
@@ -179,7 +187,7 @@ def validate_reasoning_support(model: ModelSpec) -> None:
 
 def resolved_renderer_name(model: ModelSpec) -> str:
     """Validate an explicit thinking-history mode against the renderer registry."""
-    if model.provider == "baseten":
+    if uses_hf_renderer(model):
         from smithtune.hf_rendering import validate_hf_model
         from smithtune.native_rendering import NATIVE_MODELS, validate_native_model
 
@@ -316,7 +324,7 @@ def validate_replay_context(
     rejected: list[dict[str, Any]] = []
     for case in cases:
         _validate_renderer_messages(case["messages"], model)
-        if model.provider == "baseten":
+        if uses_hf_renderer(model):
             prompt_tokens = len(renderer.prompt_tokens(case["messages"], tools=case.get("tools")))
         else:
             prompt_tokens = len(replay_prompt(case["messages"], case.get("tools"), model, renderer).to_ints())

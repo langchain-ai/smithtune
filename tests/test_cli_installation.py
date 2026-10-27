@@ -28,6 +28,7 @@ def test_module_entrypoint_and_version_outside_checkout(tmp_path):
     ["dataset", "triage", "--help"], ["dataset", "publish-splits", "--help"],
     ["models", "list"], ["models", "list", "--provider", "baseten"],
     ["models", "list", "--provider", "fireworks"],
+    ["models", "list", "--provider", "sagemaker"], ["aws", "status", "--help"],
 ])
 def test_discovery_does_not_import_training_sdks_or_access_network(tmp_path, argv):
     script = '''
@@ -35,7 +36,7 @@ import builtins
 import socket
 original_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
-    if name.split('.')[0] in {'training', 'torch', 'transformers', 'fireworks', 'baseten', 'deepagents', 'langchain_openai', 'pydantic_monty', 'openai', 'anthropic'}:
+    if name.split('.')[0] in {'training', 'torch', 'transformers', 'fireworks', 'baseten', 'deepagents', 'langchain_openai', 'pydantic_monty', 'openai', 'anthropic', 'boto3', 'botocore', 'peft'}:
         raise AssertionError(name)
     return original_import(name, *args, **kwargs)
 def no_network(*args, **kwargs):
@@ -56,12 +57,13 @@ from smithtune.cli import main
         report = json.loads(result.stdout)
         assert report["source"] == "smithtune_support_registry"
         assert report["live_availability_checked"] is False
-        expected_providers = {argv[-1]} if "--provider" in argv else {"baseten", "fireworks"}
+        expected_providers = {argv[-1]} if "--provider" in argv else {"baseten", "fireworks", "sagemaker"}
         assert {model["provider"] for model in report["models"]} == expected_providers
         for model in report["models"]:
             adapter = get_provider(model["provider"])
-            by_alias = adapter.model_from_options(ModelOptions(model=model["alias"]))
-            by_id = adapter.model_from_options(ModelOptions(model=model["model_id"]))
+            limit = model["training_context_limit"] if model["provider"] == "sagemaker" else None
+            by_alias = adapter.model_from_options(ModelOptions(model=model["alias"], max_seq_len=limit))
+            by_id = adapter.model_from_options(ModelOptions(model=model["model_id"], max_seq_len=limit))
             assert by_alias == by_id
             assert model["training_context_limit"] == by_alias.training_context_limit
     assert not list(tmp_path.iterdir())

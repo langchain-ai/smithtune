@@ -1,0 +1,27 @@
+# Allow only the source and locked dependency inputs into the training build.
+**
+!pyproject.toml
+!uv.lock
+!overrides.txt
+!README.md
+!src/
+!src/**
+!docker/
+!docker/sagemaker/
+!docker/sagemaker/Dockerfile
+.env
+.env.*
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/credentials.json
+.git/
+node_modules/
+**/__pycache__/
+.venv/
+.DS_Store
+artifacts/
+data/
+runs/

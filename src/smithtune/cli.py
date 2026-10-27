@@ -29,6 +29,7 @@ from smithtune.providers.fireworks.provider import (
     FireworksProvider,
     SFTSettings as FireworksSFTSettings,
 )
+from smithtune.providers.sagemaker import MODEL_SPECS as SAGEMAKER_MODEL_SPECS, SageMakerProvider
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers import PROVIDERS, get_provider
 from smithtune.providers.baseten import deployment as baseten_deployment, require_api_key as require_baseten_key
@@ -87,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         description="List smithtune's supported training models as JSON. No credentials or downloads are needed; live provider availability is checked during prepare and train.",
     )
     models_list.add_argument(
-        "--provider", choices=tuple(PROVIDERS), help="filter by provider (default: both providers)",
+        "--provider", choices=tuple(PROVIDERS), help="filter by provider (default: all providers)",
     )
 
     curate = sub.add_parser("dataset", help="curate trajectories from a tracing project")
@@ -206,7 +207,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--evaluate", action="store_true", help="compare base and best checkpoint through provider samplers after training")
         _add_replay_options(command)
         shared = command.add_argument_group(
-            "Shared training options", "Supported by both Fireworks and Baseten.",
+            "Shared training options", "Supported by all training providers.",
         )
         shared.add_argument(
             "--max-epochs", type=int, default=common_defaults.max_epochs,
@@ -337,7 +338,60 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("--account-id", help="Fireworks account ID")
     remove.add_argument("--deployment-id", help="Fireworks deployment ID")
     remove.add_argument("--confirm", action="store_true")
+    for command in (plan, training):
+        sagemaker_group = command.add_argument_group(
+            "SageMaker-only options", "Require --provider sagemaker; rejected by Fireworks and Baseten.",
+        )
+        sagemaker_group.add_argument("--aws-config", type=Path, help="SageMaker job configuration JSON; see docs/aws-training.md")
+        sagemaker_group.add_argument("--aws-trainer", choices=("torch", "trl"), help="SageMaker worker backend (default: the validated torch reference loop)")
+    aws = sub.add_parser("aws", help="experimental SageMaker job, artifact and endpoint lifecycle")
+    aws_sub = aws.add_subparsers(dest="aws_command", required=True)
+    for name in ("status", "stop", "wait", "collect", "deploy-plan", "deploy", "endpoint-status", "invoke", "undeploy", "endpoint-smoke"):
+        action = aws_sub.add_parser(name)
+        action.add_argument("--run-dir", type=Path, required=True)
+        if name in {"stop", "wait", "deploy", "invoke", "undeploy", "endpoint-smoke"}:
+            action.add_argument("--confirm", action="store_true")
+        if name in {"deploy-plan", "deploy", "endpoint-smoke"}:
+            action.add_argument("--endpoint-config", type=Path, required=True)
+            action.add_argument("--endpoint-name", required=True)
+        if name in {"wait", "endpoint-status", "undeploy", "endpoint-smoke"}:
+            action.add_argument("--timeout", type=float, default=0, help="optional bounded wait in seconds (maximum 3600)")
+        if name == "wait":
+            action.add_argument("--stop-if-queued", action="store_true", help="stop at timeout if no compute has started; requires --confirm")
+        if name in {"invoke", "endpoint-smoke"}:
+            action.add_argument("--input", type=Path, required=True, help="JSON messages/tools request; greedy generation")
     return parser
+
+
+def _aws_command(args):
+    from smithtune.providers.sagemaker import deployment as endpoints
+    from smithtune.providers.sagemaker.artifacts import collect
+    from smithtune.providers.sagemaker.monitoring import wait_for_training
+    if args.aws_command in {"status", "stop"}:
+        return SageMakerProvider().status(args.run_dir, stop=args.aws_command == "stop", confirm=getattr(args, "confirm", False))
+    if args.aws_command == "collect":
+        return collect(args.run_dir)
+    if args.aws_command == "wait":
+        return wait_for_training(args.run_dir, timeout=args.timeout or 600, stop_if_queued=args.stop_if_queued, confirm=args.confirm)
+    if args.aws_command in {"deploy-plan", "deploy", "endpoint-smoke"}:
+        settings = endpoints.EndpointSettings.read(args.endpoint_config)
+        if args.aws_command == "deploy-plan":
+            return endpoints.plan(args.run_dir, settings, args.endpoint_name)
+        if args.aws_command == "endpoint-smoke":
+            return endpoints.smoke(args.run_dir, settings, args.endpoint_name, _load_json(args.input),
+                                   confirm=args.confirm, timeout=args.timeout or 600)
+        return endpoints.deploy(args.run_dir, settings, args.endpoint_name, confirm=args.confirm)
+    if args.aws_command == "endpoint-status":
+        return endpoints.wait(args.run_dir, timeout=args.timeout) if args.timeout else endpoints.status(args.run_dir)
+    if args.aws_command == "undeploy":
+        if not args.confirm:
+            raise PipelineError("endpoint cleanup requires --confirm")
+        return endpoints.wait(args.run_dir, timeout=args.timeout, deleting=True) if args.timeout else endpoints.undeploy(args.run_dir, confirm=True)
+    if args.aws_command == "invoke":
+        if not args.confirm:
+            raise PipelineError("endpoint inference requires --confirm")
+        return endpoints.invoke(args.run_dir, _load_json(args.input))
+    raise PipelineError("unknown AWS command")
 
 
 def _model_options(args: argparse.Namespace) -> ModelOptions:
@@ -585,6 +639,8 @@ def main(argv: list[str] | None = None) -> None:
                 return
         command = " ".join(filter(None, (args.command, getattr(args, f"{args.command}_command", None))))
         activity.enter_context(command_status(f"Running {command}"))
+        if getattr(args, "provider", None) == "sagemaker" and args.command in {"deploy", "eval-plan", "evaluate", "undeploy"}:
+            raise PipelineError("Use smithtune aws deploy-plan/deploy/invoke/undeploy for SageMaker endpoints; LangSmith replay is not implemented yet")
         if args.command == "status":
             value = controller.status(args.run_dir)
         elif args.command == "logs":
@@ -592,8 +648,10 @@ def main(argv: list[str] | None = None) -> None:
             return
         elif args.command == "doctor":
             value = diagnose()
+        elif args.command == "aws":
+            value = _aws_command(args)
         elif args.command == "models":
-            profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
+            profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS, "sagemaker": SAGEMAKER_MODEL_SPECS}
             value = {
                 "source": "smithtune_support_registry",
                 "live_availability_checked": False,
@@ -603,6 +661,7 @@ def main(argv: list[str] | None = None) -> None:
                         "alias": alias,
                         "model_id": model.base_model,
                         "training_context_limit": model.training_context_limit,
+                        **({"experimental": True, "hardware_validated": False} if provider == "sagemaker" else {}),
                     }
                     for provider, specs in sorted(profiles.items())
                     if args.provider is None or args.provider == provider
