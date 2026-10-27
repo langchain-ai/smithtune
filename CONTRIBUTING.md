@@ -26,10 +26,10 @@ the container entrypoint that maps SageMaker's filesystem paths onto the shared
 worker. `smoke.py` and `benchmark.py` are experimental image entrypoints for
 reload-only and context-sizing jobs, not CLI commands. The cloud-neutral recipe
 is `training/hf_sft.py` with an optional `training/trl_trainer.py` backend;
-`training/worker.py` is its local-file CLI, `training/spec.py` holds the shared
-job and artifact descriptions, `training/contracts.py` validates prepared bundles
-and exports, and `training/serving.py` is a pilot single-GPU HTTP server.
-`providers/vertex/` is an unregistered scaffold, not a working CLI provider.
+`training/worker.py` is its local-file CLI, `training/contracts.py` describes the
+job, validates prepared bundles and exports, and `training/serving.py` is a pilot
+single-GPU HTTP server. No AWS SDK calls belong in `training/`; a second cloud
+adapter would stage files, submit and collect around the same worker.
 Rendering for these providers goes through `rendering.uses_hf_renderer`, the same
 native HF/TRL path Baseten uses; keep them aligned rather than adding a format.
 
@@ -40,7 +40,7 @@ weights, and they do not establish GPU memory, latency or full-size TRL parity;
 `tests/test_open_training_serving.py` binds a loopback HTTP socket. See
 [docs/aws-training.md](docs/aws-training.md) for the container contract and
 [docs/open-training.md](docs/open-training.md) for the local-file input/export
-contract shared with the Vertex scaffold.
+contract.
 
 `evaluation/langsmith.py` publishes versioned splits, saved replay predictions,
 and judge feedback through the LangSmith SDK. Keep run and feedback IDs stable

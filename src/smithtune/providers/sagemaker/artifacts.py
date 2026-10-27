@@ -1,7 +1,6 @@
 """Recover completed job artifacts and package verified local exports for serving."""
 from __future__ import annotations
 
-from dataclasses import asdict
 import os
 from pathlib import Path
 import shutil
@@ -12,7 +11,6 @@ from smithtune.artifacts import _json_dump, _load_json, output_lock
 from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker import AWSJobConfig, SageMakerProvider, split_s3_uri
 from smithtune.training.contracts import artifact_files, read_result, sha256_file, verify_artifact, write_artifact_manifest
-from smithtune.training.spec import TrainingArtifacts
 
 MAX_ARTIFACT_BYTES = 2 * 1024**3
 
@@ -20,12 +18,14 @@ MAX_ARTIFACT_BYTES = 2 * 1024**3
 def _collected_artifacts(target: Path, result: dict) -> dict:
     """Portable handles to verified local outputs; restart loading is not implemented."""
     resolved = target.resolve()
-    artifacts = TrainingArtifacts(
-        selected_model_uri=(resolved / "adapter").as_uri(), resume_checkpoint_uri=None,
-        metrics_uri=(resolved / "result.json").as_uri(), result_manifest_uri=(resolved / "artifact.json").as_uri(),
-    )
+    # Inference weights and restart state have distinct compatibility rules;
+    # cross-job resume is not implemented, so no resume handle is offered.
+    artifacts = {
+        "selected_model_uri": (resolved / "adapter").as_uri(), "resume_checkpoint_uri": None,
+        "metrics_uri": (resolved / "result.json").as_uri(), "result_manifest_uri": (resolved / "artifact.json").as_uri(),
+    }
     return {"status": "verified", "artifact_dir": str(target), "source_run_id": result["run_id"],
-            "artifacts": asdict(artifacts)}
+            "artifacts": artifacts}
 
 
 def extract_archive(archive: Path, destination: Path):
