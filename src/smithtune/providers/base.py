@@ -144,6 +144,8 @@ class TrainingOptions(CommonSFTSettings):
     replicas: int | None = None
     spend_reserve_fraction: float | None = None
     max_dropped_training_rows: int | None = None
+    aws_config: Path | None = None
+    aws_trainer: str | None = None
 
 
 class TrainingProvider(Protocol):

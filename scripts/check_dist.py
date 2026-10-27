@@ -59,6 +59,10 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
         run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
         run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[baseten-deploy]")
         run(python, "-I", "-m", "pytest", "tests/baseten/test_truss.py", "tests/baseten/test_deployment.py", "tests/baseten/test_deploy_cli.py", cwd=work, env=env)
+        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[aws,aws-training]")
+        run(python, "-I", "-m", "pytest", "tests/test_sagemaker.py", "tests/test_sagemaker_worker.py",
+            "tests/test_sagemaker_smoke.py", "tests/test_sagemaker_benchmark.py", "tests/test_sagemaker_end_to_end.py",
+            "tests/test_open_training_trl.py", "tests/test_open_training_serving.py", cwd=work, env=env)
         # Commit a clean source snapshot in a disposable repository. This tests
         # Git installation of the current working tree without committing it to
         # the developer's repository or depending on a published branch.

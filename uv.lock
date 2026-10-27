@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -1849,6 +1849,27 @@ wheels = [
 ]
 
 [[package]]
+name = "peft"
+version = "0.21.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/af/2e08abf1cd3b8792a02f5116808f2398c2f77ecdff801ced2ce16007a6f9/peft-0.21.2.tar.gz", hash = "sha256:b803ccfb3f3f316004d850284306687833a2235ea278fb56abc856203456142e", size = 983614, upload-time = "2026-10-01T10:26:36.129Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/0b/59441cdbfdd342ed03c08af90a2fe16173f0cd48ab219f523b39ca059a79/peft-0.21.2-py3-none-any.whl", hash = "sha256:106ab6077ff72c54d21577f9af5970e34bac7582cb14209f7b2b511e322a4eae", size = 835427, upload-time = "2026-10-01T10:26:34.085Z" },
+]
+
+[[package]]
 name = "pfzy"
 version = "0.3.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2510,6 +2531,13 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+aws = [
+    { name = "boto3" },
+]
+aws-training = [
+    { name = "peft" },
+    { name = "torch" },
+]
 baseten-deploy = [
     { name = "truss" },
 ]
@@ -2526,6 +2554,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "baseten-loops", specifier = "==0.21.0" },
+    { name = "boto3", marker = "extra == 'aws'", specifier = "==1.43.95" },
     { name = "datasets", specifier = ">=5.0.1,<6" },
     { name = "deepagents", marker = "extra == 'deepagents'", specifier = "==0.7.14" },
     { name = "fireworks-ai", extras = ["training"], specifier = "==1.2.11" },
@@ -2533,6 +2562,7 @@ requires-dist = [
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "langchain-openai", marker = "extra == 'deepagents'", specifier = "==1.6.2" },
     { name = "langsmith", specifier = "==0.12.4" },
+    { name = "peft", marker = "extra == 'aws-training'", specifier = "==0.21.2" },
     { name = "pillow", specifier = ">=13.0.0,<14" },
     { name = "pydantic-monty", marker = "extra == 'deepagents'", specifier = "==0.0.23" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
@@ -2540,11 +2570,12 @@ requires-dist = [
     { name = "rich", specifier = "==13.9.4" },
     { name = "ruff", marker = "extra == 'test'", specifier = "==0.14.0" },
     { name = "tinker", specifier = "==0.23.0" },
+    { name = "torch", marker = "extra == 'aws-training'", specifier = "==2.14.0" },
     { name = "transformers", specifier = "==5.10.4" },
     { name = "trl", specifier = "==1.13.0" },
     { name = "truss", marker = "extra == 'baseten-deploy'", specifier = "==0.18.30" },
 ]
-provides-extras = ["baseten-deploy", "test", "deepagents"]
+provides-extras = ["aws", "aws-training", "baseten-deploy", "test", "deepagents"]
 
 [[package]]
 name = "sniffio"

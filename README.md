@@ -3,6 +3,8 @@
 Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
 recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
 in LangSmith, then optionally deploy an endpoint for your application.
+An experimental [SageMaker provider](docs/aws-training.md) trains in your own AWS
+account; its LangSmith evaluation is not wired up yet.
 
 smithtune is an early beta project; commands and saved-directory formats may change
 between releases. If you run into issues, please report them in the

@@ -42,7 +42,7 @@ def diagnose() -> dict:
     from smithtune import data_rights
 
     packages = {}
-    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "langsmith", "transformers", "trl", "torch", "deepagents", "langchain-openai", "pydantic-monty"):
+    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "langsmith", "transformers", "trl", "torch", "boto3", "peft", "deepagents", "langchain-openai", "pydantic-monty"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
