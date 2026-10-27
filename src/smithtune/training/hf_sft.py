@@ -17,7 +17,7 @@ import shutil
 
 from smithtune.artifacts import _json_dump, _load_json
 from smithtune.providers.base import ModelSpec, PipelineError
-from smithtune.training.contracts import LORA_TARGET_MODULES, OPTIONAL_BUNDLE_FILES, PREPARED_FILES, describe_sft_job, load_prepared, model_revision, sha256_file, write_artifact_manifest, WorkerSettings
+from smithtune.training.contracts import LORA_TARGET_SETS, LOSS_IMPLEMENTATION, OPTIONAL_BUNDLE_FILES, PREPARED_FILES, describe_sft_job, load_prepared, model_revision, sha256_file, write_artifact_manifest, WorkerSettings
 from smithtune.rendering import load_training_renderer, render_row_tokens
 
 
@@ -184,19 +184,36 @@ def read_bundle(input_dir: Path):
     return bundle, spec, rows, settings, rank
 
 
-def configure_lora(model, rank: int):
+def configure_lora(model, rank: int, targets: str = "attention"):
     from peft import LoraConfig, get_peft_model
 
-    # Only language attention projections, not the multimodal vision encoder.
-    # This initial recipe intentionally excludes linear-attention/MLP adapters.
+    # Decoder-layer projections of the language model only: never the vision
+    # encoder, embeddings or lm_head (the chunked loss reads the head directly).
+    suffixes = LORA_TARGET_SETS[targets]
     targets = [name for name, _ in model.named_modules()
-               if ".language_model." in name and name.rsplit(".", 1)[-1] in LORA_TARGET_MODULES]
-    if not targets:
-        raise PipelineError("Qwen language attention projections not found; refusing a different LoRA recipe")
+               if ".language_model.layers." in name and name.rsplit(".", 1)[-1] in suffixes]
+    if not targets or not any(name.endswith("q_proj") for name in targets):
+        raise PipelineError("Qwen language decoder projections not found; refusing a different LoRA recipe")
     return get_peft_model(model, LoraConfig(
         r=rank, lora_alpha=2 * rank, lora_dropout=0.0, bias="none",
         task_type="CAUSAL_LM", target_modules=targets,
     ))
+
+
+def enable_chunked_loss(model) -> None:
+    """Score only supervised positions, in checkpointed chunks, never full logits.
+
+    TRL patches the model's forward the same way for its own backend; applying
+    it here keeps the reference loop, validation and benchmarks on one objective.
+    Generation and label-free calls still use the original forward.
+    """
+    from trl.trainer.sft_trainer import _CHUNKED_LM_HEAD_CHUNK_SIZE, _patch_chunked_ce_lm_head
+
+    target = model.get_base_model() if hasattr(model, "get_base_model") else model
+    if getattr(target, "_smithtune_chunked_loss", False):
+        return
+    _patch_chunked_ce_lm_head(target, chunk_size=_CHUNKED_LM_HEAD_CHUNK_SIZE, is_vlm=True)
+    target._smithtune_chunked_loss = True
 
 
 def _loss(model, example: Example, device):
@@ -319,11 +336,14 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str |
     )
     base.config.use_cache = False
     report_stage("configuring_lora")
-    model = configure_lora(base, rank)
+    model = configure_lora(base, rank, settings.lora_targets)
     report_stage("moving_model")
     model = model.to(device)
     report_stage("gradient_checkpointing")
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    if settings.trainer_backend != "trl":
+        # TRL installs the same patch itself before training starts.
+        enable_chunked_loss(model)
     model_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -356,8 +376,10 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str |
         "artifact_type": "peft_lora_adapter", "adapter_path": "adapter",
         "bundle": bundle, "model": _load_json(input_dir / "prepared" / "manifest.json")["model"],
         "loss_reduction": "mean_over_active_tokens_per_optimizer_group",
+        "loss_implementation": LOSS_IMPLEMENTATION,
         "trainer_backend": settings.trainer_backend,
-        "lora_targets": "language attention q_proj,k_proj,v_proj,o_proj; alpha=2*rank",
+        "lora_targets": settings.lora_targets,
+        "lora_target_modules": list(LORA_TARGET_SETS[settings.lora_targets]), "lora_alpha": 2 * rank,
         "max_sequence_tokens": max(len(item.input_ids) for group in [*train_rows, *validation_rows] for item in group),
         "peak_cuda_memory_bytes": 0 if device == "cpu" else torch.cuda.max_memory_allocated(),
         "evaluation": {"status": "not_requested"} if evaluation is None else {"status": "pending"},

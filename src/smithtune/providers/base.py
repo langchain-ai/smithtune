@@ -147,6 +147,7 @@ class TrainingOptions(CommonSFTSettings):
     aws_config: Path | None = None
     aws_trainer: str | None = None
     aws_max_cases: int | None = None
+    aws_lora_targets: str | None = None
 
 
 class TrainingProvider(Protocol):

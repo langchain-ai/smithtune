@@ -343,7 +343,8 @@ def _parser() -> argparse.ArgumentParser:
             "SageMaker-only options", "Require --provider sagemaker; rejected by Fireworks and Baseten.",
         )
         sagemaker_group.add_argument("--aws-config", type=Path, help="SageMaker job configuration JSON; see docs/aws-training.md")
-        sagemaker_group.add_argument("--aws-trainer", choices=("torch", "trl"), help="SageMaker worker backend (default: the validated torch reference loop)")
+        sagemaker_group.add_argument("--aws-trainer", choices=("trl", "torch"), help="SageMaker worker backend (default: trl; torch is the reference loop used by parity tests)")
+        sagemaker_group.add_argument("--aws-lora-targets", choices=("attention", "all-linear"), help="LoRA modules in the language model: attention q/k/v/o (default) or every decoder-layer linear projection")
         sagemaker_group.add_argument("--aws-max-cases", type=int, help="guard on replay cases answered inside the job with --evaluate (default: 50)")
     aws = sub.add_parser("aws", help="experimental SageMaker job, artifact and endpoint lifecycle")
     aws_sub = aws.add_subparsers(dest="aws_command", required=True)

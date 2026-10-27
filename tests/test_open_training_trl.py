@@ -49,3 +49,6 @@ def test_sft_trainer_preserves_token_normalization_partial_groups_and_updates(tm
         torch.testing.assert_close(actual_gradient, expected_gradient, atol=2e-6, rtol=1e-4)
     assert records[-1][1]["optimizer"]["state"]
     assert actual["epochs"][-1]["train_target_tokens"] == 5
+    # HF logs step losses rounded to four decimals; the token-weighted epoch loss must still agree.
+    for mine, theirs in zip(actual["epochs"], expected["epochs"], strict=True):
+        assert mine["train_loss"] == pytest.approx(theirs["train_loss"], abs=2e-3)
