@@ -104,6 +104,11 @@ def _action(incoming, existing, *, triaged):
         previous = read_bindings(old_metadata, previous_messages)
         if any(json_sha256(current.get(index)) != json_sha256(binding) for index, binding in previous.items()):
             raise PipelineError(f"tool availability conflicts with destination example {existing['id']}; bindings must preserve the existing prefix")
+    from smithtune.supervision import target_indices
+    current_targets = target_indices(metadata, messages)
+    previous_targets = target_indices(old_metadata, previous_messages)
+    if [i for i in current_targets if i < len(previous_messages)] != previous_targets:
+        raise PipelineError(f"supervision targets conflict with destination example {existing['id']}; use a new dataset or review the changed selection")
     same_messages = len(messages) == len(previous_messages)
     if old_metadata.get("smithtune_triage") is not None and not triaged:
         if same_messages:
@@ -111,7 +116,12 @@ def _action(incoming, existing, *, triaged):
         raise PipelineError(f"destination example {existing['id']} was triaged; rerun triage on the extended conversation and push the saved council workflow")
     if same_messages and (not triaged or old_metadata.get("smithtune_triage") == metadata.get("smithtune_triage")):
         return "skipped", None
-    return "updated", {"inputs": inputs, "outputs": None, "metadata": {**old_metadata, **metadata}}
+    merged = {**old_metadata, **metadata}
+    if "supervision" not in metadata:
+        # An incoming legacy/default extension must not inherit a policy whose
+        # hash and positions describe only the destination's earlier prefix.
+        merged.pop("supervision", None)
+    return "updated", {"inputs": inputs, "outputs": None, "metadata": merged}
 
 
 def _payload(example):

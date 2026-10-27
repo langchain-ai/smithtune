@@ -232,6 +232,21 @@ smithtune dataset pull "$dataset_dir" \
 - `--max-candidates`: cap on **new** candidates per pull round (max 2000). In
   council mode, set it well above the target, since some will be rejected.
 - Pull makes no model calls. Re-running the same command resumes it.
+- Assistant supervision defaults to `--supervision-scope all-assistant`. When the
+  user wants initial supplied history as context only, use
+  `--supervision-scope skip-initial-history` on the first pull. It selects the
+  final assistant of the initial run-ID group and all later assistants across
+  all pages, including tool calls. This assumes complete chronological messages,
+  one generated output at the end of the initial group, and no later injected
+  assistant history. Inspect examples; run IDs alone do not prove authorship.
+  Ambiguous boundaries exclude the whole trajectory without fallback or extra
+  run-output queries. The scope is frozen for resume.
+- Preserve each example's hash-bound `metadata.supervision.target_message_indices`
+  through upload and preparation. Missing metadata retains all-assistant behavior;
+  explicit per-example selections use scope `explicit`. Mixed datasets can keep
+  different selections. Judges review selected teaching behavior using all
+  messages as context; training, validation, and replay use that same selection.
+  Never edit a selection after judging or silently replace destination targets.
 
 Check:
 - `download_summary`: selected roots, threads, traces, and exclusion counts by

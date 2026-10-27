@@ -24,7 +24,7 @@ remediation instead of reporting the model as unavailable.
 - One complete trajectory per dataset example
 - LoRA training on text and tool trajectories; images are unsupported
 - Approximately 80% training, 10% validation, and 10% replay test, keeping each source trajectory in one split
-- All assistant messages are training targets, including earlier turns
+- By default all assistant messages are training targets, including earlier turns; saved `metadata.supervision.target_message_indices` can restrict targets (see [supervision scopes](datasets.md#choose-assistant-teaching-targets))
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; lower the limit with `--max-seq-len`, for example `--max-seq-len 32768`
 
@@ -71,14 +71,15 @@ still run.
 ## Per-assistant tools and training targets
 
 Whole trajectories remain the dataset examples and split rows. Their metadata
-stores `smithtune_source.assistant_runs`: the message position, producing run and
+stores `smithtune_source.assistant_runs`: the message position, source run and
 trace IDs, and complete tools recorded for each assistant call. Tools can be
 added, removed, or change descriptions and schemas between calls. An empty list
 means no tools were offered; missing availability is not treated as an empty list.
 
 Pull requests `/v1/trajectory` in `ui` format with system messages enabled. Each
 assistant item's `message.available_tools` supplies its complete tool list, and
-`metadata.run_id` / `metadata.trace_id` identify the producing call. No additional
+`metadata.run_id` / `metadata.trace_id` identify its source observation (which may be an input occurrence for supplied
+history). They do not independently establish authorship. No additional
 LLM-run lookups are needed. Missing availability or provenance and unsupported
 provider built-ins exclude the trajectory with a recorded reason.
 
@@ -88,9 +89,9 @@ exactly. Interrupted preparation retains completed captures. New source download
 require a LangSmith instance that supplies `available_tools`; existing bound
 datasets and explicit contract overrides remain usable.
 
-Fireworks and Baseten render each supported assistant answer with its preceding
+Fireworks and Baseten render each selected supported assistant answer with its preceding
 messages and its tool list. Only that answer receives training loss; earlier
-assistant answers serve as context. Replay uses the same per-call tools. This
+assistant answers serve as context. Replay uses the same selection and per-call tools. This
 preserves the recorded trajectory prefix; it does not reconstruct hidden prompt
 rewrites, context compaction, or routing between agents.
 

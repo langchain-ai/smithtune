@@ -58,7 +58,7 @@ def read_bindings(metadata, messages, *, positions=None):
         if type(index) is not int or index < 0 or index in result:
             raise PipelineError("duplicate or invalid assistant message position")
         if any(not isinstance(binding.get(key), str) or not binding[key] for key in ("run_id", "trace_id")):
-            raise PipelineError(f"assistant message {index} has no producing run/trace identity")
+            raise PipelineError(f"assistant message {index} has no source run/trace identity")
         try:
             tool_contract(binding.get("tools"))
         except ContractError as exc:
@@ -94,19 +94,25 @@ def validate_bound_messages(example):
 
 
 def evidence_hash(example):
-    return json_sha256({"messages": example["inputs"]["messages"], "source": example["metadata"]["smithtune_source"]})
+    evidence = {"messages": example["inputs"]["messages"], "source": example["metadata"].get("smithtune_source")}
+    if "supervision" in example["metadata"]:
+        evidence["supervision"] = example["metadata"]["supervision"]
+    return json_sha256(evidence)
 
 
 def training_targets(row):
     """Expand only in memory at the rendering boundary; keep parent split rows."""
     from smithtune.dataset import _has_message_content
 
+    from smithtune.supervision import row_target_indices
+
+    selected = set(row_target_indices(row))
     source = row["_source"]
     override = row.get("tool_policy") == "global_override"
     bindings = None if override else row_bindings(row)
     positions = source["message_positions"]
     for i, message in enumerate(row["messages"]):
-        if message.get("role") != "assistant" or not _has_message_content(message):
+        if positions[i] not in selected or message.get("role") != "assistant" or not _has_message_content(message):
             continue
         binding = bindings[positions[i]] if bindings is not None else None
         yield {"messages": row["messages"][:i + 1], "tools": row["tools"] if override else binding["tools"],

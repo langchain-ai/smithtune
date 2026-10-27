@@ -211,7 +211,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     if runner_mode == "deepagent":
         # The coordinator prompt changes scheduling decisions and belongs in
         # the resume identity just like the judge instructions.
-        identity.update(agent_version=12, coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
+        identity.update(agent_version=13, coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(multimodal_filtered),
@@ -259,6 +259,8 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
         # bounded worker, and release it when that judgment returns.
         unit = frozen["units"][positions[trajectory["trajectory_id"]]]
         trajectory = {"trajectory_id": trajectory["trajectory_id"], "messages": unit["example"]["inputs"]["messages"]}
+        from smithtune.supervision import target_indices
+        trajectory["target_message_indices"] = target_indices(unit["example"].get("metadata", {}), trajectory["messages"])
         source_evidence = unit["example"].get("metadata", {}).get("smithtune_source")
         if source_evidence is not None:
             trajectory["assistant_runs"] = source_evidence["assistant_runs"]
@@ -479,10 +481,10 @@ def selected_examples(triage_dir: Path, *, frozen: dict | None = None, require_c
             example = load_conversation(save_conversation(triage_dir, unit["example"]))
         evidence = {"identity_sha256": json_sha256(identity),
                     "messages_sha256": json_sha256(example["inputs"]["messages"])}
-        if "smithtune_source" in example["metadata"]:
+        if "smithtune_source" in example["metadata"] or "supervision" in example["metadata"]:
             from smithtune.bindings import evidence_hash
             evidence["evidence_sha256"] = evidence_hash(example)
-        else:
+        if "smithtune_source" not in example["metadata"]:
             evidence["contract"] = parse_inference_contract(unit["contract"]).to_dict()
         example["metadata"]["smithtune_triage"] = evidence
         return example

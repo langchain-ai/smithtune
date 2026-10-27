@@ -126,7 +126,7 @@ def _matches(values: Any) -> dict[str, dict]:
 
 def _fetch_trajectory(
     workspace_id: str, project_id: str, item: dict[str, str], *,
-    runner: Callable[..., Any], retain_empty: bool = False,
+    runner: Callable[..., Any], retain_empty: bool = False, supervision_scope: str | None = None,
 ) -> dict:
     from smithtune.bindings import trajectory_bindings
 
@@ -182,9 +182,12 @@ def _fetch_trajectory(
         # Never train on another trace's messages; exclude this trajectory, not the whole pull.
         return {"messages": [], "source": None, "trace_ids": [item["id"]],
                 "training_error": f"{item['key']} {item['id']} includes evidence from traces outside its source; whole trajectory excluded"}
-    source, error = None, None
+    source, error, supervision = None, None, None
     try:
         source = trajectory_bindings(items)
+        if supervision_scope is not None:
+            from smithtune.supervision import trajectory_supervision
+            supervision = trajectory_supervision(items, messages, supervision_scope)
     except PipelineError as exc:
         error = str(exc)
-    return {"messages": messages, "source": source, "trace_ids": trace_ids, "training_error": error}
+    return {"messages": messages, "source": source, "trace_ids": trace_ids, "training_error": error, "supervision": supervision}
