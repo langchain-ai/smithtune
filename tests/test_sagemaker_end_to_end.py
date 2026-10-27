@@ -19,7 +19,7 @@ from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker.artifacts import collect, extract_archive, package_artifact
 from smithtune.providers.sagemaker.monitoring import wait_for_training
 from smithtune.training import hf_sft as worker, serving
-from smithtune.training.contracts import load_prepared, verify_artifact, write_artifact_manifest
+from smithtune.training.contracts import verify_artifact, write_artifact_manifest
 from tests.test_sagemaker import FakeAWS, MissingJob, config, prepared
 from tests.test_sagemaker_worker import tiny_qwen
 
@@ -314,18 +314,6 @@ def test_deploy_requires_confirmation_and_rejects_tampered_export(trained):
     path.write_bytes(path.read_bytes() + b"modified")
     with pytest.raises(PipelineError, match="checksums"):
         deploy.plan(run, settings(), "blocked")
-
-
-def test_portable_worker_contract_accepts_vertex_identity_without_aws_calls(tmp_path):
-    prepared(tmp_path)
-    path = tmp_path / "prepared/manifest.json"
-    manifest = _load_json(path)
-    manifest["model"]["provider"] = "vertex"
-    manifest["provider"]["name"] = "vertex"
-    _json_dump(path, manifest)
-    assert load_prepared(tmp_path)[0]["model"]["provider"] == "vertex"
-    with pytest.raises(PipelineError, match="does not match"):
-        aws.load_prepared(tmp_path)
 
 
 @pytest.mark.parametrize("name,kind", [("../outside", tarfile.REGTYPE), ("/absolute", tarfile.REGTYPE), ("link", tarfile.SYMTYPE)])

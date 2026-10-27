@@ -10,7 +10,6 @@ from smithtune.artifacts import _json_dump, _load_json, _load_jsonl
 from smithtune.models import resolve_prepared_model
 from smithtune.providers.base import CommonSFTSettings, ModelSpec, PipelineError
 from smithtune.providers.baseten.provider import MODEL_SPECS as BASETEN_MODELS
-from smithtune.training.spec import SFTJobSpec
 
 WORKER_MODELS = {"qwen3p5-9b": BASETEN_MODELS["qwen3p5-9b"]}
 PREPARED_FILES = ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl")
@@ -42,11 +41,11 @@ class WorkerSettings(CommonSFTSettings):
 
 def describe_sft_job(model: ModelSpec, settings: CommonSFTSettings, *, lora_rank: int,
                      prepared_manifest_uri: str) -> dict:
-    """Serialize Jake's shared contract for our initial Qwen language-LoRA recipe.
+    """Describe the training intent the worker checks against its implemented recipe.
 
     The target names are suffixes; this model recipe restricts them to the
     language model's attention modules, excluding the vision encoder.
-    Backend and cloud execution settings stay outside the portable SFT intent.
+    Backend and cloud execution settings stay outside this description.
     """
     model.validate()
     settings.validate()
@@ -54,13 +53,14 @@ def describe_sft_job(model: ModelSpec, settings: CommonSFTSettings, *, lora_rank
         raise PipelineError("invalid LoRA rank")
     if not isinstance(prepared_manifest_uri, str) or not prepared_manifest_uri:
         raise PipelineError("training specification requires a prepared manifest URI")
-    spec = SFTJobSpec(
-        model=model, model_revision=model.tokenizer_revision,
-        prepared_manifest_uri=prepared_manifest_uri,
-        settings=CommonSFTSettings(**{item.name: getattr(settings, item.name) for item in fields(CommonSFTSettings)}),
-        lora_rank=lora_rank, lora_alpha=2 * lora_rank, target_modules=LORA_TARGET_MODULES,
-    )
-    return asdict(spec) | {"target_modules": list(spec.target_modules), "target_parameters": list(spec.target_parameters)}
+    return {
+        "schema_version": 1, "method": "sft",
+        "model": asdict(model), "model_revision": model.tokenizer_revision,
+        "prepared_manifest_uri": prepared_manifest_uri,
+        "settings": {item.name: getattr(settings, item.name) for item in fields(CommonSFTSettings)},
+        "lora_rank": lora_rank, "lora_alpha": 2 * lora_rank,
+        "target_modules": list(LORA_TARGET_MODULES), "target_parameters": [],
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -76,7 +76,7 @@ def load_prepared(data_dir: Path, *, expected_provider: str | None = None) -> tu
     if not isinstance(manifest, dict):
         raise PipelineError("prepared manifest must be an object")
     provider = manifest.get("model", {}).get("provider")
-    if provider not in {"sagemaker", "vertex", "local"} or (expected_provider and provider != expected_provider):
+    if provider != "sagemaker" or (expected_provider and provider != expected_provider):
         raise PipelineError("prepared provider does not match this training worker")
     profiles = {name: replace(spec, provider=provider) for name, spec in WORKER_MODELS.items()}
     model = resolve_prepared_model(manifest, profiles, provider=provider)
@@ -130,7 +130,7 @@ def read_result(directory: Path) -> tuple[dict, ModelSpec]:
         baseline = WORKER_MODELS[spec.name]
     except (KeyError, TypeError) as exc:
         raise PipelineError("unsupported model artifact profile") from exc
-    if (spec.provider not in {"sagemaker", "vertex", "local"}
+    if (spec.provider != "sagemaker"
             or replace(spec, provider=baseline.provider, max_seq_len=baseline.max_seq_len,
                        trainer_max_seq_len=baseline.trainer_max_seq_len,
                        template_sha256="", rendering_version="") != baseline
