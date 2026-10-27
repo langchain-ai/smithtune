@@ -32,6 +32,9 @@ single-GPU HTTP server. No AWS SDK calls belong in `training/`; a second cloud
 adapter would stage files, submit and collect around the same worker.
 Rendering for these providers goes through `rendering.uses_hf_renderer`, the same
 native HF/TRL path Baseten uses; keep them aligned rather than adding a format.
+Worker model profiles and their pinned weight revisions live in
+`training/contracts.py`; the `qwen3p5-0p8b-test` profile shares the 9B tokenizer
+and exists only so the pipeline can run on CPU instances.
 
 Install `--extra aws --extra aws-training` alongside `--extra test` to run the
 mocked AWS and tiny CPU PEFT checks (`tests/test_sagemaker*.py` and

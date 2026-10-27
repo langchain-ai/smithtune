@@ -14,16 +14,13 @@ from smithtune.artifacts import _json_dump, _load_json, output_lock
 from smithtune.models import resolve_model_options
 from smithtune.providers.sagemaker.execution import AWSJobConfig, split_s3_uri
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
-from smithtune.providers.baseten.provider import MODEL_SPECS as BASETEN_MODEL_SPECS
 from smithtune.rendering import resolve_rendering_model
-from smithtune.training.contracts import PREPARED_FILES, describe_sft_job, load_prepared as load_worker_prepared, sha256_file, WorkerSettings
+from smithtune.training.contracts import CPU_TRAINING_PROFILES, PREPARED_FILES, WORKER_MODELS, describe_sft_job, load_prepared as load_worker_prepared, sha256_file, WorkerSettings
 
 
 # Reuse the existing pinned formatter. This is an experimental worker target,
 # not a claim that any particular hardware/context combination has been tested.
-MODEL_SPECS = {
-    "qwen3p5-9b": replace(BASETEN_MODEL_SPECS["qwen3p5-9b"], provider="sagemaker"),
-}
+MODEL_SPECS = {name: replace(spec, provider="sagemaker") for name, spec in WORKER_MODELS.items()}
 TERMINAL_STATUSES = {"Completed", "Failed", "Stopped"}
 
 
@@ -48,6 +45,8 @@ class SageMakerSFTSettings(WorkerSettings):
         if self.aws is None:
             raise PipelineError("SageMaker requires --aws-config; see docs/aws-training.md")
         self.aws.validate()
+        if (self.device == "cpu") == self.aws.uses_gpu():
+            raise PipelineError("worker device must match the instance family: cpu for ml.m*/c*/r*, cuda:0 for GPU types")
 
     def worker_settings(self) -> dict[str, Any]:
         return {field.name: getattr(self, field.name) for field in fields(WorkerSettings)} | {"lora_rank": self.lora_rank}
@@ -115,7 +114,12 @@ class SageMakerProvider:
     def model_from_options(self, options: ModelOptions):
         if options.max_seq_len is None:
             raise PipelineError("experimental SageMaker preparation requires an explicit --max-seq-len; start with 4096")
-        return resolve_model_options(replace(options, model=options.model or "qwen3p5-9b"), MODEL_SPECS, provider=self.name)
+        selected = options.model or "qwen3p5-9b"
+        # Profiles share a tokenizer, so match aliases and base models only.
+        matches = {alias: spec for alias, spec in MODEL_SPECS.items() if selected in {alias, spec.base_model}}
+        if len(matches) != 1:
+            raise PipelineError(f"no supported SageMaker model profile for {selected!r}; supported aliases: {', '.join(sorted(MODEL_SPECS))}")
+        return resolve_model_options(replace(options, model=selected), matches, provider=self.name)
 
     def settings_from_options(self, options: TrainingOptions) -> SageMakerSFTSettings:
         rejected = [name for name in (
@@ -132,6 +136,7 @@ class SageMakerProvider:
             **{field.name: getattr(options, field.name) for field in fields(CommonSFTSettings)},
             lora_rank=8 if options.lora_rank is None else options.lora_rank, aws=config,
             trainer_backend=options.aws_trainer or "torch",
+            device="cuda:0" if config is None or config.uses_gpu() else "cpu",
         )
         settings.validate()
         return settings
@@ -154,6 +159,8 @@ class SageMakerProvider:
             raise PipelineError("SageMaker requires SageMaker SFT settings")
         settings.validate()
         manifest, _rows = load_prepared(data_dir)
+        if settings.device == "cpu" and manifest["model"]["name"] not in CPU_TRAINING_PROFILES:
+            raise PipelineError("CPU instance types are allowed only for the qwen3p5-0p8b-test pipeline profile; choose GPU instance types")
         request = training_request(settings.aws, run_id)
         rates = settings.aws.instance_rates()
         known_rates = [rate for rate in rates.values() if rate is not None]
@@ -179,6 +186,8 @@ class SageMakerProvider:
                 "note": "User-supplied rates; the headline estimate uses the highest listed rate. This is a runtime estimate, not a billing cap. Provisioning, storage, logs and serving are separate.",
             },
             "warnings": [
+                *(["CPU training exercises the pipeline with the 0.8B test profile only; its timings and memory say nothing about GPU runs."]
+                  if settings.device == "cpu" else []),
                 "Single GPU/process worker; additional GPUs in an instance are not used. Only a short Qwen3.5-9B LoRA smoke on L40S has passed; validate the required context and hardware.",
                 "Model context is a formatting ceiling, not a memory/throughput guarantee. No truncation is allowed.",
                 "No automatic endpoint, replay, Spot recovery or cross-job resume in this prototype.",

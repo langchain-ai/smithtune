@@ -27,8 +27,12 @@ class AWSInstancePreference:
 
 
 def _validate_instance_type(value) -> None:
-    if not isinstance(value, str) or not re.fullmatch(r"ml\.(?:g|p)[a-z0-9]+\.[a-z0-9]+", value):
-        raise PipelineError("choose an explicit GPU SageMaker instance_type")
+    if not isinstance(value, str) or not re.fullmatch(r"ml\.(?:g|p|m|c|r)[a-z0-9]+\.[a-z0-9]+", value):
+        raise PipelineError("choose an explicit SageMaker instance_type: a GPU family (ml.g*/ml.p*), or ml.m*/ml.c*/ml.r* for CPU pipeline tests")
+
+
+def instance_is_gpu(instance_type: str) -> bool:
+    return re.match(r"ml\.[gp]", instance_type) is not None
 
 
 def _validate_hourly_rate(value) -> None:
@@ -68,6 +72,9 @@ class AWSJobConfig:
             except TypeError as exc:
                 raise PipelineError("each instance preference needs instance_type and hourly_rate_usd") from exc
             object.__setattr__(self, "instance_preferences", preferences)
+
+    def uses_gpu(self) -> bool:
+        return all(instance_is_gpu(name) for name in self.instance_rates())
 
     def instance_rates(self) -> dict[str, float | None]:
         if self.instance_preferences:
@@ -112,6 +119,8 @@ class AWSJobConfig:
                 _validate_hourly_rate(item.hourly_rate_usd)
             if len(self.instance_rates()) != len(self.instance_preferences):
                 raise PipelineError("instance_preferences must not repeat an instance type")
+            if len({instance_is_gpu(item.instance_type) for item in self.instance_preferences}) != 1:
+                raise PipelineError("instance_preferences must be all GPU types or all CPU types")
             if self.max_pending_seconds is None:
                 raise PipelineError("instance_preferences requires max_pending_seconds (AWS minimum: 1800)")
         else:
