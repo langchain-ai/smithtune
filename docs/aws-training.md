@@ -19,11 +19,13 @@ Validated so far: short synthetic training runs on one L40S and one A10G (the
 TRL backend), adapter reload with generation on one L4, all with a longest
 example of 437 tokens, and the full submit/train/export/collect lifecycle on a
 CPU instance with the `qwen3p5-0p8b-test` profile (24 synthetic threads, two
-epochs, about 15 billable minutes on `ml.m5.2xlarge`). Not validated: longer contexts, hosted endpoints,
-cross-job resume, Spot recovery, distributed training, other models, and
-LangSmith replay. `train --evaluate`, `deploy` and `evaluate` reject this
-provider until replay is wired to its artifacts. Dated run notes are kept
-outside the repository.
+epochs, about 15 billable minutes on `ml.m5.2xlarge`). Replay evaluation generated inside the job, collected and published to
+LangSmith is validated on CPU with the test profile, including evaluation-only
+jobs that resume a run's checkpoint prefix. Not validated: longer contexts,
+hosted endpoints, cross-job training resume, Spot recovery, distributed
+training, and other models. `deploy` rejects this provider; use `smithtune aws`
+for the experimental endpoint lifecycle. Dated run notes are kept outside the
+repository.
 
 ## Validation workers
 
