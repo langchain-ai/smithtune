@@ -11,7 +11,21 @@ from smithtune.models import resolve_prepared_model
 from smithtune.providers.base import CommonSFTSettings, ModelSpec, PipelineError
 from smithtune.providers.baseten.provider import MODEL_SPECS as BASETEN_MODELS
 
-WORKER_MODELS = {"qwen3p5-9b": BASETEN_MODELS["qwen3p5-9b"]}
+QWEN3P5_9B = BASETEN_MODELS["qwen3p5-9b"]
+# The 0.8B checkpoint shares the 9B's tokenizer, chat template and vocabulary;
+# only the weights differ. It exists for CPU pipeline tests, not as a target.
+WORKER_MODELS = {
+    "qwen3p5-9b": QWEN3P5_9B,
+    "qwen3p5-0p8b-test": replace(QWEN3P5_9B, name="qwen3p5-0p8b-test", base_model="Qwen/Qwen3.5-0.8B"),
+}
+# Pinned base-weight commits. The tokenizer revision pins rendering; the weights
+# of a test profile come from another repository and commit.
+MODEL_REVISIONS = {
+    "qwen3p5-9b": QWEN3P5_9B.tokenizer_revision,
+    "qwen3p5-0p8b-test": "2fc06364715b967f1860aea9cf38778875588b17",
+}
+CPU_TRAINING_PROFILES = frozenset({"qwen3p5-0p8b-test"})
+WORKER_DEVICES = ("cpu", "cuda:0")
 PREPARED_FILES = ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl")
 LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
@@ -19,6 +33,7 @@ LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 @dataclass(frozen=True)
 class WorkerSettings(CommonSFTSettings):
     trainer_backend: str = "torch"
+    device: str = "cuda:0"
 
     def validate(self):
         for name in ("max_epochs", "early_stopping_patience", "batch_size", "seed"):
@@ -37,6 +52,15 @@ class WorkerSettings(CommonSFTSettings):
             raise PipelineError("validation_every_steps is not supported by the open-training worker; it validates at epoch end")
         if self.trainer_backend not in {"torch", "trl"}:
             raise PipelineError("trainer_backend must be torch or trl")
+        if self.device not in WORKER_DEVICES:
+            raise PipelineError("device must be cpu or cuda:0")
+
+
+def model_revision(spec: ModelSpec) -> str:
+    try:
+        return MODEL_REVISIONS[spec.name]
+    except KeyError as exc:
+        raise PipelineError("unsupported open-training worker profile") from exc
 
 
 def describe_sft_job(model: ModelSpec, settings: CommonSFTSettings, *, lora_rank: int,
@@ -135,7 +159,7 @@ def read_result(directory: Path) -> tuple[dict, ModelSpec]:
                        trainer_max_seq_len=baseline.trainer_max_seq_len,
                        template_sha256="", rendering_version="") != baseline
             or result.get("base_model") != spec.base_model
-            or result.get("base_model_revision") != spec.tokenizer_revision
+            or result.get("base_model_revision") != model_revision(spec)
             or result.get("adapter_path") != "adapter"
             or not spec.template_sha256 or not spec.rendering_version):
         raise PipelineError("artifact model/revision/renderer does not match the supported profile")

@@ -15,6 +15,7 @@ import uuid
 from smithtune.artifacts import _json_dump, _load_json, output_lock
 from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker import AWSInstancePreference, AWSJobConfig, SageMakerProvider, split_s3_uri
+from smithtune.providers.sagemaker.execution import instance_is_gpu
 from smithtune.providers.sagemaker.artifacts import _verify_origin, package_artifact
 from smithtune.training.contracts import sha256_file, verify_artifact
 
@@ -68,6 +69,9 @@ class EndpointSettings:
         # Reuse account/region/image/GPU validation without conflating hosting
         # selection with the training allocation or its fallback preferences.
         choices = self.instance_preferences or (AWSInstancePreference(self.instance_type, self.hourly_rate_usd),)
+        for item in choices:
+            if not isinstance(item.instance_type, str) or not instance_is_gpu(item.instance_type):
+                raise PipelineError("endpoint instances must be GPU types; the pilot server requires CUDA")
         for item in choices:
             replace(job, training_image=self.serving_image, instance_type=item.instance_type,
                     instance_preferences=(), hourly_rate_usd=item.hourly_rate_usd,

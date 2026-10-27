@@ -11,7 +11,7 @@ from smithtune import cli, rendering
 from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json
 from smithtune.providers import get_provider, sagemaker as aws
 from smithtune.providers.sagemaker import provider as aws_provider
-from smithtune.providers.base import ModelOptions, PipelineError
+from smithtune.providers.base import ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers.baseten.provider import MODEL_SPECS as BASETEN_MODELS
 from smithtune.training.hf_sft import as_example, read_bundle, render_conversations
 from tests.binding_fixtures import bound_row
@@ -34,8 +34,8 @@ def fallback_config(**kwargs):
                      ]} | kwargs))
 
 
-def prepared(root):
-    model = replace(aws.MODEL_SPECS["qwen3p5-9b"], max_seq_len=4096, trainer_max_seq_len=4096,
+def prepared(root, profile="qwen3p5-9b"):
+    model = replace(aws.MODEL_SPECS[profile], max_seq_len=4096, trainer_max_seq_len=4096,
                     template_sha256="b" * 64, rendering_version="synthetic-test-renderer")
     manifest = {
         "model": asdict(model), "provider": {"name": "sagemaker", "renderer": model.renderer,
@@ -152,7 +152,7 @@ def test_fallback_plan_is_one_native_job_with_conservative_cost(tmp_path):
     {"instance_preferences": []}, {"instance_preferences": None},
     {"instance_preferences": ["ml.g6e.2xlarge"]},
     {"instance_preferences": [{"instance_type": "ml.g6e.2xlarge"}]},
-    {"instance_preferences": [{"instance_type": "ml.m5.large", "hourly_rate_usd": 1}]},
+    {"instance_preferences": [{"instance_type": "ml.t3.medium", "hourly_rate_usd": 1}]},
     {"instance_preferences": [{"instance_type": "ml.g6e.2xlarge", "hourly_rate_usd": float("nan")}]},
     {"instance_preferences": [{"instance_type": "ml.g6e.2xlarge", "hourly_rate_usd": True}]},
     {"instance_preferences": [{"instance_type": "ml.g6e.2xlarge", "hourly_rate_usd": 2.8}] * 2},
@@ -315,7 +315,8 @@ def test_cli_wires_aws_settings_and_rejects_unsupported_operations(tmp_path, cap
             cli._settings_from_args(args)
     cli.main(["models", "list", "--provider", "sagemaker"])
     listed = json.loads(capsys.readouterr().out)["models"]
-    assert len(listed) == 1 and listed[0]["experimental"]
+    assert {model["alias"] for model in listed} == {"qwen3p5-9b", "qwen3p5-0p8b-test"}
+    assert all(model["experimental"] and not model["hardware_validated"] for model in listed)
     with pytest.raises(SystemExit):
         cli.main(["undeploy", "--provider", "sagemaker", "--confirm"])
     assert "not implemented" in capsys.readouterr().err
@@ -375,3 +376,46 @@ def test_tool_context_is_preserved_and_masks_shift_only_once(tmp_path):
 def test_worker_rejects_truncation_empty_targets_and_invalid_masks(tokens, weights, limit):
     with pytest.raises(PipelineError):
         as_example(SimpleNamespace(token_ids=tokens, token_weights=weights), limit)
+
+
+def test_cpu_instances_are_allowed_only_for_the_pipeline_test_profile(tmp_path):
+    cpu = config(instance_type="ml.m5.xlarge", hourly_rate_usd=0.23)
+    provider = aws.SageMakerProvider(session_factory=lambda _: pytest.fail("planning contacted AWS"))
+    settings = provider.settings_from_options(TrainingOptions(aws_config=_write_config(tmp_path, cpu)))
+    assert settings.device == "cpu"
+    prepared(tmp_path)
+    with pytest.raises(PipelineError, match="CPU instance types are allowed only"):
+        provider.plan(tmp_path, "cpu-test", settings)
+    prepared(tmp_path, profile="qwen3p5-0p8b-test")
+    plan = provider.plan(tmp_path, "cpu-test", settings)
+    assert plan["worker_settings"]["device"] == "cpu"
+    assert plan["training"]["model_revision"] == aws.MODEL_SPECS["qwen3p5-9b"].tokenizer_revision
+    assert any("CPU training" in warning for warning in plan["warnings"])
+    gpu = provider.settings_from_options(TrainingOptions(aws_config=_write_config(tmp_path, config())))
+    assert gpu.device == "cuda:0"
+    with pytest.raises(PipelineError, match="all GPU types or all CPU types"):
+        fallback_config(instance_preferences=[{"instance_type": "ml.g6e.2xlarge", "hourly_rate_usd": 2.8},
+                                              {"instance_type": "ml.m5.xlarge", "hourly_rate_usd": 0.23}]).validate()
+    with pytest.raises(PipelineError, match="instance_type"):
+        config(instance_type="ml.t3.medium").validate()
+
+
+def _write_config(root, value):
+    path = root / f"aws-{id(value)}.json"
+    _json_dump(path, asdict(value))
+    return path
+
+
+def test_test_profile_shares_the_pinned_tokenizer_but_pins_its_own_weights():
+    from smithtune.training.contracts import model_revision
+
+    provider = get_provider("sagemaker")
+    nine = provider.model_from_options(ModelOptions(model="Qwen/Qwen3.5-9B", max_seq_len=4096))
+    small = provider.model_from_options(ModelOptions(model="Qwen/Qwen3.5-0.8B", max_seq_len=4096))
+    assert nine.name == "qwen3p5-9b" and small.name == "qwen3p5-0p8b-test"
+    assert small.tokenizer_model == nine.tokenizer_model and small.tokenizer_revision == nine.tokenizer_revision
+    assert small.renderer == nine.renderer and small.base_model == "Qwen/Qwen3.5-0.8B"
+    assert model_revision(small) != model_revision(nine) and len(model_revision(small)) == 40
+    assert provider.model_from_options(ModelOptions(model="qwen3p5-0p8b-test", max_seq_len=64)).max_seq_len == 64
+    with pytest.raises(PipelineError, match="no supported SageMaker model profile"):
+        provider.model_from_options(ModelOptions(model="qwen3p5-99b", max_seq_len=64))

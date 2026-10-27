@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from smithtune.providers.base import CommonSFTSettings
+from smithtune.providers.base import CommonSFTSettings, PipelineError
 from smithtune.training.hf_sft import Example, _loss, configure_lora, train_loop
 
 torch = pytest.importorskip("torch")
@@ -215,3 +215,45 @@ def test_staged_bundle_to_best_adapter_artifact_on_cpu(tmp_path, monkeypatch):
     selected = tmp_path / f"checkpoints/epoch-{result['best_epoch']}/adapter/adapter_model.safetensors"
     assert selected.read_bytes() == (tmp_path / "model/adapter/adapter_model.safetensors").read_bytes()
     assert _load_json(tmp_path / "model/result.json")["bundle"]["files"]
+
+
+def test_bundle_device_and_pinned_test_profile_weights_drive_a_cpu_run(tmp_path, monkeypatch):
+    import smithtune.training.hf_sft as worker
+    from smithtune.providers import sagemaker
+    from smithtune.training.contracts import MODEL_REVISIONS
+    from tests.test_sagemaker import FakeAWS, config, prepared
+
+    prepared(tmp_path, profile="qwen3p5-0p8b-test")
+    settings = sagemaker.SageMakerSFTSettings(aws=config(instance_type="ml.m5.xlarge", hourly_rate_usd=0.23),
+                                              max_epochs=1, batch_size=1, device="cpu")
+    with pytest.raises(PipelineError, match="device must match"):
+        sagemaker.SageMakerSFTSettings(aws=config(), device="cpu").validate()
+    sagemaker.SageMakerProvider(session_factory=lambda _: FakeAWS()).train(
+        tmp_path, tmp_path / "run", "cpu-test", settings, confirm=True,
+    )
+    calls = []
+
+    def load_model(name, **kwargs):
+        calls.append((name, kwargs))
+        return tiny_qwen()
+
+    monkeypatch.setattr(transformers.AutoModelForImageTextToText, "from_pretrained", load_model)
+
+    class Tokenizer:
+        def save_pretrained(self, path):
+            path.mkdir()
+            (path / "tokenizer_config.json").write_text('{}')
+
+    renderer = SimpleNamespace(
+        tokenizer=Tokenizer(),
+        render=lambda messages, tools=None, final_target=False: [SimpleNamespace(token_ids=[1, 2, 3, 4], token_weights=[0, 1, 0, 1])],
+    )
+    monkeypatch.setattr(worker, "load_training_renderer", lambda _: renderer)
+    # No explicit device: the bundle planned for a CPU instance decides.
+    result = worker.run(tmp_path / "run/input", tmp_path / "model", tmp_path / "checkpoints")
+    assert calls[0][0] == "Qwen/Qwen3.5-0.8B"
+    assert calls[0][1]["revision"] == MODEL_REVISIONS["qwen3p5-0p8b-test"] != MODEL_REVISIONS["qwen3p5-9b"]
+    assert calls[0][1]["dtype"] == torch.float32
+    assert result["base_model_revision"] == MODEL_REVISIONS["qwen3p5-0p8b-test"]
+    assert result["bundle"]["settings"]["device"] == "cpu"
+    assert result["peak_cuda_memory_bytes"] == 0

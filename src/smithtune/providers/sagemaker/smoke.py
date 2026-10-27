@@ -17,6 +17,7 @@ from smithtune.artifacts import _json_dump, _load_json
 from smithtune.providers.base import PipelineError
 from smithtune.providers.baseten.sampling_formats import parse_completion, stop_sequences
 from smithtune.providers.sagemaker import sha256_file
+from smithtune.training.contracts import model_revision
 from smithtune.training.hf_sft import failure_diagnostics, gpu_diagnostics, read_bundle, report_stage
 from smithtune.rendering import load_training_renderer
 from smithtune.training.inference import generate_tokens, last_logits, verify_loaded_adapter
@@ -75,7 +76,7 @@ def run(input_dir: Path, model_dir: Path, *, device="cuda:0", max_new_tokens=96)
     bundle, spec, _rows, _settings, _rank = read_bundle(input_dir)
     exported = _load_json(input_dir / "export/result.json")
     if (exported["bundle"] != bundle or exported["base_model"] != spec.base_model
-            or exported["base_model_revision"] != spec.tokenizer_revision):
+            or exported["base_model_revision"] != model_revision(spec)):
         raise PipelineError("export does not match the original training provenance")
     if device != "cpu" and (not torch.cuda.is_available() or not torch.cuda.is_bf16_supported()):
         raise PipelineError("reload smoke requires a CUDA GPU with bfloat16 support")
@@ -83,7 +84,7 @@ def run(input_dir: Path, model_dir: Path, *, device="cuda:0", max_new_tokens=96)
     report_stage("reload_base_model")
     renderer = load_training_renderer(spec)
     base = AutoModelForImageTextToText.from_pretrained(
-        spec.base_model, revision=spec.tokenizer_revision, trust_remote_code=False,
+        spec.base_model, revision=model_revision(spec), trust_remote_code=False,
         dtype=torch.float32 if device == "cpu" else torch.bfloat16, attn_implementation="sdpa",
     ).to(device)
     report_stage("reload_adapter")
