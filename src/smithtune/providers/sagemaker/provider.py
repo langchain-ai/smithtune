@@ -149,7 +149,8 @@ class SageMakerProvider:
         settings = SageMakerSFTSettings(
             **{field.name: getattr(options, field.name) for field in fields(CommonSFTSettings)},
             lora_rank=8 if options.lora_rank is None else options.lora_rank, aws=config,
-            trainer_backend=options.aws_trainer or "torch",
+            trainer_backend=options.aws_trainer or "trl",
+            lora_targets=options.aws_lora_targets or "attention",
             device="cuda:0" if config is None or config.uses_gpu() else "cpu",
             max_evaluation_cases=50 if options.aws_max_cases is None else options.aws_max_cases,
         )

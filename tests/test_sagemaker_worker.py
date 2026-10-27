@@ -179,7 +179,8 @@ def test_staged_bundle_to_best_adapter_artifact_on_cpu(tmp_path, monkeypatch):
 
     prepared(tmp_path)
     remote = FakeAWS()
-    settings = sagemaker.SageMakerSFTSettings(aws=config(), max_epochs=2, batch_size=1, learning_rate=0.01)
+    # The fake tokenizer only saves itself; the reference loop needs no real tokenizer.
+    settings = sagemaker.SageMakerSFTSettings(aws=config(), max_epochs=2, batch_size=1, learning_rate=0.01, trainer_backend="torch")
     sagemaker.SageMakerProvider(session_factory=lambda _: remote).train(
         tmp_path, tmp_path / "run", "sft-test", settings, confirm=True,
     )
@@ -225,7 +226,7 @@ def test_bundle_device_and_pinned_test_profile_weights_drive_a_cpu_run(tmp_path,
 
     prepared(tmp_path, profile="qwen3p5-0p8b-test")
     settings = sagemaker.SageMakerSFTSettings(aws=config(instance_type="ml.m5.xlarge", hourly_rate_usd=0.23),
-                                              max_epochs=1, batch_size=1, device="cpu")
+                                              max_epochs=1, batch_size=1, device="cpu", trainer_backend="torch")
     with pytest.raises(PipelineError, match="device must match"):
         sagemaker.SageMakerSFTSettings(aws=config(), device="cpu").validate()
     sagemaker.SageMakerProvider(session_factory=lambda _: FakeAWS()).train(
