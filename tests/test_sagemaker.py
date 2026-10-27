@@ -38,6 +38,8 @@ def prepared(root, profile="qwen3p5-9b"):
     model = replace(aws.MODEL_SPECS[profile], max_seq_len=4096, trainer_max_seq_len=4096,
                     template_sha256="b" * 64, rendering_version="synthetic-test-renderer")
     manifest = {
+        "schema_version": 2, "target_policy": "each_assistant_once", "tool_policy": "per_assistant",
+        "conversion": {"reasoning_policy": "omit"}, "langsmith": {"examples": 3},
         "model": asdict(model), "provider": {"name": "sagemaker", "renderer": model.renderer,
                                              "tokenizer_revision": model.tokenizer_revision},
         "split": {"train": 1, "validation": 1, "test": 1}, "audit": {"max_context_tokens": 12},
@@ -319,7 +321,7 @@ def test_cli_wires_aws_settings_and_rejects_unsupported_operations(tmp_path, cap
     assert all(model["experimental"] and not model["hardware_validated"] for model in listed)
     with pytest.raises(SystemExit):
         cli.main(["undeploy", "--provider", "sagemaker", "--confirm"])
-    assert "not implemented" in capsys.readouterr().err
+    assert "SageMaker endpoints" in capsys.readouterr().err
 
 
 def test_model_context_requires_explicit_selection_and_reuses_baseten_formatter():

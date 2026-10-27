@@ -27,8 +27,10 @@ worker. `smoke.py` and `benchmark.py` are experimental image entrypoints for
 reload-only and context-sizing jobs, not CLI commands. The cloud-neutral recipe
 is `training/hf_sft.py` with an optional `training/trl_trainer.py` backend;
 `training/worker.py` is its local-file CLI, `training/contracts.py` describes the
-job, validates prepared bundles and exports, and `training/serving.py` is a pilot
-single-GPU HTTP server. No AWS SDK calls belong in `training/`; a second cloud
+job, validates prepared bundles and exports, `training/evaluation.py` generates
+replay answers inside the job, and `training/serving.py` is a pilot single-GPU
+HTTP server. `providers/sagemaker/sampling.py` replays those saved answers
+through the shared evaluation without serving resources. No AWS SDK calls belong in `training/`; a second cloud
 adapter would stage files, submit and collect around the same worker.
 Rendering for these providers goes through `rendering.uses_hf_renderer`, the same
 native HF/TRL path Baseten uses; keep them aligned rather than adding a format.

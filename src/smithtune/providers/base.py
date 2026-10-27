@@ -146,6 +146,7 @@ class TrainingOptions(CommonSFTSettings):
     max_dropped_training_rows: int | None = None
     aws_config: Path | None = None
     aws_trainer: str | None = None
+    aws_max_cases: int | None = None
 
 
 class TrainingProvider(Protocol):

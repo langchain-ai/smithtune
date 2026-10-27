@@ -15,7 +15,8 @@ from smithtune.models import resolve_model_options
 from smithtune.providers.sagemaker.execution import AWSJobConfig, split_s3_uri
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
 from smithtune.rendering import resolve_rendering_model
-from smithtune.training.contracts import CPU_TRAINING_PROFILES, PREPARED_FILES, WORKER_MODELS, describe_sft_job, load_prepared as load_worker_prepared, sha256_file, WorkerSettings
+from smithtune.training.contracts import CPU_TRAINING_PROFILES, OPTIONAL_BUNDLE_FILES, PREPARED_FILES, WORKER_MODELS, describe_sft_job, load_prepared as load_worker_prepared, sha256_file, WorkerSettings
+from smithtune.training.evaluation import EvaluationSettings, MAX_CASES_LIMIT
 
 
 # Reuse the existing pinned formatter. This is an experimental worker target,
@@ -28,6 +29,8 @@ TERMINAL_STATUSES = {"Completed", "Failed", "Stopped"}
 class SageMakerSFTSettings(WorkerSettings):
     aws: AWSJobConfig | None = None
     lora_rank: int = 8
+    # Guard, not a selector: evaluation cases come from --max-points-per-trajectory.
+    max_evaluation_cases: int = 50
 
     def validate(self) -> None:
         for name in ("max_epochs", "early_stopping_patience", "batch_size", "seed", "lora_rank"):
@@ -47,6 +50,9 @@ class SageMakerSFTSettings(WorkerSettings):
         self.aws.validate()
         if (self.device == "cpu") == self.aws.uses_gpu():
             raise PipelineError("worker device must match the instance family: cpu for ml.m*/c*/r*, cuda:0 for GPU types")
+        if (isinstance(self.max_evaluation_cases, bool) or not isinstance(self.max_evaluation_cases, int)
+                or not 1 <= self.max_evaluation_cases <= MAX_CASES_LIMIT):
+            raise PipelineError(f"max_evaluation_cases must be an integer in [1, {MAX_CASES_LIMIT}]")
 
     def worker_settings(self) -> dict[str, Any]:
         return {field.name: getattr(self, field.name) for field in fields(WorkerSettings)} | {"lora_rank": self.lora_rank}
@@ -56,8 +62,10 @@ def load_prepared(data_dir: Path):
     return load_worker_prepared(data_dir, expected_provider="sagemaker")
 
 
-def training_request(config: AWSJobConfig, job_name: str) -> dict:
+def training_request(config: AWSJobConfig, job_name: str, *, overrides: dict | None = None) -> dict:
+    """Build the CreateTrainingJob request; overrides describe an evaluation-only job."""
     config.validate()
+    overrides = overrides or {}
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", job_name):
         raise PipelineError("SageMaker run ID must be 1–63 alphanumeric/hyphen characters")
     prefix = f"{config.s3_prefix.rstrip('/')}/{job_name}"
@@ -75,8 +83,14 @@ def training_request(config: AWSJobConfig, job_name: str) -> dict:
         "StoppingCondition": {"MaxRuntimeInSeconds": config.max_runtime_seconds},
         "EnableManagedSpotTraining": False,
         "EnableNetworkIsolation": False,
+        # The worker stops generating answers before this limit so saved work uploads.
+        "Environment": {"SMITHTUNE_MAX_RUNTIME_SECONDS": str(config.max_runtime_seconds)},
         "Tags": [{"Key": "smithtune:provider", "Value": "sagemaker"}],
     }
+    if overrides.get("checkpoint_s3_uri"):
+        request["CheckpointConfig"]["S3Uri"] = overrides["checkpoint_s3_uri"]
+    if overrides.get("worker_command"):
+        request["Environment"]["SMITHTUNE_WORKER_COMMAND"] = overrides["worker_command"]
     if config.subnets:
         request["VpcConfig"] = {"Subnets": list(config.subnets), "SecurityGroupIds": list(config.security_group_ids)}
     if config.output_kms_key:
@@ -137,6 +151,7 @@ class SageMakerProvider:
             lora_rank=8 if options.lora_rank is None else options.lora_rank, aws=config,
             trainer_backend=options.aws_trainer or "torch",
             device="cuda:0" if config is None or config.uses_gpu() else "cpu",
+            max_evaluation_cases=50 if options.aws_max_cases is None else options.aws_max_cases,
         )
         settings.validate()
         return settings
@@ -153,12 +168,16 @@ class SageMakerProvider:
         return prepare_dataset(workspace_id, dataset_id, model, data_dir, **kwargs)
 
     def plan(self, data_dir, run_id, settings, *, replay=None):
-        if replay is not None:
-            raise PipelineError("SageMaker automatic replay/endpoint deployment is not implemented yet")
         if not isinstance(settings, SageMakerSFTSettings):
             raise PipelineError("SageMaker requires SageMaker SFT settings")
         settings.validate()
         manifest, _rows = load_prepared(data_dir)
+        evaluation = None
+        if replay is not None:
+            import tempfile
+
+            with tempfile.TemporaryDirectory(prefix=".replay-plan-") as scratch:
+                evaluation = stage_evaluation(data_dir, Path(scratch), replay, settings, run_id)
         if settings.device == "cpu" and manifest["model"]["name"] not in CPU_TRAINING_PROFILES:
             raise PipelineError("CPU instance types are allowed only for the qwen3p5-0p8b-test pipeline profile; choose GPU instance types")
         request = training_request(settings.aws, run_id)
@@ -171,12 +190,15 @@ class SageMakerProvider:
             # Submission returns once AWS accepts the job; no local process must stay alive.
             "execution": {"requires_active_client": False},
             "model": manifest["model"], "dataset": manifest["split"],
+            "base_model": manifest["model"]["base_model"],
             "training": describe_sft_job(
                 ModelSpec(**manifest["model"]), settings, lora_rank=settings.lora_rank,
                 prepared_manifest_uri=f"{settings.aws.s3_prefix.rstrip('/')}/{run_id}/input/prepared/manifest.json",
             ),
             "worker_settings": settings.worker_settings(), "create_training_job": request,
-            "input_sha256": {name: sha256_file(Path(data_dir) / "prepared" / name) for name in PREPARED_FILES},
+            "input_sha256": {name: sha256_file(Path(data_dir) / "prepared" / name) for name in PREPARED_FILES}
+                            | ({} if evaluation is None else evaluation["files"]),
+            "evaluation": {"status": "not_requested"} if evaluation is None else evaluation["summary"],
             "cost": {
                 "hourly_rate_usd": rate,
                 "runtime_compute_estimate_usd": None if rate is None else rate * duration,
@@ -214,6 +236,10 @@ class SageMakerProvider:
                 shutil.copyfile(Path(data_dir) / "prepared" / name, prepared / name)
                 if sha256_file(prepared / name) != plan["input_sha256"][name]:
                     raise PipelineError("prepared data changed during staging; create a new run")
+            if replay is not None:
+                staged = stage_evaluation(data_dir, bundle, replay, settings, run_id)
+                if staged["files"] != {name: plan["input_sha256"][name] for name in OPTIONAL_BUNDLE_FILES}:
+                    raise PipelineError("replay cases changed during staging; create a new run")
             _json_dump(bundle / "bundle.json", {
                 "schema_version": 1, "run_id": run_id, "files": plan["input_sha256"],
                 "settings": plan["worker_settings"], "training": plan["training"],
@@ -277,7 +303,7 @@ class SageMakerProvider:
             config = AWSJobConfig(**receipt["aws"])
             config.validate()
             request = _load_json(request_path)
-            if training_request(config, receipt["job_name"]) != request:
+            if training_request(config, receipt["job_name"], overrides=receipt.get("request_overrides")) != request:
                 raise PipelineError("saved SageMaker identity differs from its request")
             try:
                 client = self._session(config).client("sagemaker")
@@ -331,3 +357,116 @@ class SageMakerProvider:
                 raise
             except Exception as exc:
                 raise PipelineError(f"AWS job lookup/stop failed ({type(exc).__name__}); saved receipt is unchanged") from None
+
+
+def stage_evaluation(data_dir, bundle_dir: Path, replay: dict, settings: SageMakerSFTSettings, run_id: str) -> dict:
+    """Write the replay cases and generation settings the worker will answer in the job."""
+    import tempfile
+
+    from smithtune.evaluation.replay import prepare_replay_evaluation
+
+    output = Path(bundle_dir) / "evaluation"
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".replay-cases-") as scratch:
+        preview = prepare_replay_evaluation(
+            data_dir, Path(scratch), replay["max_points_per_trajectory"], replay["max_output_tokens"],
+        )
+        shutil.copyfile(Path(scratch) / "cases.jsonl", output / "cases.jsonl")
+    if preview["cases"] > settings.max_evaluation_cases:
+        raise PipelineError(
+            f"{preview['cases']} replay cases exceed max_evaluation_cases={settings.max_evaluation_cases}; "
+            "lower --max-points-per-trajectory or raise --aws-max-cases"
+        )
+    generation = EvaluationSettings(max_new_tokens=replay["max_output_tokens"], max_cases=settings.max_evaluation_cases,
+                                    max_points_per_trajectory=replay["max_points_per_trajectory"])
+    generation.validate()
+    _json_dump(output / "settings.json", {
+        "schema_version": 1, "max_new_tokens": generation.max_new_tokens, "max_cases": generation.max_cases,
+        "max_points_per_trajectory": generation.max_points_per_trajectory,
+    })
+    files = {name: sha256_file(Path(bundle_dir) / name) for name in OPTIONAL_BUNDLE_FILES}
+    answers = 2 * preview["cases"]
+    summary = {
+        "status": "planned", "run_id": run_id, "cases": preview["cases"], "rejected_cases": preview["rejected"],
+        "case_types": preview["case_types"], "max_points_per_trajectory": replay["max_points_per_trajectory"],
+        "max_output_tokens": replay["max_output_tokens"], "max_prompt_tokens": preview["max_prompt_tokens"],
+        "training_context": preview.get("context_limit") or None,
+        "answers_generated_in_job": answers, "worst_case_generated_tokens": answers * replay["max_output_tokens"],
+        "judge_model": replay["judge_model"], "judge_calls_after_collection": answers + preview["judge_calibration_calls"],
+        "note": "Answers are generated on the training instance after export, within the job runtime limit; "
+                "judging and LangSmith publication run locally with smithtune evaluate --provider sagemaker.",
+    }
+    return {"files": files, "summary": summary}
+
+
+def submit_evaluation_job(run_dir: Path, *, confirm: bool, provider: SageMakerProvider | None = None) -> dict:
+    """Generate missing answers for a collected run in a new job that resumes its checkpoint prefix."""
+    from datetime import UTC, datetime
+
+    from smithtune.training.contracts import verify_artifact, write_artifact_manifest
+
+    provider = provider or SageMakerProvider()
+    if not confirm:
+        raise PipelineError("an evaluation-only job creates paid resources; rerun with --confirm")
+    run_dir = Path(run_dir)
+    receipt = _load_json(run_dir / "job.json")
+    if receipt.get("provider") != "sagemaker" or receipt.get("evaluation_job"):
+        raise PipelineError("evaluation-only jobs start from the original training run directory")
+    artifact = run_dir / "artifact"
+    if not artifact.exists():
+        raise PipelineError("run smithtune aws collect before submitting an evaluation-only job")
+    exported, _spec = verify_artifact(artifact)
+    bundle = _load_json(run_dir / "input/bundle.json")
+    if not set(OPTIONAL_BUNDLE_FILES) <= set(bundle.get("files", {})):
+        raise PipelineError("this run bundled no replay cases; train with --evaluate to generate answers")
+    config = AWSJobConfig(**receipt["aws"])
+    config.validate()
+    job_name = f"{receipt['job_name'][:40]}-eval-{datetime.now(UTC):%Y%m%d-%H%M%S}"
+    job_dir = run_dir / "evaluation-jobs" / job_name
+    job_dir.mkdir(parents=True)
+    staged = job_dir / "input"
+    shutil.copytree(run_dir / "input", staged)
+    export = staged / "export"
+    export.mkdir()
+    for name in ("adapter", "tokenizer", "base_config"):
+        shutil.copytree(artifact / name, export / name)
+    shutil.copyfile(artifact / "result.json", export / "result.json")
+    write_artifact_manifest(export)
+    prefix = f"{config.s3_prefix.rstrip('/')}"
+    overrides = {"checkpoint_s3_uri": f"{prefix}/{receipt['job_name']}/checkpoints", "worker_command": "evaluate"}
+    request = training_request(config, job_name, overrides=overrides)
+    _json_dump(job_dir / "request.json", request)
+    _json_dump(job_dir / "plan.json", {"provider": "sagemaker", "run_id": job_name, "evaluation_job": True,
+                                       "source_run_id": receipt["job_name"], "create_training_job": request,
+                                       "resumes_checkpoints": overrides["checkpoint_s3_uri"]})
+    job_receipt = {
+        "provider": "sagemaker", "job_name": job_name, "status": "staging", "aws": asdict(config),
+        "request_sha256": sha256_file(job_dir / "request.json"), "request_overrides": overrides,
+        "evaluation_job": {"source_run_id": receipt["job_name"], "source_best_epoch": exported["best_epoch"]},
+        "stop_command": f"smithtune aws stop --run-dir {shlex.quote(str(job_dir.resolve()))} --confirm",
+    }
+    _json_dump(job_dir / "job.json", job_receipt)
+    try:
+        session = provider._session(config)
+        s3 = session.client("s3")
+        client = session.client("sagemaker")
+        bucket, key_prefix = split_s3_uri(config.s3_prefix)
+        if s3.list_objects_v2(Bucket=bucket, Prefix=f"{key_prefix}/{job_name}/", MaxKeys=1).get("KeyCount", 0):
+            raise PipelineError("S3 prefix for the evaluation job already contains objects")
+        for path in sorted(staged.rglob("*")):
+            if path.is_file():
+                extra = {"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": config.output_kms_key} if config.output_kms_key else {}
+                s3.upload_file(str(path), bucket, f"{key_prefix}/{job_name}/input/{path.relative_to(staged).as_posix()}", ExtraArgs=extra)
+        job_receipt["status"] = "submission_pending"
+        _json_dump(job_dir / "job.json", job_receipt)
+        response = client.create_training_job(**request)
+        job_receipt.update(status="Submitted", training_job_arn=response["TrainingJobArn"])
+        _json_dump(job_dir / "job.json", job_receipt)
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(
+            f"AWS submission did not complete locally ({type(exc).__name__}); receipt preserved at {job_dir / 'job.json'}. "
+            "Use smithtune aws status on that directory before retrying."
+        ) from None
+    return job_receipt | {"run_dir": str(job_dir)}
