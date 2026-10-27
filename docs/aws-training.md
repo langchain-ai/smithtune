@@ -283,8 +283,52 @@ checkpoints into a new job is not yet implemented.
 
 `aws status` returns the model artifact S3 URI and CloudWatch log location.
 Training creates **no endpoint**. Use the explicit steps below for hosting.
-`train --evaluate` and the top-level `deploy`/`evaluate` commands still reject
-SageMaker; LangSmith replay is not wired to the AWS sampler yet.
+
+## Evaluate without an endpoint
+
+`train --evaluate` bundles the held-out replay cases with the job. After the
+best adapter is exported, the same instance reloads the base weights plus that
+adapter and generates every case's answer twice, base first (adapter disabled)
+and then tuned, one model in memory at a time. Each answer is appended to
+`evaluation/predictions.jsonl` under the checkpoint directory, which SageMaker
+synchronizes to S3 while the job runs, so a stop keeps every answer written so
+far. Generation ends before the job's runtime limit; whatever is finished is
+kept. Judging and LangSmith publication never run in the job.
+
+```bash
+smithtune train --provider sagemaker --data-dir ./data/aws-qwen \
+  --run-dir ./runs/aws-qwen-002 --run-id aws-qwen-002 \
+  --aws-config ./aws-job.json --max-epochs 1 --batch-size 2 \
+  --evaluate --max-points-per-trajectory 1 --max-output-tokens 128 --confirm
+smithtune aws wait --run-dir ./runs/aws-qwen-002 --timeout 3600
+smithtune aws collect --run-dir ./runs/aws-qwen-002
+smithtune evaluate --provider sagemaker --data-dir ./data/aws-qwen \
+  --run-dir ./runs/aws-qwen-002 --confirm
+```
+
+`plan` shows the case count, the output budget, the worst-case generated
+tokens and the judge calls that `evaluate` will make. `--aws-max-cases`
+(default 50) is a guard, not a selector: lower `--max-points-per-trajectory`
+when the test split produces more cases. Keep the output budget small on CPU
+pipeline runs.
+
+Training and evaluation succeed separately. `collect` and `aws status` report
+`training` and `evaluation` outcomes; the job completes even when evaluation
+fails or stops early, and `evaluate` refuses to publish while answers are
+missing. To finish an incomplete evaluation, or to answer cases after a run
+that trained without `--evaluate` is given cases, submit an evaluation-only
+job. It reuses the run's checkpoint prefix, so already-saved answers resume:
+
+```bash
+smithtune aws evaluate-job --run-dir ./runs/aws-qwen-002 --confirm
+smithtune aws wait --run-dir ./runs/aws-qwen-002/evaluation-jobs/<job-name> --timeout 3600
+smithtune aws collect --run-dir ./runs/aws-qwen-002
+```
+
+`evaluate` reuses the generation settings saved in the job; omit or match
+`--max-output-tokens` and `--max-points-per-trajectory`. It compares the
+adapter with its own base model, needs only the judge's credentials, and
+publishes the same LangSmith comparison as the other providers.
 
 ## Collect, host and remove an endpoint
 
