@@ -16,8 +16,10 @@ loss to them. It never truncates examples or concatenates separate conversations
 ## Status
 
 Validated so far: short synthetic training runs on one L40S and one A10G (the
-TRL backend), and adapter reload with generation on one L4, all with a longest
-example of 437 tokens. Not validated: longer contexts, hosted endpoints,
+TRL backend), adapter reload with generation on one L4, all with a longest
+example of 437 tokens, and the full submit/train/export/collect lifecycle on a
+CPU instance with the `qwen3p5-0p8b-test` profile (24 synthetic threads, two
+epochs, about 15 billable minutes on `ml.m5.2xlarge`). Not validated: longer contexts, hosted endpoints,
 cross-job resume, Spot recovery, distributed training, other models, and
 LangSmith replay. `train --evaluate`, `deploy` and `evaluate` reject this
 provider until replay is wired to its artifacts. Dated run notes are kept
