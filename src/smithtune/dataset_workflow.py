@@ -15,7 +15,7 @@ from smithtune.providers.base import PipelineError
 
 
 STAGES = ("pull", "triage", "push")
-SOURCE_FLAGS = ("workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates")
+SOURCE_FLAGS = ("workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates", "supervision_scope")
 COUNCIL_FLAGS = ("judges", "rules", "config_path", "rubric_path", "runner_mode", "concurrency", "attempts", "max_output_tokens")
 # Scheduling only: changing these never changes what a vote means, so saved votes stay valid.
 RUNTIME_COUNCIL_SETTINGS = ("concurrency", "attempts")
@@ -43,7 +43,8 @@ def _open(directory, command, options):
             options.get("start_time"), options.get("end_time"), filter=options.get("filter"),
             target_count=options.get("target_count") if options.get("target_count") is not None else 100,
             max_candidates=options.get("max_candidates") if options.get("max_candidates") is not None else 1000,
-            review_mode="none" if options.get("no_triage") else "council")
+            review_mode="none" if options.get("no_triage") else "council",
+            supervision_scope=options.get("supervision_scope") or "all-assistant")
         source["selection_mode"] = "trajectories"
         checkpoint = storage.open_checkpoint(directory, "triage", source)
     if options.get("no_triage") and checkpoint["source"].get("review_mode") != "none":
@@ -53,7 +54,7 @@ def _open(directory, command, options):
         if value is not None:
             value = _time(value) if key in {"start_time", "end_time"} else value
             value = _uuid(value, key) if key in {"workspace_id", "project_id"} else value
-            if value != checkpoint["source"].get(key):
+            if value != checkpoint["source"].get(key, "all-assistant" if key == "supervision_scope" else None):
                 raise PipelineError(f"--{key.replace('_', '-')} conflicts with the frozen selection; use a new directory")
     return checkpoint
 

@@ -115,6 +115,8 @@ metadata into the saved per-assistant tool representation. Training,
 validation, and replay must consume the same tool list for each assistant target.
 The Fireworks loader uses smithtune's target renderer with the official cookbook's
 JSONL dataset and batching; changing only preparation masks is insufficient.
+`supervision.py` owns target selection and validation; preserve its selections
+across pipeline stages. See [supervision scopes](docs/datasets.md#choose-assistant-teaching-targets).
 Regression coverage includes actual loader masks, tool additions/removals/schema
 changes, local upload/prepare roundtrips, and capture checkpoint recovery.
 

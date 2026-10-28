@@ -502,7 +502,8 @@ def validate_trajectories(
             or saved_triage.get("messages_sha256") != json_sha256(messages)
         ):
             raise PipelineError(f"example {example_id}: triaged example messages changed after judging")
-        if saved_triage is not None and "smithtune_source" in metadata:
+        if saved_triage is not None and ("smithtune_source" in metadata or "supervision" in metadata
+                                         or "evidence_sha256" in saved_triage):
             from smithtune.bindings import evidence_hash
             if saved_triage.get("evidence_sha256") != evidence_hash(example):
                 raise PipelineError(f"example {example_id}: triaged evidence changed after judging")
@@ -511,6 +512,8 @@ def validate_trajectories(
                 _validate_source_message(message)
             except PipelineError as exc:
                 raise PipelineError(f"example {example_id} message {position}: {exc}") from exc
+        from smithtune.supervision import target_indices
+        target_indices(metadata, messages)
         if not any(message["role"] == "ai" for message in messages):
             raise PipelineError(f"example {example_id} has no assistant training target")
         call_count, result_count = _validate_tool_pairs(messages, example_id, native=True)
@@ -689,6 +692,7 @@ def prepare_sft_rows(
 ) -> list[dict[str, Any]]:
     """Keep canonical conversations; expand targets only at the rendering boundary."""
     from smithtune.bindings import read_bindings, tool_contract
+    from smithtune.supervision import target_indices
 
     if example_contracts is not None:
         raise PipelineError("legacy conversation-wide contracts require per-message re-capture")
@@ -698,6 +702,7 @@ def prepare_sft_rows(
         identity = _source_identity(example)
         try:
             bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"]) if contract is None else None
+            selected = target_indices(example["metadata"], example["inputs"]["messages"])
             messages, positions = [], []
             for position, source in enumerate(example["inputs"]["messages"]):
                 try:
@@ -711,6 +716,10 @@ def prepare_sft_rows(
                     continue
                 messages.append(converted)
                 positions.append(position)
+            surviving = set(positions)
+            if "supervision" in example["metadata"] and not set(selected) <= surviving:
+                raise PipelineError("selected assistant target is empty after reasoning conversion")
+            selected = [i for i in selected if i in surviving]
             _validate_tool_pairs(messages, example["id"])
             if not any(m["role"] == "assistant" for m in messages):
                 raise PipelineError("no assistant training target after reasoning conversion")
@@ -722,7 +731,7 @@ def prepare_sft_rows(
             continue
         row = {"messages": messages, "tool_policy": "global_override" if contract else "per_assistant",
                "_source": {"example_id": example["id"], **identity, "source_index": source_index,
-                           "message_positions": positions, "metadata": copy.deepcopy(example["metadata"])}}
+                           "message_positions": positions, "target_message_indices": selected, "metadata": copy.deepcopy(example["metadata"])}}
         if workspace_id is not None:
             row["_source"]["source_key"] = list(_source_key(example, workspace_id, source_workspace_id))
         if contract is not None:
@@ -1066,7 +1075,8 @@ def prepare_dataset(
     manifest = {
         "schema_version": 2,
         "tool_policy": "global_override" if inference_contract else "per_assistant",
-        "target_policy": "each_assistant_once",
+        "target_policy": ("selected_assistant_once" if any("supervision" in row["_source"]["metadata"] for row in rows)
+                          else "each_assistant_once"),
         "created_at_utc": _utc_now(),
         "langsmith": {
             "workspace_id": workspace_id,
@@ -1228,5 +1238,5 @@ def _prepared_example_contracts(
 
 
 def require_current_preparation(manifest):
-    if manifest.get("schema_version") != 2 or manifest.get("target_policy") != "each_assistant_once":
+    if manifest.get("schema_version") != 2 or manifest.get("target_policy") not in {"each_assistant_once", "selected_assistant_once"}:
         raise PipelineError("prepared artifacts predate per-assistant tools and target-only loss; run prepare again")

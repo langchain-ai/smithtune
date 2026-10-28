@@ -206,6 +206,8 @@ def test_cli_existing_dataset_ordinary_path(tmp_path, monkeypatch, capsys):
     old = copy.deepcopy(load_snapshot(tmp_path)["units"][0]["example"])
     old.update(id=uid(1), dataset_id=uid(200))
     old["inputs"]["messages"] = old["inputs"]["messages"][:3]
+    from smithtune.supervision import make_supervision
+    old["metadata"]["supervision"] = make_supervision(old["inputs"]["messages"], [2], scope="all-assistant")
     old["metadata"]["smithtune_source"]["assistant_runs"] = old["metadata"]["smithtune_source"]["assistant_runs"][:1]
     destination = API([old])
     original = dataset_workflow.run

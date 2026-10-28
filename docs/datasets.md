@@ -17,6 +17,54 @@ stage’s result before continuing.
 generated if omitted from a new `pull`; the result's `run_dir` field is that dataset directory, so reuse it for subsequent commands.
 `dataset publish-splits` remains a separate operation on prepared data.
 
+## Choose assistant teaching targets
+
+Choose the scope before the first pull. In an agent-guided workflow, confirm
+whether supplied historical assistant messages should be teaching material or
+context only; reuse an existing choice on resume. The CLI is non-interactive and
+defaults to `--supervision-scope all-assistant`, selecting every assistant message.
+To keep initial history as context only:
+
+```bash
+smithtune dataset pull data/datasets/garden \
+  --workspace-id '<workspace-id>' --project-id '<project-id>' \
+  --supervision-scope skip-initial-history
+```
+
+This opt-in mode reads all `/v1/trajectory` pages, finds the end of the initial
+contiguous run-ID group, and selects its final assistant message plus every
+subsequent assistant message, including tool calls. Earlier messages remain
+context with zero loss. It adds no run-output queries. Existing root discovery
+and thread-membership queries still apply.
+
+Use this only when the endpoint returns a complete chronological conversation,
+the initial group contains supplied history followed by one generated assistant
+output, and no additional assistant history is injected later. Run IDs identify
+source observations; they do not independently prove authorship. Missing IDs, an
+initial group ending in a non-assistant message, or the initial ID reappearing
+after a transition exclude the whole trajectory. Structurally valid but incomplete
+or differently ordered data cannot always be detected; inspect representative
+examples before using this mode.
+
+The scope is fixed for the pull directory. Each uploaded example saves its own
+`metadata.supervision` record with `schema_version: 1`, `scope`,
+`target_message_indices`, and `messages_sha256`; inferred history skipping also
+saves `boundary_message_index`. Indices are zero-based positions in the complete,
+unchanged native `inputs.messages` list. They must be nonempty, sorted, unique,
+and point only to assistant messages. The hash is SmithTune's canonical JSON
+SHA-256 of that message list. Programmatic imports can use `scope: "explicit"`
+with a validated selection for an individual example.
+
+A dataset may combine examples pulled with different scopes. Preparation reads
+each example's saved selection; there is no dataset-wide override. Examples
+without supervision metadata keep the all-assistant default. Judging assesses
+selected assistant behavior using the whole conversation as context; training,
+validation, and replay use the same targets. A changed selection invalidates
+saved council approval. Uploads reject changed targets within an existing
+message prefix; use a new dataset for a different selection. Re-prepare after
+changing policies; older SmithTune versions reject artifacts marked
+`selected_assistant_once`.
+
 ## Select candidates and review quality
 
 Use source filters to select relevant candidates, then review their quality with
@@ -192,7 +240,7 @@ source workspace. The destination is saved for subsequent commands.
 Sources match by workspace, project, scope, and scope ID. Unchanged examples are
 skipped. Longer trajectories extend the existing example only when its messages
 are an exact prefix, retaining its ID and unrelated metadata. Conflicting or
-shorter histories stop the import. Existing tool lists and producing-run identities must also match the message
+shorter histories stop the import. Existing tool lists and source run identities must also match the message
 prefix. Use a new dataset when the destination lacks this per-assistant evidence.
 Run one import per destination at a time.
 

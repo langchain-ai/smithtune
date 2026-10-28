@@ -109,6 +109,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--filter", help="LangSmith root-run filter; matching roots select full threads, including runs outside the filter/time window")
             command.add_argument("--target-count", type=int, help="desired council-approved trajectories, or structurally usable trajectories with --no-triage (default: 100)")
             command.add_argument("--max-candidates", type=int, help="maximum new candidates per collection round (default: 1000, maximum: 2000)")
+            command.add_argument("--supervision-scope", choices=("all-assistant", "skip-initial-history"),
+                                 help="assistant loss targets: all-assistant (default), or skip initial input history using trajectory run-ID groups")
             command.add_argument("--no-triage", action="store_true", default=None, help="count structurally usable trajectories toward the target; skip council review (saved for this directory)")
         if name == "push":
             destination = command.add_mutually_exclusive_group()
@@ -614,7 +616,7 @@ def main(argv: list[str] | None = None) -> None:
                 value = reporting.publish_prepared_splits(args.data_dir)
             else:
                 options = {key: getattr(args, key, None) for key in (
-                    "workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates", "no_triage",
+                    "workspace_id", "project_id", "start_time", "end_time", "filter", "target_count", "max_candidates", "no_triage", "supervision_scope",
                     "name", "dataset_id", "concurrency", "attempts", "max_output_tokens",
                 )}
                 options.update(judges=args.judges.split(",") if getattr(args, "judges", None) is not None else None,

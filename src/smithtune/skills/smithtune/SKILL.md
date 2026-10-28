@@ -194,6 +194,17 @@ window. The training example is the full trajectory.
 
 ## 2. Pull
 
+Before the first pull, ask the user which assistant messages should receive
+training loss, unless they already specified the scope:
+
+- `all-assistant`: train on all assistant messages, including supplied history (CLI default).
+- `skip-initial-history`: keep initial supplied assistant history as context only.
+
+Before using history skipping, inspect a representative trajectory and check the
+[scope assumptions](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md#choose-assistant-teaching-targets).
+Set `supervision_scope` to the agreed value and pass it explicitly below. Reuse
+the saved scope on resume; do not ask again. Preserve saved target selections.
+
 **Ask the user whether to review with a council before pulling.** The choice is
 fixed for the directory, so settle it now. Explain both options:
 
@@ -223,6 +234,7 @@ smithtune dataset pull "$dataset_dir" \
   --start-time "$start_time" --end-time "$end_time" \
   --filter "$filter" \
   --target-count 100 --max-candidates 1000 \
+  --supervision-scope "$supervision_scope" \
   --no-triage   # omit to use council review
 ```
 

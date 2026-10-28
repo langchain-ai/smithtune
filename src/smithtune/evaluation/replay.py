@@ -130,10 +130,12 @@ def build_replay_cases(
     """Slice test trajectories before assistant-message boundaries."""
     cases: list[dict[str, Any]] = []
     from smithtune.bindings import row_bindings, tool_contract
+    from smithtune.supervision import row_target_indices
 
     for row in test_rows:
         bindings = None if row.get("tool_policy") == "global_override" else row_bindings(row)
         original_positions = row["_source"]["message_positions"]
+        selected = set(row_target_indices(row))
         if bindings is not None:
             for i, message in enumerate(row["messages"]):
                 if message.get("role") == "assistant":
@@ -148,6 +150,7 @@ def build_replay_cases(
         positions = [
             index for index, message in enumerate(messages)
             if message.get("role") == "assistant"
+            and original_positions[index] in selected
             and _has_visible_action(message)
         ]
         for position in _pick_evenly(positions, max_points_per_trajectory):

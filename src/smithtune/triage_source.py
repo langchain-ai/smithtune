@@ -206,10 +206,15 @@ def thread_trace_ids(workspace: str, project: str, thread: str, *, start_time: s
                              for root in sorted(roots, key=lambda r: (r.get("start_time") or "", r["id"]))))
 
 
-def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42, target_count=None, max_candidates=None, review_mode=None) -> dict:
+def source_options(workspace_id, project_id, start_time=None, end_time=None, *, filter=None, limit=100, seed=42, target_count=None, max_candidates=None, review_mode=None, supervision_scope=None) -> dict:
+    from smithtune.supervision import SUPERVISION_SCOPES
+    if supervision_scope is not None and supervision_scope not in SUPERVISION_SCOPES:
+        raise PipelineError("unsupported supervision scope")
     start_time, end_time = resolve_time_window(start_time, end_time)
     value = {"workspace_id": _uuid(workspace_id, "workspace id"), "project_id": _uuid(project_id, "project id"),
              "start_time": start_time, "end_time": end_time, "filter": filter, "limit": limit, "seed": seed}
+    if supervision_scope is not None:
+        value["supervision_scope"] = supervision_scope
     if limit is not None and (type(limit) is not int or limit < 1):
         raise PipelineError("trace limit must be positive")
     if type(seed) is not int or (filter is not None and (not isinstance(filter, str) or not filter.strip())):
@@ -292,7 +297,7 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1, exte
         if saved is not None:
             return key, saved
         trajectory = _fetch_trajectory(workspace, project, {"key": "thread_id" if thread else "trace_id", "id": thread or tid},
-                                       runner=runner, retain_empty=True)
+                                       runner=runner, retain_empty=True, supervision_scope=source.get("supervision_scope"))
         # Validate the downloaded evidence's source, without requiring a live
         # thread to remain unchanged while its pages are read.
         source_traces = thread_trace_ids(workspace, project, thread, start_time=checkpoint["project_start"],
@@ -319,6 +324,8 @@ def snapshot(source: dict, output_dir: Path, *, runner=_run, concurrency=1, exte
                                 "source_trace_id": unit_traces[0], "triage_trace_ids": unit_traces}}
         if trajectory["source"] is not None:
             example["metadata"]["smithtune_source"] = trajectory["source"]
+        if trajectory.get("supervision") is not None:
+            example["metadata"]["supervision"] = trajectory["supervision"]
         unit = {"example": example, "trace_ids": unit_traces, "contract": None,
                 "training_error": trajectory["training_error"], "traces": unit_records,
                 "multimodal_types": multimodal_types({"messages": all_messages})}
@@ -416,6 +423,9 @@ def conversation_trajectories(frozen: dict, *, summaries=False) -> list[dict]:
     for unit in frozen["units"]:
         trajectory = {"trajectory_id": unit["example"]["id"],
                       "messages": unit["example"]["inputs"]["messages"]}
+        if not summaries and not unit.get("training_error"):
+            from smithtune.supervision import target_indices
+            trajectory["target_message_indices"] = target_indices(unit["example"].get("metadata", {}), trajectory["messages"])
         if "multimodal_types" in unit:
             trajectory["multimodal_types"] = unit["multimodal_types"]
         else:
