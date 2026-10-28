@@ -24,7 +24,7 @@ remediation instead of reporting the model as unavailable.
 - One complete trajectory per dataset example
 - LoRA training on text and tool trajectories; images are unsupported
 - Approximately 80% training, 10% validation, and 10% replay test, keeping each source trajectory in one split
-- By default all assistant messages are training targets, including earlier turns; saved `metadata.supervision.target_message_indices` can restrict targets (see [supervision scopes](datasets.md#choose-assistant-teaching-targets))
+- All assistant messages are targets unless you [choose a different supervision scope](datasets.md#choose-assistant-teaching-targets)
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; lower the limit with `--max-seq-len`, for example `--max-seq-len 32768`
 

@@ -256,12 +256,10 @@ stays in one split; the memberships are also published to the LangSmith dataset.
 
 Recorded system messages are preserved; reasoning is omitted by default. Unsupported
 or overlong trajectories are excluded without truncation and listed in
-`"$data_dir/prepared/rejected.json"`. Each supported assistant answer becomes one
-training target, with its preceding context and the tools available at that call.
-To keep supplied initial assistant history as context only, opt into
-`dataset pull --supervision-scope skip-initial-history`. The saved per-example
-`target_message_indices` control judging, training, validation, and replay. See
-[supervision scopes](docs/datasets.md#choose-assistant-teaching-targets) for assumptions and explicit selections.
+`"$data_dir/prepared/rejected.json"`. By default, each supported assistant message
+becomes one training target, with its preceding context and tools. To keep initial
+assistant history as context only, [choose a supervision scope](docs/datasets.md#choose-assistant-teaching-targets)
+when pulling the dataset.
 See the [preparation reference](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#prepare-data) for data requirements,
 reasoning options, and split recovery.
 

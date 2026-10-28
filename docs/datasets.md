@@ -19,8 +19,11 @@ generated if omitted from a new `pull`; the result's `run_dir` field is that dat
 
 ## Choose assistant teaching targets
 
-By default, `--supervision-scope all-assistant` selects every assistant message,
-including supplied historical answers. To keep initial history as context only:
+Choose the scope before the first pull. In an agent-guided workflow, confirm
+whether supplied historical assistant messages should be teaching material or
+context only; reuse an existing choice on resume. The CLI is non-interactive and
+defaults to `--supervision-scope all-assistant`, selecting every assistant message.
+To keep initial history as context only:
 
 ```bash
 smithtune dataset pull data/datasets/garden \
