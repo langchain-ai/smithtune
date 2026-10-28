@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 from smithtune.inference_contract import (
     ContractError, _canonicalize_captured_tools, json_sha256, parse_inference_contract,
 )
@@ -16,8 +18,9 @@ def tool_contract(tools, **provenance):
                                      "tools": tools, "tools_sha256": json_sha256(tools), "provenance": provenance})
 
 
-def trajectory_bindings(items):
-    """Normalize the availability recorded on each assistant's trajectory item."""
+def trajectory_bindings(items, *, target_message_indices=None):
+    """Require portable tool evidence for targets; retain context evidence as recorded."""
+    selected = None if target_message_indices is None else set(target_message_indices)
     bindings = []
     for index, item in enumerate(items):
         message = item["message"]
@@ -30,6 +33,10 @@ def trajectory_bindings(items):
         ):
             raise PipelineError(f"{context} has no run/trace provenance in the trajectory response")
         context += f" run {metadata['run_id']}"
+        if selected is not None and index not in selected:
+            bindings.append({"message_index": index, "run_id": metadata["run_id"],
+                             "trace_id": metadata["trace_id"], "tools": copy.deepcopy(message.get("available_tools"))})
+            continue
         if not isinstance(message.get("available_tools"), list):
             raise PipelineError(f"{context} has unknown tool availability; /v1/trajectory must record available_tools (including [] for no tools)")
         try:
@@ -42,14 +49,17 @@ def trajectory_bindings(items):
     return {"schema_version": SCHEMA_VERSION, "assistant_runs": bindings}
 
 
-def read_bindings(metadata, messages, *, positions=None):
-    """Validate coverage and return original-position bindings, without fallback."""
+def read_bindings(metadata, messages, *, positions=None, target_message_indices=None):
+    """Validate target coverage and return original-position bindings, without fallback."""
+    from smithtune.supervision import target_indices
+
     source = metadata.get("smithtune_source") if isinstance(metadata, dict) else None
     if not isinstance(source, dict) or source.get("schema_version") != SCHEMA_VERSION:
         raise PipelineError("missing per-assistant tool provenance; pull again using trajectory available_tools")
     values = source.get("assistant_runs")
     if not isinstance(values, list):
         raise PipelineError("assistant_runs must be an array")
+    selected = set(target_indices(metadata, messages) if target_message_indices is None else target_message_indices)
     result = {}
     for binding in values:
         if not isinstance(binding, dict):
@@ -59,33 +69,40 @@ def read_bindings(metadata, messages, *, positions=None):
             raise PipelineError("duplicate or invalid assistant message position")
         if any(not isinstance(binding.get(key), str) or not binding[key] for key in ("run_id", "trace_id")):
             raise PipelineError(f"assistant message {index} has no source run/trace identity")
-        try:
-            tool_contract(binding.get("tools"))
-        except ContractError as exc:
-            raise PipelineError(f"assistant message {index}: {exc}") from exc
+        if index in selected:
+            try:
+                tool_contract(binding.get("tools"))
+            except ContractError as exc:
+                raise PipelineError(f"assistant message {index}: {exc}") from exc
         result[index] = binding
     original = list(range(len(messages))) if positions is None else positions
     if len(original) != len(messages) or any(type(i) is not int for i in original) or original != sorted(set(original)):
         raise PipelineError("invalid original message positions")
     expected = {original[i] for i, m in enumerate(messages) if m.get("role") in ("ai", "assistant")}
-    if not expected <= result.keys() or (positions is None and expected != result.keys()):
+    if not selected <= expected or not selected <= result.keys() or (positions is None and not result.keys() <= expected):
         raise PipelineError("assistant bindings do not cover exactly the recorded assistant messages")
     if any(original[i] in result for i, m in enumerate(messages) if m.get("role") not in ("ai", "assistant")):
         raise PipelineError("binding points to a non-assistant message")
     return result
 
 
-def row_bindings(row):
+def row_bindings(row, *, target_message_indices=None):
+    from smithtune.supervision import row_target_indices
+
     source = row["_source"]
-    return read_bindings(source.get("metadata"), row["messages"], positions=source.get("message_positions"))
+    return read_bindings(source.get("metadata"), row["messages"], positions=source.get("message_positions"),
+                         target_message_indices=row_target_indices(row) if target_message_indices is None else target_message_indices)
 
 
 def validate_bound_messages(example):
     from smithtune.dataset import validate_import_messages
 
-    messages = validate_import_messages(example)
-    bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"])
-    for index, binding in bindings.items():
+    selections = {}
+    messages = validate_import_messages(example, target_selections=selections)
+    selected = selections[example["id"]]
+    bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"], target_message_indices=selected)
+    for index in selected:
+        binding = bindings[index]
         try:
             tool_contract(binding["tools"]).validate_messages([messages[index]])
         except ContractError as exc:
@@ -109,7 +126,7 @@ def training_targets(row):
     selected = set(row_target_indices(row))
     source = row["_source"]
     override = row.get("tool_policy") == "global_override"
-    bindings = None if override else row_bindings(row)
+    bindings = None if override else row_bindings(row, target_message_indices=selected)
     positions = source["message_positions"]
     for i, message in enumerate(row["messages"]):
         if positions[i] not in selected or message.get("role") != "assistant" or not _has_message_content(message):

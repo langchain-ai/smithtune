@@ -211,7 +211,7 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     if runner_mode == "deepagent":
         # The coordinator prompt changes scheduling decisions and belongs in
         # the resume identity just like the judge instructions.
-        identity.update(agent_version=13, coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
+        identity.update(agent_version=14, coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(multimodal_filtered),

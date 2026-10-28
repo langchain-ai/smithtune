@@ -218,8 +218,8 @@ class InferenceContract:
         max_tokens: int,
         json_mode: bool = False,
     ) -> dict[str, Any]:
-        # Per-target replay has already validated each historical action with
-        # its own binding. Removed or changed tools must remain valid history.
+        # Per-target replay validates selected actions separately. Supplied
+        # history may have unknown, removed, or changed tools.
         if "message_index" not in self.provenance:
             self.validate_messages(messages)
         if not isinstance(model, str) or not model:

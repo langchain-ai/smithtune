@@ -11,6 +11,7 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from threading import Lock
@@ -133,12 +134,12 @@ def build_replay_cases(
     from smithtune.supervision import row_target_indices
 
     for row in test_rows:
-        bindings = None if row.get("tool_policy") == "global_override" else row_bindings(row)
-        original_positions = row["_source"]["message_positions"]
         selected = set(row_target_indices(row))
+        bindings = None if row.get("tool_policy") == "global_override" else row_bindings(row, target_message_indices=selected)
+        original_positions = row["_source"]["message_positions"]
         if bindings is not None:
             for i, message in enumerate(row["messages"]):
-                if message.get("role") == "assistant":
+                if message.get("role") == "assistant" and original_positions[i] in selected:
                     try:
                         tool_contract(bindings[original_positions[i]]["tools"]).validate_messages([message])
                     except ContractError as exc:
@@ -213,6 +214,8 @@ def _case_contract(
             raise PipelineError("replay target tools differ from its saved contract")
         return contract
     if example_contracts is None:
+        if global_contract is not None and case.get("tool_policy") == "global_override":
+            return replace(global_contract, provenance={**global_contract.provenance, "message_index": case["message_index"]})
         return global_contract
     example_id = case.get("example_id")
     if example_id not in example_contracts:
@@ -287,8 +290,7 @@ def prepare_replay_evaluation(
             if case.get("tools") != expected_tools:
                 raise PipelineError(f"replay case {case['id']} has different tool schemas")
             try:
-                contract.validate_messages([case["reference"]] if case["tool_policy"] == "per_assistant"
-                                           else [*case["messages"], case["reference"]])
+                contract.validate_messages([case["reference"]])
             except ContractError as exc:
                 raise PipelineError(f"replay case {case['id']} violates inference contract: {exc}") from exc
     context_options = {"max_seq_len": baseten_context_limit} if baseten_context_limit else {}

@@ -72,7 +72,7 @@ still run.
 
 Whole trajectories remain the dataset examples and split rows. Their metadata
 stores `smithtune_source.assistant_runs`: the message position, source run and
-trace IDs, and complete tools recorded for each assistant call. Tools can be
+trace IDs, and tool availability recorded for each assistant call. Tools can be
 added, removed, or change descriptions and schemas between calls. An empty list
 means no tools were offered; missing availability is not treated as an empty list.
 
@@ -80,8 +80,12 @@ Pull requests `/v1/trajectory` in `ui` format with system messages enabled. Each
 assistant item's `message.available_tools` supplies its complete tool list, and
 `metadata.run_id` / `metadata.trace_id` identify its source observation (which may be an input occurrence for supplied
 history). They do not independently establish authorship. No additional
-LLM-run lookups are needed. Missing availability or provenance and unsupported
-provider built-ins exclude the trajectory with a recorded reason.
+LLM-run lookups are needed. Selected assistant targets require complete, supported
+tool definitions; missing availability or unsupported provider built-ins on a
+target exclude the trajectory with a recorded reason. Context-only bindings retain
+recorded tool metadata without requiring a valid inference contract; absent
+availability is saved as `tools: null`, and context bindings may be omitted.
+Run/trace provenance is still required on captured assistant items.
 
 Preparation reuses saved bindings. For unbound, unjudged exports, it can retrieve
 them from the source trajectory only when its messages match the saved example
