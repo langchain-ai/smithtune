@@ -86,21 +86,22 @@ def read_bindings(metadata, messages, *, positions=None, target_message_indices=
     return result
 
 
-def row_bindings(row):
+def row_bindings(row, *, target_message_indices=None):
     from smithtune.supervision import row_target_indices
 
     source = row["_source"]
     return read_bindings(source.get("metadata"), row["messages"], positions=source.get("message_positions"),
-                         target_message_indices=row_target_indices(row))
+                         target_message_indices=row_target_indices(row) if target_message_indices is None else target_message_indices)
 
 
 def validate_bound_messages(example):
     from smithtune.dataset import validate_import_messages
-    from smithtune.supervision import target_indices
 
-    messages = validate_import_messages(example)
-    bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"])
-    for index in target_indices(example.get("metadata"), example["inputs"]["messages"]):
+    selections = {}
+    messages = validate_import_messages(example, target_selections=selections)
+    selected = selections[example["id"]]
+    bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"], target_message_indices=selected)
+    for index in selected:
         binding = bindings[index]
         try:
             tool_contract(binding["tools"]).validate_messages([messages[index]])
@@ -125,7 +126,7 @@ def training_targets(row):
     selected = set(row_target_indices(row))
     source = row["_source"]
     override = row.get("tool_policy") == "global_override"
-    bindings = None if override else row_bindings(row)
+    bindings = None if override else row_bindings(row, target_message_indices=selected)
     positions = source["message_positions"]
     for i, message in enumerate(row["messages"]):
         if positions[i] not in selected or message.get("role") != "assistant" or not _has_message_content(message):

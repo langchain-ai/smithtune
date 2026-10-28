@@ -189,7 +189,9 @@ def _fetch_trajectory(
         if supervision_scope is not None:
             from smithtune.supervision import trajectory_supervision
             supervision = trajectory_supervision(items, messages, supervision_scope)
-        selected = target_indices({"supervision": supervision} if supervision is not None else {}, messages)
+            selected = supervision["target_message_indices"]
+        else:
+            selected = target_indices({"supervision": supervision} if supervision is not None else {}, messages)
         source = trajectory_bindings(items, target_message_indices=selected)
     except PipelineError as exc:
         error = str(exc)

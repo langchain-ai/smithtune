@@ -29,7 +29,7 @@ def make_supervision(messages, indices, *, scope="explicit", boundary_message_in
              "messages_sha256": json_sha256(messages)}
     if boundary_message_index is not None:
         value["boundary_message_index"] = boundary_message_index
-    target_indices({"supervision": value}, messages)
+    _selection_indices(value, assistant_indices(messages))
     return value
 
 
@@ -39,11 +39,17 @@ def target_indices(metadata, messages):
     if "supervision" not in metadata:
         return assistants
     policy = metadata["supervision"]
+    selected = _selection_indices(policy, assistants)
+    if policy.get("messages_sha256") != json_sha256(messages):
+        raise PipelineError("supervision messages_sha256 does not match the recorded messages")
+    return selected
+
+
+def _selection_indices(policy, assistants):
+    """Validate selection structure; newly made policies already have a fresh hash."""
     if (not isinstance(policy, dict) or type(policy.get("schema_version")) is not int
             or policy["schema_version"] != 1 or policy.get("scope") not in (*SUPERVISION_SCOPES, "explicit")):
         raise PipelineError("invalid supervision metadata; expected schema_version 1 and a supported scope")
-    if policy.get("messages_sha256") != json_sha256(messages):
-        raise PipelineError("supervision messages_sha256 does not match the recorded messages")
     selected = _validate_indices(policy.get("target_message_indices"), assistants)
     if policy["scope"] == "all-assistant" and selected != assistants:
         raise PipelineError("all-assistant supervision must select every assistant message")

@@ -460,8 +460,9 @@ def _source_identity(example: dict[str, Any]) -> dict[str, str]:
 def validate_trajectories(
     examples: list[dict[str, Any]],
     expected_count: int,
+    *, target_selections: dict[str, list[int]] | None = None,
 ) -> Audit:
-    """Validate LangSmith message trajectories without changing them."""
+    """Validate trajectories; optionally collect their verified target selections."""
     if len(examples) != expected_count:
         raise PipelineError(f"expected {expected_count} examples, got {len(examples)}")
 
@@ -513,7 +514,9 @@ def validate_trajectories(
             except PipelineError as exc:
                 raise PipelineError(f"example {example_id} message {position}: {exc}") from exc
         from smithtune.supervision import target_indices
-        target_indices(metadata, messages)
+        selected = target_indices(metadata, messages)
+        if target_selections is not None:
+            target_selections[example_id] = selected
         if not any(message["role"] == "ai" for message in messages):
             raise PipelineError(f"example {example_id} has no assistant training target")
         call_count, result_count = _validate_tool_pairs(messages, example_id, native=True)
@@ -556,9 +559,9 @@ def validate_trajectories(
     )
 
 
-def validate_import_messages(example: dict[str, Any]) -> list[dict[str, Any]]:
+def validate_import_messages(example: dict[str, Any], *, target_selections=None) -> list[dict[str, Any]]:
     """Validate an import without rewriting messages or choosing a training model."""
-    validate_trajectories([example], 1)
+    validate_trajectories([example], 1, target_selections=target_selections)
     messages = []
     for position, message in enumerate(example["inputs"]["messages"]):
         if position and message["role"] == "system":
@@ -703,7 +706,8 @@ def prepare_sft_rows(
         try:
             selected = target_indices(example["metadata"], example["inputs"]["messages"])
             selected_set = set(selected)
-            bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"]) if contract is None else None
+            bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"],
+                                     target_message_indices=selected) if contract is None else None
             messages, positions = [], []
             for position, source in enumerate(example["inputs"]["messages"]):
                 try:

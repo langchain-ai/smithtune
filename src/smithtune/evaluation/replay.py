@@ -134,9 +134,9 @@ def build_replay_cases(
     from smithtune.supervision import row_target_indices
 
     for row in test_rows:
-        bindings = None if row.get("tool_policy") == "global_override" else row_bindings(row)
-        original_positions = row["_source"]["message_positions"]
         selected = set(row_target_indices(row))
+        bindings = None if row.get("tool_policy") == "global_override" else row_bindings(row, target_message_indices=selected)
+        original_positions = row["_source"]["message_positions"]
         if bindings is not None:
             for i, message in enumerate(row["messages"]):
                 if message.get("role") == "assistant" and original_positions[i] in selected:
