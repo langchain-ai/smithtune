@@ -37,6 +37,13 @@ subsequent assistant message, including tool calls. Earlier messages remain
 context with zero loss. It adds no run-output queries. Existing root discovery
 and thread-membership queries still apply.
 
+Tool availability and tool-call schemas are required only for selected assistant
+targets. Historical context may lack tool records; its availability stays unknown
+(`tools: null` in saved bindings), rather than becoming an empty list. Message
+structure, tool-call/result pairing, and supervision integrity are still checked
+across the conversation. The all-assistant default requires tool records for every
+assistant message.
+
 Use this only when the endpoint returns a complete chronological conversation,
 the initial group contains supplied history followed by one generated assistant
 output, and no additional assistant history is injected later. Run IDs identify

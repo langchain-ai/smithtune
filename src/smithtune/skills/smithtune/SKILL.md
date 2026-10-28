@@ -247,8 +247,8 @@ smithtune dataset pull "$dataset_dir" \
 
 Check:
 - `download_summary`: selected roots, threads, traces, and exclusion counts by
-  reason. Exclusions come from missing tool data, multimodal content, provider
-  built-in tools, or oversized pages. If a large share is excluded, report the
+  reason. Exclusions come from missing tool data on selected targets, multimodal content, provider
+  built-in tools on targets, or oversized pages. If a large share is excluded, report the
   reasons before continuing.
 - Open a few saved trajectories (`snapshot.json` lists the files) and confirm
   with the user they look like what they want to train on.

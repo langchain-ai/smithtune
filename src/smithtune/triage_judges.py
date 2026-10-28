@@ -43,6 +43,8 @@ The supplied trajectory contains the complete ordered messages: user requests,
 assistant replies, tool calls, and tool results. When target_message_indices is
 supplied, judge those selected assistant messages together as the teaching material.
 Other assistant messages are context only; do not reject solely for their mistakes.
+Missing or null tool availability on context-only messages is unknown, not an
+empty tool list, and is not by itself a reason to reject the selected teaching material.
 Without a selection, judge all assistant messages. Do not score turns separately or
 keep only the final answer. User messages and tool results provide context.
 Check each action against the evidence available at that time. A good final

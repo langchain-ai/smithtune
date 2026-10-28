@@ -1127,7 +1127,11 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
     assert summary["deterministic_metrics"]["tuned_minus_base"][
         "tool_name_match_rate"
     ] == 1
-    assert candidate_contracts == [contract, contract]
+    from dataclasses import replace
+
+    assert [replace(value, provenance=contract.provenance) for value in candidate_contracts] == [contract, contract]
+    assert all(value.provenance == {**contract.provenance,
+        "message_index": row["_source"]["message_positions"][len(row["messages"]) - 2]} for value in candidate_contracts)
     assert (tmp_path / "evaluation" / "results.jsonl").is_file()
 
 

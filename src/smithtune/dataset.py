@@ -701,15 +701,16 @@ def prepare_sft_rows(
     for source_index, example in enumerate(examples):
         identity = _source_identity(example)
         try:
-            bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"]) if contract is None else None
             selected = target_indices(example["metadata"], example["inputs"]["messages"])
+            selected_set = set(selected)
+            bindings = read_bindings(example.get("metadata"), example["inputs"]["messages"]) if contract is None else None
             messages, positions = [], []
             for position, source in enumerate(example["inputs"]["messages"]):
                 try:
                     converted = convert_message(source, reasoning_policy=reasoning_policy, model=model)
                 except PipelineError as exc:
                     raise PipelineError(f"message {position}: {exc}") from exc
-                if source["role"] == "ai":
+                if source["role"] == "ai" and position in selected_set:
                     current = contract or tool_contract(bindings[position]["tools"])
                     current.validate_messages([converted])
                 if source["role"] == "ai" and not _has_message_content(converted):
@@ -778,7 +779,12 @@ def capture_example_bindings(examples, workspace_id, *, runner=_run, source_work
                 continue
             workspace, project, scope, scope_id = _source_key(example, workspace_id, source_workspace_id)
             try:
-                trajectory = _fetch_trajectory(workspace, project, {"key": scope + "_id", "id": scope_id}, runner=read)
+                from smithtune.supervision import target_indices
+
+                if "supervision" in metadata:
+                    target_indices(metadata, example["inputs"]["messages"])
+                selection = {"supervision": metadata["supervision"]} if "supervision" in metadata else {}
+                trajectory = _fetch_trajectory(workspace, project, {"key": scope + "_id", "id": scope_id}, runner=read, **selection)
             except PipelineError as exc:
                 raise PipelineError(f"example {example['id']}: cannot read trajectory tools: {exc}") from exc
             try:
