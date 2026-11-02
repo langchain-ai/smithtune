@@ -30,6 +30,16 @@ def messages(n):
             {"role": "ai", "content": f"answer-{n}", "id": f"ai-{n}"}]
 
 
+def trajectory_rows(roots):
+    """Group root runs into /v1/trajectories/query rows, as the server does."""
+    rows = {}
+    for root in roots:
+        key = ("thread", root["thread_id"]) if root["thread_id"] else ("trace", root["trace_id"])
+        rows.setdefault(key, {"scope_kind": key[0], "scope_id": key[1],
+                              "min_start_time": root["start_time"], "first_trace_id": root["trace_id"]})
+    return list(rows.values())
+
+
 class API:
     """LangSmith trajectory pages and complete source-run evidence."""
     def __init__(self):
@@ -61,6 +71,11 @@ class API:
                 return SimpleNamespace(stdout=json.dumps({"items": self.thread_roots, "next_cursor": None}))
             index = int(body.get("cursor", 0))
             value = {"items": self.root_pages[index], "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
+        elif path == "/v1/trajectories/query":
+            assert body["select"] == ["min_start_time", "first_trace_id"] and "message_select" not in body
+            index = int(body.get("cursor", 0))
+            value = {"items": trajectory_rows(self.root_pages[index]),
+                     "next_cursor": str(index + 1) if index + 1 < len(self.root_pages) else None}
         elif path == "/v1/trajectory":
             assert body["include"] == {"system_messages": True, "tool_definitions": True}
             assert body["format"] == "ui"

@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 from tests.test_assistant_bindings import example
+from tests.test_triage import trajectory_rows
 from tests.trajectory_fixtures import run_items
 
 
@@ -53,6 +54,10 @@ class API:
             roots = self.membership if body.get('filter', '').startswith('eq(thread_id,') else self.roots
             offset = int(body.get('cursor', '0'))
             value = {'items': roots[offset:offset + 1], 'next_cursor': str(offset + 1) if offset + 1 < len(roots) else None}
+        elif route == '/v1/trajectories/query':
+            offset = int(body.get('cursor', '0'))
+            value = {'items': trajectory_rows(self.roots[offset:offset + 1]),
+                     'next_cursor': str(offset + 1) if offset + 1 < len(self.roots) else None}
         elif route.startswith('/api/v2/traces/'):
             raise AssertionError('raw trace trees must not be fetched')
         elif route.startswith('/api/v1/sessions/'):

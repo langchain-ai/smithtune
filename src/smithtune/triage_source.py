@@ -118,6 +118,30 @@ def _root_query(source: dict) -> dict:
     return body
 
 
+def _trajectory_query(source: dict) -> dict:
+    body = {"project_id": source["project_id"],
+            "min_start_time": source["start_time"], "max_start_time": source["end_time"],
+            "page_size": 100, "select": ["min_start_time", "first_trace_id"]}
+    if source.get("filter"):
+        body["trace_filter"] = source["filter"]
+    return body
+
+
+def _trajectory_roots(items) -> list[dict]:
+    """Represent each listed trajectory by its earliest trace, preserving order."""
+    if not isinstance(items, list):
+        raise PipelineError("trajectories must be a list")
+    roots = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("scope_kind") not in {"thread", "trace"}:
+            raise PipelineError("each trajectory must be a thread or trace")
+        thread = item["scope_kind"] == "thread"
+        roots.append({"trace_id": item.get("first_trace_id") if thread else item.get("scope_id"),
+                      "thread_id": item.get("scope_id") if thread else None,
+                      "start_time": item.get("min_start_time")})
+    return list(_matches(roots).values())
+
+
 def _root_selection(source: dict, *, runner) -> list[dict]:
     body = _root_query(source)
     rows, cursors, trajectories = {}, set(), {}
@@ -170,19 +194,19 @@ def _candidate_roots(source: dict, output_dir: Path, checkpoint: dict, *, candid
         if selection["exhausted"]:
             return
         if len(selection["cursors"]) >= MAX_SOURCE_PAGES:
-            raise PipelineError("root query exceeds the page limit; narrow the time window or filter")
-        body = _root_query(source)
+            raise PipelineError("trajectory query exceeds the page limit; narrow the time window or filter")
+        body = _trajectory_query(source)
         if selection["cursor"] is not None:
             body["cursor"] = selection["cursor"]
-        page = _api(source["workspace_id"], "POST", "/api/v2/runs/query", body, runner=runner)
+        page = _api(source["workspace_id"], "POST", "/v1/trajectories/query", body, runner=runner)
         if not isinstance(page, dict):
-            raise PipelineError("invalid root query page")
+            raise PipelineError("invalid trajectory query page")
         cursor = page.get("next_cursor")
         if cursor is not None:
             if not isinstance(cursor, str) or not cursor or cursor in selection["cursors"]:
-                raise PipelineError("invalid root query cursor")
+                raise PipelineError("invalid trajectory query cursor")
             selection["cursors"].append(cursor)
-        selection.update(pending=list(_matches(page.get("items")).values()),
+        selection.update(pending=_trajectory_roots(page.get("items")),
                          cursor=cursor, exhausted=cursor is None)
         storage.save(output_dir, checkpoint)
 
