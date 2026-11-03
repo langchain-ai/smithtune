@@ -37,9 +37,9 @@ def test_backfill_reaches_target_without_extra_downloads(tmp_path, concurrency):
     assert summary["examined"] == 5 and summary["usable"] == 3 and summary["excluded"] == 2
     assert summary["target_met"] and summary["stop_reason"] == "target_reached"
     assert sorted(body["trace_id"] for body in api.reads("/v1/trajectory")) == [uid(n) for n in range(10, 15)]
-    queries = api.reads("/api/v2/runs/query")
+    queries = api.reads("/v1/trajectories/query")
     assert [body.get("cursor") for body in queries] == [None, "1", "2"]
-    assert all('eq(name,"reviewer")' in body["filter"] and
+    assert all(body["trace_filter"] == 'eq(name,"reviewer")' and
                body["min_start_time"] == SOURCE["start_time"].replace("Z", "+00:00") and
                body["max_start_time"] == SOURCE["end_time"].replace("Z", "+00:00") for body in queries)
     assert not api.imported and not (tmp_path / "judgments.jsonl").exists()
@@ -84,7 +84,7 @@ def test_backfill_resume_reuses_pages_and_completed_downloads(tmp_path, failure)
     def runner(command, **kwargs):
         nonlocal interrupted
         body = json.loads(kwargs.get("input") or "{}")
-        should_fail = ((failure == "next_page" and command[2] == "/api/v2/runs/query" and body.get("cursor") == "1") or
+        should_fail = ((failure == "next_page" and command[2] == "/v1/trajectories/query" and body.get("cursor") == "1") or
                        (failure == "trajectory" and command[2] == "/v1/trajectory" and body.get("trace_id") == uid(11)))
         if should_fail and not interrupted:
             interrupted = True
@@ -98,7 +98,7 @@ def test_backfill_resume_reuses_pages_and_completed_downloads(tmp_path, failure)
     result = run(tmp_path, api, "resume", confirm=True, judge=no_judge)
     assert result["download_summary"]["target_met"]
     assert result["download_summary"]["examined"] == 3
-    assert all(body.get("cursor") == "1" for body in api.reads("/api/v2/runs/query"))
+    assert all(body.get("cursor") == "1" for body in api.reads("/v1/trajectories/query"))
     reads = {body["trace_id"] for body in api.reads("/v1/trajectory")}
     assert uid(10) not in reads  # The saved exclusion is not downloaded again.
     assert (uid(11) in reads) == (failure == "trajectory")
@@ -125,7 +125,7 @@ def test_resume_keeps_other_workers_completed_downloads(tmp_path):
     api.calls.clear()
     result = run(tmp_path, api, "resume", confirm=True, judge=no_judge)
     assert result["download_summary"]["target_met"] and result["download_summary"]["examined"] == 3
-    assert not api.reads("/api/v2/runs/query")
+    assert not api.reads("/v1/trajectories/query")
     assert [body["trace_id"] for body in api.reads("/v1/trajectory")] == [uid(10)]
 
 

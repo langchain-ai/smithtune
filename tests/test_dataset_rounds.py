@@ -36,7 +36,7 @@ def test_council_rounds_preserve_votes_and_stop_at_approved_target(tmp_path):
     pulled = run(tmp_path, api)
     assert pulled["downloaded"] == 4 and pulled["collection"]["round"] == 2
     assert {body["trace_id"] for body in api.reads("/v1/trajectory")} == {uid(12), uid(13)}
-    assert not api.reads("/api/v2/runs/query")  # Remaining roots came from the saved page.
+    assert not api.reads("/v1/trajectories/query")  # Remaining roots came from the saved page.
     assert list(triage_source.load_snapshot(tmp_path)["units"])[:2] == original
     reviewed = review(tmp_path, api, {11, 13}, calls)
     assert sorted(calls) == [10, 11, 12, 13]

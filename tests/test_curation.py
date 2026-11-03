@@ -11,6 +11,7 @@ import pytest
 from smithtune import artifacts
 from smithtune import curation
 from smithtune.providers.base import PipelineError
+from tests.test_triage import trajectory_rows
 from tests.trajectory_fixtures import items
 
 
@@ -70,6 +71,9 @@ class API:
             else:
                 page = int(body.get("cursor", 0))
                 result = {"items": self.pages[page], "next_cursor": str(page + 1) if page + 1 < len(self.pages) else None}
+        elif path == "/v1/trajectories/query":
+            page = int(body.get("cursor", 0))
+            result = {"items": trajectory_rows(self.pages[page]), "next_cursor": str(page + 1) if page + 1 < len(self.pages) else None}
         elif path == "/api/v1/datasets":
             result = copy.deepcopy(body)
             self.datasets[body["id"]] = result

@@ -33,8 +33,8 @@ def test_filtered_pull_push_preview_and_resume(tmp_path, concurrency):
     assert preview["created"] == preview["eligible"] == 1
     assert preview["pending_stages"] == ["push"]
     assert api.datasets == {} and api.imported == []
-    root_query = next(json.loads(body) for command, body in api.calls if command[2] == "/api/v2/runs/query" and body)
-    assert FILTER in root_query["filter"]
+    root_query = next(json.loads(body) for command, body in api.calls if command[2] == "/v1/trajectories/query")
+    assert root_query["trace_filter"] == FILTER
     assert not (tmp_path / "plan.json").exists()
     api.calls.clear()
     result = run(tmp_path, api, "resume", confirm=True, judge=no_judge)
@@ -379,7 +379,7 @@ def test_distinct_trajectory_target_stops_query_pagination(tmp_path):
             root["start_time"] = "2026-09-02T00:00:00Z"
     result = run(tmp_path, api, "pull", no_triage=True, target_count=2)
     assert result["downloaded"] == 2
-    root_queries = [json.loads(body) for command, body in api.calls if command[2] == "/api/v2/runs/query" and body]
+    root_queries = [json.loads(body) for command, body in api.calls if command[2] == "/v1/trajectories/query"]
     assert len(root_queries) == 1 and "cursor" not in root_queries[0]
 
 
@@ -476,7 +476,7 @@ def test_parallel_pull_preserves_inflight_downloads_and_order_on_resume(tmp_path
     assert result["status"] == "complete" and result["downloaded"] == 8
     fetched = [json.loads(body)["trace_id"] for command, body in api.calls if command[2] == "/v1/trajectory"]
     assert set(fetched) == {uid(n) for n in (1, 5, 6, 7, 8)}
-    assert not any(command[2] == "/api/v2/runs/query" for command, _ in api.calls)
+    assert not any(command[2] in {"/api/v2/runs/query", "/v1/trajectories/query"} for command, _ in api.calls)
     frozen = triage_source.load_snapshot(tmp_path)
     assert [unit["example"]["metadata"]["source_trace_id"] for unit in frozen["units"]] == [uid(n) for n in range(1, 9)]
 
