@@ -423,17 +423,17 @@ def fetch_model_capability(
 
 
 def _placement_note(capability: BasetenModelCapability, lora_rank: int, max_seq_len: int) -> str:
-    """Explain where Baseten will place the trainer; the run response does not say."""
+    """Say what decides the trainer's placement; the run response does not report it."""
     model = capability.model_name
     if capability.serverless:
         return (
-            f"Baseten offers serverless Loops for {model} in this workspace. It uses shared "
-            f"serverless capacity when a pool supports LoRA rank {lora_rank} at "
-            f"{max_seq_len:,} tokens, otherwise this workspace's own capacity."
+            f"Baseten offers serverless Loops for {model} in this workspace. Baseten chooses "
+            f"the trainer's capacity for LoRA rank {lora_rank} at {max_seq_len:,} tokens, "
+            "and may use serverless capacity."
         )
     return (
         f"Baseten does not offer serverless Loops for {model} in this workspace; "
-        "the trainer uses this workspace's own capacity."
+        "Baseten chooses the trainer's capacity."
     )
 
 
@@ -1228,9 +1228,8 @@ class BasetenProvider:
             result["session_id"] = session_id
             update_state(baseten_session_id=session_id)
             try:
-                # No scope: Baseten falls back from serverless to dedicated
-                # capacity itself, and the SDK sends an explicit scope only
-                # through an internal route.
+                # No scope: Baseten chooses placement, and the SDK sends an
+                # explicit scope only through an internal route.
                 trainer = service.create_lora_training_client(
                     base_model=model.base_model,
                     rank=settings.lora_rank,

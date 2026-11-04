@@ -19,11 +19,11 @@ up to a shorter sequence length. When Baseten reports either, preparation and
 training stop before any paid work and repeat Baseten's own explanation and
 remediation instead of reporting the model as unavailable.
 
-Baseten chooses where Loops trainers and samplers run. Smithtune requests no
-placement, so Baseten uses serverless capacity when the workspace has serverless
-Loops for the model and the request fits a serverless pool (LoRA rank and sequence
-length), and otherwise falls back to the workspace's own capacity. Training prints
-which applies; `plan.json` records `capacity: serverless_if_eligible`.
+Baseten chooses where Loops trainers and samplers run. Smithtune sends no
+placement scope, so Baseten's default applies, which can place them on serverless
+capacity when the workspace has serverless Loops for the model. Training prints
+whether Baseten reports serverless Loops for the model; `plan.json` records
+`capacity: baseten_default`, and `replay/sampler.json` records each sampler's capacity.
 
 ## Preparation defaults
 
@@ -279,7 +279,7 @@ training mode:
 | --- | --- |
 | Fireworks serverless (default) | Shared serverless sampling for base and tuned models |
 | Fireworks dedicated | Two temporary dedicated deployments, for base and tuned models |
-| Baseten Loops | Two temporary samplers, after training resources shut down; serverless when Baseten offers it for the workspace and model, otherwise dedicated |
+| Baseten Loops | Two temporary samplers, after training resources shut down, on serverless or dedicated capacity as Baseten chooses |
 
 Fireworks requests deletion of owned dedicated resources on exit; Baseten
 deactivates its samplers. Dedicated capacity is billed for allocated time; judge

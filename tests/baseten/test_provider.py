@@ -984,7 +984,7 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
 
 
 @pytest.mark.parametrize(("serverless", "note"), [
-    (True, "uses shared serverless capacity when a pool supports LoRA rank 8 at 131,072 tokens"),
+    (True, "for LoRA rank 8 at 131,072 tokens, and may use serverless capacity"),
     (False, "does not offer serverless Loops for Qwen/Qwen3.8-27B"),
     (None, "does not offer serverless Loops for Qwen/Qwen3.8-27B"),
 ])

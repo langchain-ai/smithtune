@@ -44,10 +44,9 @@ recovery from saved generations.
 `providers/baseten/sampling.py` uses the Loops sampler REST endpoint to save resource IDs
 before the SDK readiness wait, then samples through `baseten-loops`. Closing the
 SDK client does not release capacity: deactivate each owned sampler explicitly.
-Baseten places trainers and samplers on serverless capacity when eligible and
-returns no model or deployment ID for a serverless sampler, so its receipt and
-cleanup use the sampler ID. Keep requests unscoped so Baseten's fallback applies,
-and cover both capacities when changing either adapter.
+Requests send no scope, so Baseten chooses placement, which can be serverless.
+A serverless sampler has no model or deployment ID, so its receipt and cleanup
+use the sampler ID. Cover both capacities when changing either adapter.
 `providers/baseten/sampling_formats.py` parses the pinned official model formats without a
 Fireworks renderer dependency. Test native-tokenizer roundtrips, malformed tool
 calls, best-checkpoint identity, cleanup failures, and cached-generation resume
