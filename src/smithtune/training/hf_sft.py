@@ -1,6 +1,6 @@
 """Cloud-independent HF/PEFT SFT recipe with explicit SmithTune token masks.
 
-The optional TRL backend and reference Torch loop share rendering, LoRA,
+The default TRL backend and reference Torch loop share rendering, LoRA,
 validation and exports. Cloud adapters only stage files and run this recipe.
 """
 
@@ -397,7 +397,7 @@ def run(input_dir: Path, model_dir: Path, checkpoint_dir: Path, *, device: str |
 
 
 def evaluate_export(input_dir: Path, model_dir: Path, checkpoint_dir: Path, spec: ModelSpec, evaluation, *,
-                    device: str, deadline: float | None = None, adapter_dir: Path | None = None) -> dict:
+                    device: str, deadline: float | None = None, adapter_dir: Path | None = None, legacy_cases=None) -> dict:
     """Generate base and tuned answers from the exported adapter; never raise."""
     import gc
     import shutil as _shutil
@@ -427,7 +427,7 @@ def evaluate_export(input_dir: Path, model_dir: Path, checkpoint_dir: Path, spec
         verify_loaded_adapter(model, adapter_dir)
         report_stage("evaluation_generation")
         status = generate_predictions(model, renderer, spec, cases, settings, device=device,
-                                      output_path=durable / "predictions.jsonl", deadline=deadline)
+                                      output_path=durable / "predictions.jsonl", deadline=deadline, legacy_cases=legacy_cases)
     except Exception as exc:
         diagnostic = failure_diagnostics(exc)
         print(json.dumps(diagnostic), flush=True)
@@ -479,8 +479,13 @@ def run_evaluation_only(input_dir: Path, model_dir: Path, checkpoint_dir: Path, 
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
     result = dict(exported)
+    # The verified export records the original case-file hash. Only that exact
+    # input can establish tool identity for predictions from older workers.
+    original_cases_hash = exported["bundle"]["files"].get("evaluation/cases.jsonl")
+    legacy_cases = evaluation[1] if original_cases_hash == bundle["files"]["evaluation/cases.jsonl"] else None
     result["evaluation"] = evaluate_export(input_dir, model_dir, checkpoint_dir, spec, evaluation, device=device,
-                                           deadline=deadline, adapter_dir=input_dir / "export/adapter")
+                                           deadline=deadline, adapter_dir=input_dir / "export/adapter",
+                                           legacy_cases=legacy_cases)
     result["evaluation_job"] = {"operation": "evaluation_only", "source_run_id": exported["run_id"]}
     _json_dump(model_dir / "result.json", result)
     write_artifact_manifest(model_dir)

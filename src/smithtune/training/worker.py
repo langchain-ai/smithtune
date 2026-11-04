@@ -30,7 +30,7 @@ def main(argv=None):
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
-    parser.add_argument("--device", choices=("cpu", "cuda:0"), default="cuda:0")
+    parser.add_argument("--device", choices=("cpu", "cuda:0"), help="override the device selected by the input bundle")
     args = parser.parse_args(argv)
     run(args.input_dir, args.model_dir, args.checkpoint_dir, device=args.device)
 

@@ -25,7 +25,7 @@ settings, `artifacts.py` collects and verifies exports, `deployment.py` and
 the container entrypoint that maps SageMaker's filesystem paths onto the shared
 worker. `smoke.py` and `benchmark.py` are experimental image entrypoints for
 reload-only and context-sizing jobs, not CLI commands. The cloud-neutral recipe
-is `training/hf_sft.py` with an optional `training/trl_trainer.py` backend;
+is `training/hf_sft.py` with the default `training/trl_trainer.py` backend;
 `training/worker.py` is its local-file CLI, `training/contracts.py` describes the
 job, validates prepared bundles and exports, `training/evaluation.py` generates
 replay answers inside the job, and `training/serving.py` is a pilot single-GPU

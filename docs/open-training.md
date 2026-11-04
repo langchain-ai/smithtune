@@ -1,139 +1,125 @@
 # Shared open training worker
 
-SmithTune owns data preparation and the SFT implementation for custom cloud jobs.
-AWS or GCP allocates compute and runs our container. The same local-file worker
-should train the model on either cloud; each provider adapter stages files, submits
-the job, tracks it and retrieves its output.
+SmithTune prepares the data and supplies the SFT implementation. SageMaker
+allocates compute and runs our container. A second cloud adapter should stage
+files, submit the same worker, track the job and collect its output.
 
 ```text
 LangSmith conversations
-  → existing preparation: tools, source splits, native rendering identity
-  → provider adapter: stage bundle, choose compute, submit and monitor
-      AWS: S3 + SageMaker Training Job     Vertex: future GCS + CustomJob adapter
-  → shared training worker in the image
-      Transformers → PEFT LoRA → Torch loop or optional TRL SFTTrainer
-  → verified adapter export in object storage
-  → separate provider deployment adapter → endpoint → invocation → cleanup
+  → preparation: source splits, per-assistant tools, native rendering identity
+  → SageMaker adapter: S3 bundle, explicit compute, submit and monitor
+  → shared training worker
+      Transformers + PEFT LoRA + TRL SFTTrainer
+  → selected adapter export + optional base/tuned replay answers in S3
+  → collect and verify locally
+  → existing replay judges and LangSmith comparison
 ```
 
-Fireworks and Baseten retain their existing remote training API paths. This worker
-does not replace those adapters or claim identical optimizer implementations.
+Evaluation answers are generated on the training machine after export. No
+endpoint is needed. Fireworks and Baseten keep their existing training paths;
+this worker does not claim identical optimizers or results.
 
-## Alignment with Jake's branch
+## Current choices and cross-cloud work
 
-The shared boundaries follow
-[`jake-add-gcp` at `842d5a9`](https://github.com/langchain-ai/smithtune/tree/842d5a970aaeaf11738e0a7cd5a969bfe18339ce):
-`training/spec.py` describes training intent and outputs, `training/hf_sft.py`
-owns the Hugging Face recipe, and provider packages own execution settings and
-cloud lifecycle. Its token-to-label converter is reused directly. It preserves
-the exact token IDs and binary target masks and rejects oversize examples.
-
-AWS plans and new bundles include the shared `SFTJobSpec` description. The worker
-checks that description against the model, common settings and implemented LoRA
-recipe; older bundles without it remain readable. Compute and backend choices
-stay separate from this training description. Artifact collection returns
-`TrainingArtifacts` handles to the verified local adapter, metrics and manifest,
-alongside the existing collection fields. The source archive's S3 URI stays in
-`collection.json`. The resume handle is null because cross-job restart is not
-implemented; retained optimizer state alone does not establish restart support.
-
-Jake's Vertex files are included as scaffolding only: no live Vertex submission,
-training or inference is available. This alignment does not expose Vertex through the CLI.
-
-## Proposed answers for Jake and Vivek
-
-| Question | Proposed decision and current implementation |
+| Question | Current choice |
 | --- | --- |
-| Which training libraries? | Standardize on Transformers + PEFT + TRL SFTTrainer, with Torch underneath. TRL is implemented as an optional backend, tested against the reference loop. Keep the existing pins and switch the default only after a full-size GPU test passes. |
-| One worker for AWS and GCP? | Yes. `training/worker.py` takes local input, model-output and checkpoint directories and calls `training/hf_sft.py`. No AWS/GCP SDK calls belong in the optimizer loop. Vertex has execution scaffolding but no live adapter. |
-| One image or cloud-specific images? | Share dependency pins, training code and export format. Keep small cloud-specific entrypoints for filesystem paths and upload behavior. AWS currently uses one image for `train` and pilot `serve`; a shared base plus wrappers can follow when Vertex's needs are known. |
-| How do we choose compute? | Explicit instance/GPU choices first. Create measured profiles for model, precision, LoRA targets/rank, actual sequence length and microbatch size. Do not infer GPU fit from model parameter count alone. This version uses one GPU; no estimator or FSDP implementation exists. |
-| What is the output? | Selected LoRA adapter weights, tokenizer/base config, training provenance and file hashes, saved to object storage. These are **not** standalone merged model weights; serving also needs the exact pinned base checkpoint. |
-| What about capacity failures? | Preserve job identity, report allocation phase, use approved instance preferences and bounded queue waits. Quota and capacity are separate. Never silently resize or move regions. Use the native SageMaker path first; Batch/Spot/Modal are later options. |
+| Which libraries? | Transformers implements the model, PEFT supplies LoRA, and TRL SFTTrainer manages training over PyTorch. TRL is the default; the Torch reference loop remains selectable for tests. |
+| One worker for AWS and GCP? | Yes, that is the intended boundary. `training/worker.py` accepts local input, model-output and checkpoint directories. No cloud SDK calls belong in the training loop. |
+| One image? | Share dependency pins, training code and export format. Keep cloud entrypoints small. AWS has a training/experimental-serving image; a shared base can follow once Vertex requirements are known. |
+| How is compute chosen? | Explicit hardware and runtime settings. Qualify model, precision, LoRA targets/rank, rendered length and microbatch size by measurement. Parameter count alone does not prove GPU fit. |
+| What is exported? | The selected LoRA adapter, tokenizer/base config, training provenance and file hashes. These are not merged model weights; inference also needs the exact pinned base checkpoint. |
+| What happens when capacity is unavailable? | Preserve the job receipt, report the allocation phase, and use explicit instance preferences and bounded waits. Quota and capacity are separate. No automatic region move or hardware resizing is implemented. |
 
-## Training library responsibilities
+The training recipe and filesystem boundary can be reused by Jake's Vertex
+adapter. This branch contains no Vertex adapter or `training/spec.py` scaffold.
+`training/contracts.py` currently validates SageMaker's model profiles and
+prepared provider identity. Vertex still needs its own staging, IAM, submission,
+monitoring, collection and provider validation. Agree on that shared contract
+and ownership with Jake before merging either implementation.
 
-Transformers implements the model's computation. A batch of token IDs goes in;
-next-token scores come out. PEFT freezes the base weights and inserts trainable
-low-rank matrices. Torch computes gradients and updates those trainable parameters.
+## What the trainer does
 
-SFTTrainer organizes this work: dataset iteration, microbatches, gradient
-accumulation, optimizer steps and callbacks. Its configuration can change the
-learning rate, epochs, precision, packing, tokenization and loss targeting. Those
-last choices matter here: handing it raw messages with defaults could change
-SmithTune's existing training representation.
+Transformers runs the model: token IDs go in and next-token predictions come
+out. PEFT freezes the base weights and adds small trainable LoRA matrices.
+PyTorch computes gradients and updates those parameters.
 
-Our optional TRL backend therefore receives **already rendered token IDs and
-explicit labels**. A label of `-100` means “use this token as context, but do not
-score its prediction.” Tool results remain context. Supported assistant outputs,
-including tool calls, are training targets under the existing renderer policy.
-The causal label shift happens once. The loss is normalized over the actual
-assistant target count in each optimizer group, including a final partial group.
-No additional truncation, packing or template rewriting happens inside TRL.
+SFTTrainer handles dataset iteration, microbatches, gradient accumulation,
+optimizer steps and callbacks. Its defaults can also tokenize, pack and truncate
+data. We disable those changes and give it already rendered token IDs and
+explicit labels, so it preserves SmithTune's preparation behavior.
 
-The reference Torch loop remains the default. TRL matches its gradients and
-parameter updates on small CPU tests and passed an October 20 full-size A10G
-training/export/fresh-reload smoke. Full-size numerical parity is still a
-required gate before changing the default. Neither backend currently supports
-distributed training.
+Each assistant action is a separate target. Earlier messages, tool results and
+historical assistant outputs remain context with labels of `-100`, which means
+“do not score this position.” The target action uses the tools available at that
+call. Source conversations stay separate across train, validation and test.
+The causal label shift happens once. Each optimizer group, including the final
+partial group, is normalized by its actual count of assistant target tokens.
 
-## File and adapter boundaries
+Both backends use TRL's chunked next-token loss. It skips ignored positions and
+projects scored positions through `lm_head` in 256-token checkpointed chunks.
+This removes the full-sequence vocabulary-logit allocation. CPU tests compare
+losses, gradients, updates and validation against the full-logits objective.
+GPU memory is measured through 18,751 tokens on synthetic data; larger contexts
+and steady-state GPU speed still need measurement. The
+implementation uses a private TRL helper, so keep its version pinned and rerun
+the loss tests on upgrades.
+
+Neither backend supports distributed training or cross-job training restart.
+Saved optimizer state alone does not establish restart support.
+
+## Files and responsibilities
 
 | Layer | Files and responsibilities |
 | --- | --- |
-| Shared input contract | `training/spec.py`: portable job/artifact descriptions. `training/contracts.py`: prepared manifest and splits, checksummed bundle, source/model validation. |
-| Shared worker | `training/hf_sft.py`, `trl_trainer.py`: rerender using the pinned native formatter, train, validate, select the best epoch, export. `training/worker.py` provides the CLI entrypoint. |
-| AWS submission | `providers/sagemaker/provider.py`: immutable ECR image, explicit hardware/runtime, S3 input, CreateTrainingJob, durable job receipt. |
-| AWS execution settings | `providers/sagemaker/execution.py`: explicit region, instance choices, image, IAM, storage and runtime. No resource allocation on import or validation. |
-| AWS container wrapper | `providers/sagemaker/worker.py`: map `/opt/ml/input/data/training`, `/opt/ml/model` and `/opt/ml/checkpoints` to the shared worker; it is the image entrypoint. |
-| Shared export | `adapter/`, `tokenizer/`, `base_config/`, `result.json`, `artifact.json`. Manifest checksums detect changed/missing files. |
-| AWS collection | `providers/sagemaker/artifacts.py`: download the completed job's export, safely extract, verify original run/model/data identity. |
-| Pilot serving | `training/serving.py`: reload exact base plus adapter, native prompt rendering and tool parsing, greedy generation, HTTP health/invocation routes. |
-| AWS lifecycle | `providers/sagemaker/deployment.py`: plan/create/status/invoke/delete with ownership checks, receipts, explicit billing and temporary smoke cleanup. |
+| Shared contracts | `training/contracts.py`: model profiles, worker settings, training description, checksummed input bundles and verified exports. |
+| Shared recipe | `training/hf_sft.py`, `trl_trainer.py`: render, train, validate, select the best epoch and export. `training/worker.py` is the local-file CLI. |
+| In-job evaluation | `training/evaluation.py`: generate bounded base/tuned answers and save each answer durably. Judging and publication stay outside the job. |
+| AWS submission | `providers/sagemaker/provider.py`, `execution.py`: explicit image/hardware/runtime, S3 staging, submission and durable job receipts. |
+| AWS container wrapper | `providers/sagemaker/worker.py`: map SageMaker's input, model and checkpoint directories onto the shared worker. |
+| AWS collection | `providers/sagemaker/artifacts.py`: download, safely extract and verify run/model/data identity. |
+| Saved-answer replay | `providers/sagemaker/sampling.py`: feed in-job answers into the existing replay judges and LangSmith publisher. |
+| Experimental hosting | `training/serving.py` and `providers/sagemaker/deployment.py`: native rendering/parsing, HTTP serving and owned endpoint lifecycle. This is separate from evaluation. |
 
-The shared worker can be launched directly after a cloud adapter stages its input:
+The export contains `adapter/`, `tokenizer/`, `base_config/`, `result.json` and
+`artifact.json`, plus `evaluation/` when requested. Collection retains the
+source archive's S3 URI in `collection.json`.
+
+After staging the input, launch the worker directly:
 
 ```bash
 python -m smithtune.training.worker \
   --input-dir /input --model-dir /output --checkpoint-dir /checkpoints
 ```
 
-This command performs training on the available GPU. It does not provision
-hardware. Vertex still needs its own staging, IAM, submission, monitoring,
-object-store collection and endpoint adapters; accepting its identity in the
-worker does not implement that cloud integration.
+The bundle chooses CPU or `cuda:0`; `--device` overrides it. This command does
+not provision hardware. CPU is supported only for the small pipeline test profile.
 
-## Validation gates and remaining work
+## What has been tested
 
-1. **Local correctness — tested:** real tiny-model optimization through both
-   backends; gradient/update comparisons; artifact export/reload and generation;
-   HTTP behavior; mocked AWS request validation, ambiguous submission recovery,
-   ownership checks and cleanup failures.
-2. **Full-size baseline — tested:** Qwen3.5-9B rank-8 LoRA on one L40S,
-   437-token longest datum, then separate L4 reload/generation. On October 20,
-   the TRL backend trained and reloaded on one A10G: 11 steps, exact adapter
-   reload and six valid synthetic generations, about $0.096 compute. This does
-   not establish a 4K profile or full-size numerical parity. See the
-   [AWS evidence](aws-training.md).
-3. **Live endpoint pilot — blocked on capacity:** October 20 Oregon retries
-   reused the adapter and image on L4, L40S and A10G, followed by one native
-   instance-pool request with five allowed sizes. All failed with AWS
-   `InsufficientInstanceCapacity` in roughly 5–6 minutes, before container logs
-   or inference. Submission and complete cleanup were verified. The adapter now
-   supports explicit GPU inference AMIs, provisioning timeouts, failure reasons
-   and ordered endpoint pools. A Virginia H100 attempt also failed for capacity
-   after about 317 seconds, before container startup; cleanup was verified.
-   Runtime compatibility still needs a host to start.
-   Earlier cancelled October 18/19 attempts had no confirmed terminal cause.
-   Hosting timeouts do not guarantee immediate cancellation or a fixed cost.
-4. **Actual context benchmarks:** prepared 4K/8K and conditional 16K probes still
-   need GPU capacity. Record measured memory and step time; stop on OOM/non-finite
-   results. Add profiles only from measured runs. Larger agent contexts may need
-   memory-efficient loss/kernels, different GPUs or distributed training.
-5. **Product integration:** full-size TRL numerical parity, AWS sampler integration with
-   existing LangSmith replay, production serving, resumable training and more model
-   recipes remain. Reuse the existing replay publication/recovery path when wiring
-   AWS; do not create a separate evaluation framework.
+- **Offline correctness:** tiny-model training through both backends, loss and
+  gradient parity, adapter export/reload, native tool parsing, HTTP behavior,
+  mocked cloud lifecycle, saved-answer lookup and recovery.
+- **GPU pipeline:** Qwen3.5-9B LoRA trained, exported, generated held-out answers
+  and fed LangSmith evaluation using TRL and the chunked loss. Later synthetic
+  runs reached 439/1,387 tokens on A10G, 2,538 on L4 and 18,751 on L40S. The
+  18,751-token run peaked at 34.62 GiB. These are individual pipeline tests,
+  not a controlled throughput benchmark or evidence of production quality.
+- **Live CPU pipeline:** the 0.8B test profile completed SageMaker training,
+  export, collection, in-job replay generation and local judging/publication
+  to LangSmith. Evaluation-only jobs also resumed saved answers.
 
-No new model support, automatic hardware sizing, private-only networking, Spot
-recovery, FSDP or production endpoint throughput is established by this work.
+## What still needs testing
+
+- Measure memory and steady-state step time beyond the tested 18,751-token
+  synthetic profile, including the required 32K/128K target. A model's context
+  ceiling is not a tested hardware profile.
+- Run representative real 9B data through training and in-job evaluation,
+  then inspect quality and tool-call parsing.
+- Qualify accelerated kernels and larger models; add multi-GPU training only
+  if measurements and the target context require it.
+- Test hosted inference when capacity is available. Earlier endpoint attempts
+  failed before container startup; no live endpoint is validated.
+
+See [the AWS guide](aws-training.md) for commands and prerequisites. Automatic
+hardware sizing, private-only networking, Spot recovery and production endpoint
+throughput remain outside the validated scope.

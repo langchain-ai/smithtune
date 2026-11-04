@@ -2,30 +2,42 @@
 
 This prototype adds customer-account SageMaker Training Jobs to SmithTune. It
 currently targets **Qwen3.5-9B, text/tool trajectories, LoRA, one GPU**. No
-long-context or production configuration has been validated on AWS; see the
+32K/128K profile or production configuration is validated on AWS; see the
 status below. The model registry's context ceiling is not a tested GPU memory
 guarantee.
 
 Preparation reuses SmithTune's existing Baseten-compatible tokenizer, native
 formatter, reasoning policy, assistant masks and conversation splits. The worker
-runs Transformers + PyTorch + Hugging Face PEFT inside a container instead of calling a remote
-forward/backward API. An optional TRL `SFTTrainer` backend uses the same rendered
-tokens, explicit labels and loss objective. It retains tool-result tokens as context without applying
+runs Transformers + PEFT LoRA + TRL `SFTTrainer` over PyTorch inside a container
+instead of calling a remote forward/backward API. It uses the existing rendered
+tokens and explicit labels. It retains tool-result tokens as context without applying
 loss to them. It never truncates examples or concatenates separate conversations.
 
 ## Status
 
-Validated so far: short synthetic training runs on one L40S and one A10G (the
-TRL backend), adapter reload with generation on one L4, all with a longest
-example of 437 tokens, and the full submit/train/export/collect lifecycle on a
-CPU instance with the `qwen3p5-0p8b-test` profile (24 synthetic threads, two
-epochs, about 15 billable minutes on `ml.m5.2xlarge`). Replay evaluation generated inside the job, collected and published to
-LangSmith is validated on CPU with the test profile, including evaluation-only
-jobs that resume a run's checkpoint prefix. Not validated: longer contexts,
-hosted endpoints, cross-job training resume, Spot recovery, distributed
-training, and other models. `deploy` rejects this provider; use `smithtune aws`
-for the experimental endpoint lifecycle. Dated run notes are kept outside the
-repository.
+Validated so far: SageMaker training, adapter export, in-job base/tuned answer
+generation, collection and LangSmith evaluation on the CPU test profile and on
+Qwen3.5-9B GPUs. The later synthetic 9B runs used TRL and the chunked loss:
+
+| Longest rendered training/validation example | Instance | Peak allocated GPU memory |
+| --- | --- | --- |
+| 439 tokens | `ml.g5.2xlarge` (A10G, 24 GB) | 18.66 GiB |
+| 1,387 tokens | `ml.g5.2xlarge` (A10G, 24 GB) | 18.92 GiB |
+| 2,538 tokens | `ml.g6.2xlarge` (L4, 24 GB) | 19.90 GiB |
+| 18,751 tokens | `ml.g6e.2xlarge` (L40S, 48 GB) | 34.62 GiB |
+
+These were one-epoch pipeline tests on synthetic tool conversations, not a
+controlled throughput benchmark or a model-quality claim. Earlier short L40S
+and A10G training runs and a separate L4 adapter reload also passed.
+The CPU profile completed two epochs on 24 synthetic threads; evaluation-only
+jobs also resumed saved answers. Capacity remains unpredictable despite these
+successful allocations. The CPU regression also verified tool-aware saved-answer
+lookup through collection, judging and LangSmith publication.
+
+Not validated: 32K/128K contexts, representative production quality, hosted
+endpoints, cross-job training resume, Spot recovery, distributed training and
+other production models. `deploy` rejects this provider; use `smithtune aws`
+for the experimental endpoint lifecycle. Dated run notes stay outside the repo.
 
 ## Validation workers
 
@@ -58,22 +70,26 @@ bounded probes. It checksums the original preparation bundle and synthetic
 cases, re-renders without truncation, and verifies measured token/target counts.
 Each stage resets the rank-8 adapters, random seed and AdamW state, then runs one
 optimizer group over every rendered datum of the full conversation. It uses
-the unchanged training worker's full-vocabulary loss, token normalization and
-gradient clipping. It exports measurements rather than a trained checkpoint.
+the training worker's chunked next-token loss, token normalization and gradient
+clipping. This is a manual optimizer-group probe, not a full TRL training run;
+it exports measurements rather than a trained checkpoint.
 An OOM or non-finite step records the failure and skips larger cases; a skipped
 16K stage is not evidence of an actual 16K failure. The first stage includes
 cold CUDA/kernel overhead, so timings are initial capacity measurements rather
 than steady-state throughput. There is no public benchmark CLI command yet.
 
 Use one L40S job for the initial probes, a 600-second runtime limit, and stop on
-OOM or non-finite loss. Full-vocabulary logits/loss and activations can dominate
-memory at longer contexts. Larger L40S instance sizes add host RAM, not GPU
+OOM or non-finite loss. The loss now skips ignored positions and chunks the
+vocabulary projection. The table above measures the full training flow up to
+18,751 tokens; activation memory at larger lengths remains unmeasured.
+Larger L40S instance sizes add host RAM, not GPU
 memory. Benchmarking may expose a need for worker optimization or different
 hardware before reaching agent-scale contexts.
 
-For future training runs, consider an optional reload check before releasing
-the training instance. A fresh model/process can reload the saved adapter on
-that same allocation, avoiding a second capacity wait and model download.
+With `train --evaluate`, the worker reloads the selected adapter on the same
+allocation after export. This checks reload while generating replay answers
+and avoids a second capacity wait. The standalone smoke worker remains useful
+when testing an existing export separately.
 
 ## Prerequisites
 
@@ -186,8 +202,9 @@ and runtime settings from the earlier example:
 These are observed `us-west-2` on-demand training rates on 2026-10-15, not
 automatically fetched prices. Verify the rates for your account/region before
 running. Both example types have one L40S GPU; the second has more host RAM.
-Only the 4xlarge has completed the full-size short smoke; neither has a
-validated long-context profile.
+The 4xlarge completed the earlier short smoke; the 2xlarge later completed the
+18,751-token synthetic profile in the status table. Neither is a qualified
+32K/128K or production hardware profile.
 
 Supply 1–5 unique GPU types in preferred order, each with a positive hourly rate.
 The plan shows every option and uses the **highest listed rate** for its headline
@@ -243,18 +260,18 @@ them; job termination does not delete them.
 
 The cloud-neutral code is in `training/`; the SageMaker entrypoint only resolves
 AWS's input/output paths. The [architecture guide](open-training.md) explains what
-can be reused by Vertex. Training intent uses the same `SFTJobSpec` contract as
-Jake's Vertex scaffold; AWS compute settings remain separate. New bundles include
-this description and the worker checks it against the implemented recipe. Older
-pilot bundles remain supported. The default backend is TRL's `SFTTrainer`,
+can be reused by Vertex. `training/contracts.py` describes training intent and
+validates the bundle against the implemented recipe; AWS compute settings stay
+separate. No Vertex scaffold is included in this branch. The default backend is TRL's `SFTTrainer`,
 configured to consume pre-rendered IDs and labels without packing, truncation or
 chat-template rewriting; `--aws-trainer torch` on **both** `plan` and `train`
 selects the reference loop used by the parity tests. Both backends use TRL's
 chunked next-token loss: positions without a training target never reach
 `lm_head`, and scored positions are projected in 256-token checkpointed chunks,
 so full-vocabulary logits are never materialized. Small CPU tests establish
-loss, gradient and update parity with the full-logits objective; the memory
-saving at long context is still to be measured on a GPU. Equivalence with
+loss, gradient and update parity with the full-logits objective. The table
+above reports GPU memory with the chunked loss; its savings against the
+original full-logits implementation have not been measured. Equivalence with
 Fireworks/Baseten's private optimizers has not been measured.
 
 `--aws-lora-targets` chooses the adapted modules inside the language model's
@@ -325,9 +342,9 @@ pipeline runs.
 Training and evaluation succeed separately. `collect` and `aws status` report
 `training` and `evaluation` outcomes; the job completes even when evaluation
 fails or stops early, and `evaluate` refuses to publish while answers are
-missing. To finish an incomplete evaluation, or to answer cases after a run
-that trained without `--evaluate` is given cases, submit an evaluation-only
-job. It reuses the run's checkpoint prefix, so already-saved answers resume:
+missing. To finish an incomplete evaluation, submit an evaluation-only job.
+It requires the replay cases bundled by `train --evaluate` and reuses the
+run's checkpoint prefix, so already-saved answers resume:
 
 ```bash
 smithtune aws evaluate-job --run-dir ./runs/aws-qwen-002 --confirm
@@ -339,6 +356,15 @@ smithtune aws collect --run-dir ./runs/aws-qwen-002
 `--max-output-tokens` and `--max-points-per-trajectory`. It compares the
 adapter with its own base model, needs only the judge's credentials, and
 publishes the same LangSmith comparison as the other providers.
+
+Saved answers are bound to the exact messages, tool schemas and output budget.
+Resume rejects changed requests rather than reusing stale answers. Older
+exports remain readable through their original saved cases; an evaluation-only
+job also checks the case-file hash against the verified export before reusing
+legacy answers. It never rewrites those records. Older local replay directories
+must use a new `--output-dir` after the tool-aware lookup change; this reuses
+the exported model answers without generating them again, but judging and
+publication in the new directory can incur their normal costs.
 
 ## Collect, host and remove an endpoint
 

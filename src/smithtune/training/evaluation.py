@@ -60,12 +60,44 @@ class EvaluationSettings:
             raise PipelineError("unsupported evaluation settings version")
 
 
-def request_sha256(messages, variant: str, max_new_tokens: int) -> str:
-    """Identity of one generation request; the local sampler looks answers up by it.
+def request_sha256(messages, variant: str, max_new_tokens: int, tools=()) -> str:
+    """Bind an answer to the exact messages, ordered tool schemas and output budget."""
+    return json_sha256({"messages": messages, "tools": list(tools or ()),
+                        "variant": variant, "max_new_tokens": max_new_tokens})
 
-    Tools are the case's own at both ends, so they are not part of the key.
+
+def validate_predictions(records: dict, cases: list[dict], settings: EvaluationSettings, *, legacy_cases=None) -> dict:
+    """Check saved answers before reuse; legacy lookup needs the original exported cases.
+
+    Version 1 did not hash tools. Reuse needs a verified export's original
+    cases, and the current request must match those cases exactly.
+    Return normalized copies; never rewrite the saved evidence.
     """
-    return json_sha256({"messages": messages, "variant": variant, "max_new_tokens": max_new_tokens})
+    by_id = {case["id"]: case for case in cases}
+    legacy_by_id = {case["id"]: case for case in (legacy_cases or [])}
+    if len(by_id) != len(cases):
+        raise PipelineError("duplicate evaluation case IDs")
+    checked = {}
+    for key, record in records.items():
+        case = by_id.get(record["case_id"])
+        if case is None:
+            raise PipelineError("saved prediction refers to a different set of evaluation cases")
+        expected = request_sha256(case["messages"], record["variant"], settings.max_new_tokens, case.get("tools"))
+        if record["schema_version"] == 1:
+            original = legacy_by_id.get(record["case_id"])
+            if original is None:
+                raise PipelineError("legacy saved predictions cannot safely resume: tool schemas were not hashed; "
+                                    "keep the old answers and use a fresh evaluation checkpoint directory")
+            if request_sha256(original["messages"], record["variant"], settings.max_new_tokens, original.get("tools")) != expected:
+                raise PipelineError("legacy saved prediction differs from the original exported evaluation case")
+            recorded = json_sha256({"messages": case["messages"], "variant": record["variant"],
+                                    "max_new_tokens": settings.max_new_tokens})
+        else:
+            recorded = expected
+        if record["request_sha256"] != recorded:
+            raise PipelineError("saved prediction differs from the evaluation messages, tools or output budget")
+        checked[key] = {**record, "request_sha256": expected}
+    return checked
 
 
 def read_evaluation(input_dir: Path, bundle: dict) -> tuple[EvaluationSettings, list[dict]] | None:
@@ -117,12 +149,19 @@ def load_predictions(path: Path, *, repair: bool = False) -> dict[tuple[str, str
             if index == len(lines) - 1 or (index == len(lines) - 2 and lines[-1] == ""):
                 if repair:
                     path.write_text("".join(f"{item}\n" for item in lines[:index] if item.strip()), encoding="utf-8")
-                break
+                return result
             raise PipelineError("saved predictions are corrupt") from exc
-        if (not isinstance(record, dict) or record.get("schema_version") != 1 or record.get("variant") not in VARIANTS
+        if (not isinstance(record, dict) or record.get("schema_version") not in (1, 2) or record.get("variant") not in VARIANTS
                 or not isinstance(record.get("case_id"), str) or not isinstance(record.get("request_sha256"), str)):
             raise PipelineError("saved predictions have an unexpected record shape")
-        result[(record["case_id"], record["variant"])] = record
+        key = (record["case_id"], record["variant"])
+        if key in result:
+            raise PipelineError("saved predictions contain a duplicate case and variant")
+        result[key] = record
+    if repair and text and not text.endswith("\n"):
+        # A hard stop can leave a complete JSON object without its line separator.
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
     return result
 
 
@@ -142,8 +181,9 @@ def evaluation_status(completed: int, total: int, *, reason: str | None = None, 
 
 
 def generate_predictions(model, renderer, spec, cases, settings: EvaluationSettings, *, device, output_path: Path,
-                         deadline: float | None = None, clock=time.monotonic, generate=None, parse=None) -> dict:
-    """Append one record per (case, variant); resume by skipping records already saved."""
+                         deadline: float | None = None, clock=time.monotonic, generate=None, parse=None,
+                         legacy_cases=None) -> dict:
+    """Append one record per (case, variant); resume only matching saved requests."""
     from smithtune.providers.baseten.sampling_formats import parse_completion, stop_sequences
     from smithtune.training.inference import generate_tokens
 
@@ -153,7 +193,9 @@ def generate_predictions(model, renderer, spec, cases, settings: EvaluationSetti
     stop_ids = renderer.tokenizer.encode(stop_sequences(renderer, spec)[0], add_special_tokens=False)
     if len(stop_ids) != 1:
         raise PipelineError("in-job generation requires one native stop token")
-    done = load_predictions(output_path, repair=True)
+    done = validate_predictions(load_predictions(output_path), cases, settings, legacy_cases=legacy_cases)
+    # Repair a torn tail only after the complete records passed identity checks.
+    load_predictions(output_path, repair=True)
     total = len(VARIANTS) * len(cases)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     model.eval()
@@ -169,8 +211,8 @@ def generate_predictions(model, renderer, spec, cases, settings: EvaluationSetti
             tools = case.get("tools") or []
             tokens = renderer.prompt_tokens(case["messages"], tools=tools)
             if not tokens or len(tokens) + settings.max_new_tokens > spec.max_seq_len:
-                record = {"schema_version": 1, "case_id": case["id"], "variant": variant,
-                          "request_sha256": request_sha256(case["messages"], variant, settings.max_new_tokens),
+                record = {"schema_version": 2, "case_id": case["id"], "variant": variant,
+                          "request_sha256": request_sha256(case["messages"], variant, settings.max_new_tokens, tools),
                           "candidate": None, "skipped": "prompt plus output budget exceeds the model context",
                           "prompt_tokens": len(tokens)}
             else:
@@ -178,8 +220,8 @@ def generate_predictions(model, renderer, spec, cases, settings: EvaluationSetti
                     generated = generate(model, tokens, device=device, eos_token_id=stop_ids[0],
                                          max_new_tokens=settings.max_new_tokens)
                 candidate = parse(renderer, spec, generated.pop("tokens"), generated["stop_reason"], tools=tools)
-                record = {"schema_version": 1, "case_id": case["id"], "variant": variant,
-                          "request_sha256": request_sha256(case["messages"], variant, settings.max_new_tokens),
+                record = {"schema_version": 2, "case_id": case["id"], "variant": variant,
+                          "request_sha256": request_sha256(case["messages"], variant, settings.max_new_tokens, tools),
                           "candidate": candidate, **generated,
                           "truncated": generated["stop_reason"] == "length"}
             with output_path.open("a", encoding="utf-8") as handle:

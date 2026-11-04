@@ -83,6 +83,19 @@ def test_portable_module_entrypoint_resolves_worker_before_calling_it(monkeypatc
         runpy.run_path(worker.__file__, run_name="__main__")
 
 
+@pytest.mark.parametrize("device", [None, "cpu", "cuda:0"])
+def test_portable_worker_uses_bundle_device_unless_explicitly_overridden(monkeypatch, tmp_path, device):
+    calls = []
+    monkeypatch.setattr(worker, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    paths = [tmp_path / name for name in ("input", "model", "checkpoints")]
+    arguments = [part for flag, path in zip(("--input-dir", "--model-dir", "--checkpoint-dir"), paths, strict=True)
+                 for part in (flag, str(path))]
+    if device is not None:
+        arguments += ["--device", device]
+    worker.main(arguments)
+    assert calls == [(tuple(paths), {"device": device})]
+
+
 @pytest.mark.parametrize("settings", [{"batch_size": True}, {"max_epochs": 0}, {"learning_rate": float("nan")},
                                      {"early_stopping_min_delta": float("inf")}, {"trainer_backend": "unknown"}])
 def test_shared_worker_rejects_invalid_settings(settings):

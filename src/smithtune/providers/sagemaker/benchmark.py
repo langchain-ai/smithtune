@@ -17,7 +17,7 @@ import time
 from smithtune.artifacts import _json_dump, _load_json
 from smithtune.providers.base import PipelineError
 from smithtune.providers.sagemaker import sha256_file
-from smithtune.training.contracts import model_revision
+from smithtune.training.contracts import LOSS_IMPLEMENTATION, model_revision
 from smithtune.training.hf_sft import (
     _loss, configure_lora, enable_chunked_loss, failure_diagnostics, gpu_diagnostics, read_bundle,
     render_conversations, report_stage,
@@ -207,7 +207,8 @@ def run(input_dir: Path, model_dir: Path, *, device="cuda:0"):
               "template_sha256": spec.template_sha256, "source_bundle": bundle,
               "input_manifest_sha256": sha256_file(input_dir / "benchmark.json"),
               "runtime": gpu_diagnostics(), "lora_rank": rank, "learning_rate": settings.learning_rate,
-              "loss_implementation": "unchanged_training_worker_full_vocabulary",
+              "loss_implementation": LOSS_IMPLEMENTATION,
+              "training_loop": "single_optimizer_group_probe",
               "loss_reduction": "mean_over_active_tokens_per_optimizer_group",
               "fresh_adapters_and_optimizer_per_stage": True,
               "no_endpoint": True, "no_checkpoint_export": True, "max_probe_seconds": 450}
