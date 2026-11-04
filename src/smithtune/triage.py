@@ -45,16 +45,22 @@ def load_config(path: Path | None) -> dict:
 def validate_config(value: dict) -> dict:
     if not isinstance(value, dict) or set(value) - {"judges", "rules"}:
         raise PipelineError("triage config must contain judges and optional rules")
-    judges = value.get("judges")
+    judges = copy.deepcopy(value.get("judges"))
     if not isinstance(judges, list) or not 1 <= len(judges) <= 16:
         raise PipelineError("configure between 1 and 16 judge slots")
     for judge in judges:
-        if not isinstance(judge, dict) or set(judge) != {"name", "provider", "model"}:
-            raise PipelineError("each judge requires name, provider, and model")
+        allowed = {"name", "provider", "model"}
+        if isinstance(judge, dict) and judge.get("provider") == "bedrock":
+            allowed.add("region")
+        if not isinstance(judge, dict) or set(judge) - allowed or not {"name", "provider", "model"} <= set(judge):
+            raise PipelineError("each judge requires name, provider, and model; only Bedrock accepts region")
         if not isinstance(judge["name"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", judge["name"]):
             raise PipelineError("judge name must use lowercase letters, digits, or hyphens")
         if judge["provider"] not in PROVIDERS or not isinstance(judge["model"], str) or not judge["model"].strip() or len(judge["model"]) > 256:
             raise PipelineError("judge provider or model is invalid")
+        if judge["provider"] == "bedrock":
+            from smithtune.bedrock import resolve_region
+            judge["region"] = resolve_region(judge.get("region"))
     if len({judge["name"] for judge in judges}) != len(judges):
         raise PipelineError("judge slot names must be unique")
     rules = value.get("rules", [])
@@ -211,7 +217,9 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
     if runner_mode == "deepagent":
         # The coordinator prompt changes scheduling decisions and belongs in
         # the resume identity just like the judge instructions.
-        identity.update(agent_version=14, coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
+        # Bedrock councils change coordinator error handling; keep their resume identity separate.
+        identity.update(agent_version=15 if any(j["provider"] == "bedrock" for j in config["judges"]) else 14,
+                        coordinator_prompt_sha256=json_sha256(COORDINATOR_PROMPT))
     plan = {**identity, "selected_traces": len(frozen["selected_trace_ids"]), "source_traces": len(frozen["traces"]), "trajectories": len(judging),
             "conversation_units": len(frozen["units"]), "judges": len(config["judges"]),
             "filtered_multimodal": len(multimodal_filtered),
@@ -291,6 +299,11 @@ def _run_triage(source: dict, output_dir: Path, *, config_path: Path | None = No
                 # Save useful failure categories, never raw provider bodies or
                 # request headers that could contain private evidence or keys.
                 failure = {"error_type": type(exc).__name__}
+                aws_response = getattr(exc, "response", None)
+                if isinstance(aws_response, dict):
+                    code = aws_response.get("Error", {}).get("Code")
+                    if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9]+", code):
+                        failure["aws_error_code"] = code
                 if error_kind == "invalid_result" and isinstance(exc, PipelineError):
                     failure["validation_error"] = str(exc)
                     feedback = "\nYour previous attempt failed validation. Return only JSON with keep (0 or 1) and a short reason."

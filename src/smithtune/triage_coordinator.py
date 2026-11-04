@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import BoundedSemaphore, Lock
 
@@ -179,8 +180,15 @@ def coordinate(pending, run_task, save_record, output_dir, *, concurrency, max_t
         agent.invoke({"messages": [{"role": "user", "content": f"Label all {len(pending)} pending trajectory/judge pairs. Use code mode and judge subagents; concurrency is {concurrency}."}]},
                      config={"recursion_limit": min(1000, 24 + 4 * len(pending)), "max_concurrency": concurrency})
         state["status"] = "complete" if len(tasks.finished) == len(pending) and all(r["status"] in {"complete", "context_exceeded"} for r in tasks.finished.values()) else "incomplete"
-    except Exception:
+    except Exception as exc:
         state.update(status="incomplete", error="coordinator stopped; rerun the same command to finish pending votes")
+        if coordinator_judge["provider"] == "bedrock":
+            state["error_type"] = type(exc).__name__
+            response = getattr(exc, "response", None)
+            if isinstance(response, dict):
+                code = response.get("Error", {}).get("Code")
+                if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9]+", code):
+                    state["aws_error_code"] = code
     except BaseException:
         state["status"] = "interrupted"
         raise

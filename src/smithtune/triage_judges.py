@@ -15,7 +15,7 @@ from smithtune.providers.base import PipelineError
 from smithtune.providers.fireworks.provider import CLIENT_SOURCE, INFERENCE_URL, _set_skill_session
 
 
-PROVIDERS = ("fireworks", "baseten", "openai", "anthropic")
+PROVIDERS = ("fireworks", "baseten", "openai", "anthropic", "bedrock")
 # GLM-5.3 rejects requests that disable reasoning.
 FIREWORKS_REASONING = {"accounts/fireworks/models/glm-5p3-flash": "low"}
 BASETEN_REASONING = {model: "low" for model in ("zai-org/GLM-5.3", "zai-org/GLM-5.3-Fast", "zai-org/GLM-5.3-Flash")}
@@ -68,6 +68,14 @@ def context_window_exceeded(exc: Exception) -> bool:
     """Use the provider's context rejection, never a guessed character limit."""
     error = exc.__cause__ if isinstance(exc.__cause__, urllib.error.HTTPError) else exc
     status = error.code if isinstance(error, urllib.error.HTTPError) else getattr(error, "status_code", None)
+    aws_response = getattr(error, "response", None)
+    if isinstance(aws_response, dict):
+        if aws_response.get("Error", {}).get("Code") != "ValidationException":
+            return False
+        status = aws_response.get("ResponseMetadata", {}).get("HTTPStatusCode", 400)
+        body = {"message": aws_response["Error"].get("Message", "")}
+    else:
+        body = getattr(error, "body", None)
     if status not in {400, 413, 422}:
         return False
     if isinstance(error, urllib.error.HTTPError):
@@ -75,8 +83,6 @@ def context_window_exceeded(exc: Exception) -> bool:
             body = json.loads(error.read())
         except (ValueError, OSError):
             return False
-    else:
-        body = getattr(error, "body", None)
     # Providers use both OpenAI-style errors and string/list `detail` bodies.
     pending = [body]
     while pending:
@@ -117,6 +123,10 @@ def credential_name(provider: str) -> str:
 
 def check_credentials(judges: list[dict]) -> None:
     for judge in judges:
+        if judge["provider"] == "bedrock":
+            from smithtune.bedrock import client, resolve_region
+            client(resolve_region(judge.get("region")))
+            continue
         name = credential_name(judge["provider"])
         if not os.environ.get(name):
             raise PipelineError(f"{name} is not set for judge {judge['name']}")
@@ -136,7 +146,10 @@ def judge_messages(trajectory: dict, rubric: str, rules: list[str]) -> list[dict
 
 def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
     provider, model = judge["provider"], judge["model"]
-    if provider in ANTHROPIC_ENDPOINTS:
+    if provider == "bedrock":
+        from smithtune.bedrock import complete
+        text = complete(judge, messages, max_tokens)
+    elif provider in ANTHROPIC_ENDPOINTS:
         response = _anthropic_chat_completion(model, messages, max_tokens, True, provider=provider)
         text = response["content"]
     else:
@@ -156,6 +169,21 @@ def api_judge(judge: dict, messages: list[dict], max_tokens: int) -> dict:
             text = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
             raise PipelineError("judge returned no text response") from None
+    return _parse_judgment(text, provider)
+
+
+def _parse_judgment(text, provider: str) -> dict:
+    # Nova can wrap an otherwise valid JSON verdict in a single Markdown
+    # code wrapper. Remove only that whole-response wrapper, never surrounding prose
+    # or multiple answers. The caller still validates the exact verdict schema.
+    if provider == "bedrock" and isinstance(text, str):
+        fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", text.strip(), re.DOTALL | re.IGNORECASE)
+        if fenced:
+            text = fenced.group(1)
+        else:
+            inline = re.fullmatch(r"`([^`\r\n]+)`", text.strip())
+            if inline:
+                text = inline.group(1)
     try:
         return json.loads(text)
     except (TypeError, ValueError):
@@ -169,12 +197,11 @@ def deepagent_judge(judge: dict, messages: list[dict], max_tokens: int, *, diagn
     if judge["provider"] in CHAT_ENDPOINTS:
         model = model.bind(response_format={"type": "json_object"})
     result = model.invoke(messages)
+    if judge["provider"] == "bedrock" and result.response_metadata.get("stopReason") not in {"end_turn", "stop_sequence"}:
+        raise PipelineError("Bedrock judge did not finish its answer; check the model and output-token budget")
     if diagnostics is not None:
-        diagnostics["finish_reason"] = result.response_metadata.get("finish_reason")
+        diagnostics["finish_reason"] = result.response_metadata.get("stopReason" if judge["provider"] == "bedrock" else "finish_reason")
     content = result.content
     if isinstance(content, list):
         content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
-    try:
-        return json.loads(content)
-    except (TypeError, ValueError):
-        raise PipelineError("judge returned invalid JSON") from None
+    return _parse_judgment(content, judge["provider"])

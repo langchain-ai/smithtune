@@ -227,6 +227,11 @@ smithtune dataset triage data/datasets/my-sft --rubric ./rubric.md   # preview, 
 smithtune dataset triage data/datasets/my-sft --confirm              # run the council
 ```
 
+Bedrock council models are optional. Add `bedrock` to the install extras
+(`smithtune[deepagents,bedrock]`), configure your AWS profile and region, and
+select models with `--judges 'bedrock:<model-id>,bedrock:<other-model-id>'`.
+They use your AWS credentials; see [Bedrock setup](docs/datasets.md#bedrock-council-models).
+
 Decisions are saved in `labels.jsonl` and summarized in `report.md`; read them
 before pushing. Review stops at the target. If the pool runs out first, run
 `pull` and `triage --confirm` again in the same directory to review unseen

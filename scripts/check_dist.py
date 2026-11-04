@@ -53,9 +53,11 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     run(python, "-I", "-c", "from importlib.resources import files; root = files('smithtune'); "
         "assert root.joinpath('skills/smithtune/SKILL.md').is_file()", cwd=work, env=env)
     if full_tests:
+        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[bedrock]")
+        run(python, "-I", "-m", "pytest", "tests/test_bedrock.py", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", cwd=work, env=env)
         run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[baseten-deploy]")
         run(python, "-I", "-m", "pytest", "tests/baseten/test_truss.py", "tests/baseten/test_deployment.py", "tests/baseten/test_deploy_cli.py", cwd=work, env=env)
-        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[aws,aws-training]")
+        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[aws,aws-training]")
         run(python, "-I", "-m", "pytest", "tests/test_sagemaker.py", "tests/test_sagemaker_worker.py",
             "tests/test_sagemaker_smoke.py", "tests/test_sagemaker_benchmark.py", "tests/test_sagemaker_end_to_end.py",
             "tests/test_open_training_trl.py", "tests/test_open_training_serving.py", cwd=work, env=env)
