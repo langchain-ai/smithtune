@@ -274,6 +274,23 @@ Skip this step with `--no-triage`.
 - Selection criteria. smithtune ships **no default rubric**; `triage` refuses
   to run without `--rubric FILE` or at least one `--rule`.
 
+**Bedrock councils:** install the optional `bedrock` extra with `deepagents`.
+Use `--judges 'bedrock:<model-id>,bedrock:<other-model-id>'`; providers can be
+mixed. Authentication uses the AWS SDK credential chain (`AWS_PROFILE`,
+default profile, SSO, environment, or workload role), with region from
+`AWS_REGION`, `AWS_DEFAULT_REGION`, or the profile. Keep credentials out of
+chat and saved configs. Calls use the local caller's identity, not the
+SageMaker execution role. `AWS_BEARER_TOKEN_BEDROCK` is unsupported.
+Choose a Converse model available to the account and region. The first judge
+also coordinates and needs tool calling. Use model IDs or system inference
+profile IDs; ARN-based judges require `--runner api`. The identity needs
+`bedrock:InvokeModel`, including destination model access for cross-region
+profiles. Preview pins each Bedrock judge's region; confirm/resume reuse it.
+Do not convert access errors or throttling into negative quality votes.
+Refresh expired credentials and resume the same directory. Start live testing
+with a small directory and authorized inference spend. See
+[Bedrock setup](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md#bedrock-council-models).
+
 **Write the rubric with the user.** Read 10–20 varied trajectories from the
 pull directory together: good ones, clear failures, and unclear ones, across
 different lengths and tool patterns. Remember SFT imitates every assistant

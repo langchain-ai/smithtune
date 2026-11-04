@@ -107,6 +107,22 @@ conversation messages and have no tools.
 Provider transport tests replace HTTP requests at the service boundary; no
 test uses paid inference or creates a live deployment.
 
+For optional Bedrock council support:
+
+```bash
+sfw uv sync --locked --extra test --extra deepagents --extra bedrock --python 3.12
+uv run --no-sync pytest tests/test_bedrock.py tests/test_triage.py tests/test_triage_agent.py tests/test_triage_coordinator.py
+```
+
+The `bedrock` extra pins Boto3 and `langchain-aws`. Direct judges use Converse;
+the Deep Agents runner uses `ChatBedrockConverse` for judges and coordinator
+tool calls. Keep SDK retries disabled so the council's saved retry budget is
+the only request retry loop. Clients retain SDK credential providers so role
+and SSO credentials can refresh. Tests use Botocore Stubber and the real
+coordinator graph; they do not call AWS or need configured credentials.
+Live qualification must check model access, JSON replies, tool use and context
+rejection for the selected model and region. This does not add Bedrock replay judges.
+
 The default council is `DEFAULT_COUNCIL` in `triage.py`. The judge prompt
 (`triage_judges.JUDGE_PROMPT`) and coordinator prompt
 (`triage_coordinator.COORDINATOR_PROMPT`) are internal; operator guidance

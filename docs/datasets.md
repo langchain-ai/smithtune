@@ -226,6 +226,69 @@ Other models use `provider:model`, for example `anthropic:<model-id>` with
 `ANTHROPIC_API_KEY`. Note that `--judges` separates provider and model with a
 colon, while evaluation's `--judge-model` uses a slash (`baseten/<model-id>`).
 
+### Bedrock council models
+
+Install the optional `bedrock` extra alongside `deepagents`. For a source checkout:
+
+```bash
+sfw uv sync --locked --extra deepagents --extra bedrock --python 3.12
+```
+
+Bedrock uses the AWS SDK credential chain, just like the AWS CLI. It can use
+your default profile, `AWS_PROFILE`, environment credentials, SSO, or a workload
+role. If you use SSO, sign in with `aws sso login --profile <profile>` first.
+No separate API key is needed. These calls use the identity running smithtune,
+not the SageMaker training role. IAM authentication is supported; unset
+`AWS_BEARER_TOKEN_BEDROCK` if it is set.
+
+```bash
+export AWS_PROFILE=my-profile          # omit to use your default identity
+export AWS_DEFAULT_REGION=us-east-1
+
+smithtune dataset triage data/datasets/reviewed \
+  --rubric ./rubric.md --judges 'bedrock:amazon.nova-lite-v1:0'
+smithtune dataset triage data/datasets/reviewed --confirm
+```
+
+Preview makes no model calls. Confirm incurs Bedrock inference charges. Start
+with a small dataset directory. The example selects one council member; use
+comma-separated `bedrock:<model-id>` entries for more judges, or mix providers.
+The default council remains unchanged.
+
+Choose models available to your account and region that support Bedrock
+Converse. The first judge is also the coordinator and must support tool calls.
+Use a model ID or system inference profile ID, including its version suffix
+or regional prefix when required. With `--runner api`, there is no coordinator;
+judges only return JSON, and model/inference profile ARNs are also accepted.
+Check [model support](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-supported-models-features.html)
+and your account's model access before paid work.
+
+A live test passed with `amazon.nova-lite-v1:0` as coordinator and judge, and
+`amazon.nova-micro-v1:0` as the second judge in `us-east-1`, using IAM auth.
+It covered three short synthetic tool conversations, six completed votes,
+saved labels and resume with no new model calls. Other models, long inputs
+and judgment quality on production data still need qualification.
+
+The identity needs `bedrock:InvokeModel` for the selected models and inference
+profiles. Cross-region profiles can also require permission in their destination
+regions. Organization policies and model access rules still apply.
+
+The resolved region is saved per Bedrock judge in the preview and reused on
+confirm/resume. A config file can set `region` explicitly for each Bedrock
+judge. Changing a model or its region after voting starts requires a new
+directory. Refresh expired temporary credentials before retrying; supported
+SSO and role providers refresh through the SDK. `smithtune doctor` shows local
+Bedrock setup without testing credentials or service access.
+
+Access errors, expired credentials, throttling, invalid JSON and unfinished
+answers leave votes incomplete. Resume retries unfinished votes and keeps
+completed ones. Only a confirmed context-window rejection filters the whole
+trajectory; smithtune never truncates it to fit. Error records save AWS error
+codes without saving raw provider error bodies. Coordinator failures are in
+`agent-state.json`; individual judge failures are in `judgments.jsonl`.
+
+### Council results and recovery
+
 Every council member judges the full trajectory. All votes must finish; a strict
 majority keeps it, and ties drop it. Multimodal and provider context-window
 rejections are excluded without truncation. A recognized context-limit rejection

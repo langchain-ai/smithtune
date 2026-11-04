@@ -18,6 +18,9 @@ def check_installation() -> None:
 
 
 def _model(judge: dict, max_tokens: int):
+    if judge["provider"] == "bedrock":
+        from smithtune.bedrock import chat_model
+        return chat_model(judge, max_tokens)
     from langchain_anthropic import ChatAnthropic
     from langchain_openai import ChatOpenAI
 

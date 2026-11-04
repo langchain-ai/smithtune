@@ -57,6 +57,8 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
         # and deterministic local models. The default install is tested first.
         run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[deepagents]")
         run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
+        run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[bedrock]")
+        run(python, "-I", "-m", "pytest", "tests/test_bedrock.py", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", cwd=work, env=env)
         run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[baseten-deploy]")
         run(python, "-I", "-m", "pytest", "tests/baseten/test_truss.py", "tests/baseten/test_deployment.py", "tests/baseten/test_deploy_cli.py", cwd=work, env=env)
         run("sfw", "uv", "pip", "install", "--python", python, "--overrides", str(OVERRIDES), str(wheel) + "[aws,aws-training]")

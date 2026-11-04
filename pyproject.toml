@@ -47,6 +47,7 @@ Issues = "https://github.com/langchain-ai/smithtune/issues"
 [project.optional-dependencies]
 aws = ["boto3==1.43.95"]
 aws-training = ["peft==0.21.2", "torch==2.14.0"]
+bedrock = ["boto3==1.43.95", "langchain-aws==1.9.1"]
 baseten-deploy = ["truss==0.18.30"]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
 deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]

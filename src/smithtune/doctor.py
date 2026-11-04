@@ -42,7 +42,7 @@ def diagnose() -> dict:
     from smithtune import data_rights
 
     packages = {}
-    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "langsmith", "transformers", "trl", "torch", "boto3", "peft", "deepagents", "langchain-openai", "pydantic-monty"):
+    for name in ("smithtune", "fireworks-training-cookbook", "tinker-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "langsmith", "transformers", "trl", "torch", "boto3", "peft", "deepagents", "langchain-openai", "langchain-aws", "pydantic-monty"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -60,12 +60,21 @@ def diagnose() -> dict:
         installed = firectl_version()
         tools["firectl"]["version"] = ".".join(map(str, installed)) if installed else None
         tools["firectl"]["automatic_deployment_shapes"] = bool(installed and installed >= MIN_FIRECTL_SHAPE_MATCH)
+    bedrock = {"authentication": "AWS SDK credential chain (IAM)", "profile": os.environ.get("AWS_DEFAULT_PROFILE") or os.environ.get("AWS_PROFILE") or "default",
+               "region": None, "available": packages["boto3"] is not None and packages["langchain-aws"] is not None,
+               "bearer_token": "unsupported; unset AWS_BEARER_TOKEN_BEDROCK" if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") else "unset"}
+    try:
+        from smithtune.bedrock import resolve_region
+        bedrock["region"] = resolve_region()
+    except Exception:
+        pass  # Optional and offline: no credential lookup or access check.
     return {
         "python": sys.version.split()[0],
         "packages": packages,
         "tools": tools,
         "credentials": {name: "set" if os.environ.get(name) else "unset" for name in CREDENTIALS},
         "credentials_required_for": CREDENTIALS,
+        "bedrock": bedrock,
         "data_rights_acknowledged": data_rights.saved_acknowledgment() is not None,
         "note": "Offline checks only; credential validity and service access have not been tested. Missing prerequisites are required only for the operations that use them.",
     }
