@@ -31,7 +31,7 @@ from smithtune.providers.fireworks.provider import (
 )
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers import PROVIDERS, get_provider
-from smithtune.providers.baseten import deployment as baseten_deployment, require_api_key as require_baseten_key
+from smithtune.providers.baseten import CAPACITY as BASETEN_CAPACITY, deployment as baseten_deployment, require_api_key as require_baseten_key
 from smithtune.rendering import DEFAULT_REPLAY_MAX_TOKENS
 from smithtune import get_version
 from smithtune.doctor import diagnose
@@ -526,7 +526,7 @@ def _run_baseten_sampler_evaluation(args):
                 args.data_dir, args.output_dir, args.max_points_per_trajectory, args.max_output_tokens,
             )
             value.update(serving_mode="sampler", evaluated_models=2,
-                         capacity="dedicated", cleanup="deactivate both sampler deployments on exit")
+                         capacity=BASETEN_CAPACITY, cleanup="deactivate both samplers on exit")
             if checkpoint is not None:
                 value["checkpoint"] = checkpoint
             _json_dump(args.output_dir / "plan.json", value)

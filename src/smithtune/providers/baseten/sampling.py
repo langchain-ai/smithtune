@@ -1,4 +1,4 @@
-"""Fixed-checkpoint replay through owned Baseten Loops GPU samplers."""
+"""Fixed-checkpoint replay through owned Baseten Loops samplers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -22,6 +23,10 @@ from smithtune.rendering import load_training_renderer
 
 
 API_ROOT = "https://api.baseten.co"
+# Serverless samplers share one Loops host instead of a per-deployment endpoint.
+SERVERLESS_SAMPLER_HOST = "loops.baseten.co"
+SERVERLESS = "serverless"
+DEDICATED = "dedicated"
 _CHECKPOINT = re.compile(r"bt://loops:([A-Za-z0-9_-]+)/sampler_weights/([A-Za-z0-9_.-]+)")
 
 
@@ -29,6 +34,32 @@ def _resource_id(value: Any) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
         raise PipelineError("Baseten returned an invalid resource ID; inspect sampler.json")
     return value
+
+
+def _capacity(created: dict) -> str:
+    """Classify without validating, so cleanup knows the path even for a bad response."""
+    # Baseten returns no model or deployment for a sampler on shared capacity.
+    if created.get("model_id") is None and created.get("deployment_id") is None:
+        return SERVERLESS
+    return DEDICATED
+
+
+def _control_path(resource: dict) -> str:
+    """The resource whose status proves the sampler stopped; receipts without capacity predate serverless."""
+    if resource.get("capacity") == SERVERLESS:
+        return f"/v1/loops/samplers/{_resource_id(resource.get('id'))}"
+    model_id = _resource_id(resource.get("model_id"))
+    return f"/v1/models/{model_id}/deployments/{_resource_id(resource.get('deployment_id'))}"
+
+
+def _reports_inactive(resource: dict, response: dict) -> bool:
+    if resource.get("capacity") == SERVERLESS:
+        sampler = response.get("sampler")
+        if not isinstance(sampler, dict) or not isinstance(sampler.get("status"), dict):
+            return False
+        return sampler.get("id") == resource["id"] and sampler["status"].get("name") == "INACTIVE"
+    return (response.get("id") == resource["deployment_id"] and response.get("model_id") == resource["model_id"]
+            and response.get("status") == "INACTIVE")
 
 
 def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, str]:
@@ -102,39 +133,34 @@ class _SamplerService:
         return _request("POST", self.root + "/samplers", body).get("sampler", {})
 
     def connect(self, resource: dict, model, session_id: str, ready_timeout: float):
-        from baseten.loops.sampling_client import BasetenDeployment, SamplingClient
+        from baseten.loops.sampling_client import SamplingClient, deployment_from_sampler
 
         url = urllib.parse.urlsplit(resource.get("base_url", ""))
-        if (url.scheme != "https" or not url.hostname or not url.hostname.endswith(".api.baseten.co")
+        trusted_host = (url.hostname == SERVERLESS_SAMPLER_HOST if resource["capacity"] == SERVERLESS
+                        else bool(url.hostname) and url.hostname.endswith(".api.baseten.co"))
+        if (url.scheme != "https" or not trusted_host
                 or url.username or url.password or url.port not in (None, 443) or url.query or url.fragment):
             raise PipelineError("Baseten returned an invalid sampler URL; inspect sampler.json")
         return SamplingClient(
             api_key=os.environ["BASETEN_API_KEY"], base_model=model.base_model,
-            deployment=BasetenDeployment(
-                base_url=resource["base_url"], model_id=resource["model_id"],
-                deployment_id=resource["deployment_id"], api_base_url=API_ROOT,
-            ),
+            deployment=deployment_from_sampler(resource, API_ROOT),
             sampler_id=resource["id"], session_id=session_id,
             checkpoint_path=resource.get("checkpoint"), ready_timeout=ready_timeout,
         )
 
     def deactivate(self, resource: dict) -> None:
-        path = f"/v1/models/{_resource_id(resource['model_id'])}/deployments/{_resource_id(resource['deployment_id'])}"
+        path = _control_path(resource)
         _request("POST", path + "/deactivate")
         deadline = time.monotonic() + 120
         while True:
-            if _request("GET", path).get("status") == "INACTIVE":
+            if _reports_inactive(resource, _request("GET", path)):
                 return
             if time.monotonic() >= deadline:
                 raise PipelineError("Baseten sampler deactivation has not reached INACTIVE")
             time.sleep(2)
 
     def is_inactive(self, resource: dict) -> bool:
-        model_id = _resource_id(resource.get("model_id"))
-        deployment_id = _resource_id(resource.get("deployment_id"))
-        deployment = _request("GET", f"/v1/models/{model_id}/deployments/{deployment_id}")
-        return (deployment.get("id") == deployment_id and deployment.get("model_id") == model_id
-                and deployment.get("status") == "INACTIVE")
+        return _reports_inactive(resource, _request("GET", _control_path(resource)))
 
 
 class BasetenReplaySampler:
@@ -175,9 +201,10 @@ class BasetenReplaySampler:
         if not isinstance(resources, list) or not resources or any(not isinstance(resource, dict) for resource in resources):
             raise PipelineError(f"previous Baseten sampler resources need reconciliation; inspect {path} before retrying")
         for resource in resources:
-            for field in ("model_id", "deployment_id"):
-                if not isinstance(resource.get(field), str) or re.fullmatch(r"[A-Za-z0-9_-]+", resource[field]) is None:
-                    raise PipelineError(f"previous Baseten sampler creation needs reconciliation; inspect {path} and its session ID before retrying")
+            try:
+                _control_path(resource)
+            except PipelineError:
+                raise PipelineError(f"previous Baseten sampler creation needs reconciliation; inspect {path} and its session ID before retrying") from None
         service = self.service or _SamplerService()
         if not all(service.is_inactive(resource) for resource in resources):
             raise PipelineError(f"previous Baseten sampler resources need reconciliation; inspect {path} and its cleanup commands before retrying")
@@ -202,22 +229,22 @@ class BasetenReplaySampler:
                 created = self.service.create_sampler({"session_id": self.receipt["session_id"],
                                                        "max_seq_length": self.model.max_seq_len, **options})
                 # Save returned identities before validating unrelated response fields,
-                # constructing SDK clients, or waiting for paid GPUs to become ready.
+                # constructing SDK clients, or waiting for paid capacity to become ready.
                 if isinstance(created, dict):
                     for field in ("id", "model_id", "deployment_id", "base_url"):
                         if field in created:
                             resource[field] = created[field]
+                    resource["capacity"] = _capacity(created)
                 self._save()
-                for field in ("model_id", "deployment_id"):
-                    _resource_id(resource.get(field))
                 resource["cleanup_command"] = (
                     'curl --fail-with-body -X POST -H "Authorization: Api-Key $BASETEN_API_KEY" '
-                    f"{API_ROOT}/v1/models/{resource['model_id']}/deployments/{resource['deployment_id']}/deactivate"
+                    f"{API_ROOT}{_control_path(resource)}/deactivate"
                 )
                 self._save()
                 _resource_id(resource.get("id"))
                 resource.update(status="starting", owned=True, checkpoint=options.get("model_path"))
                 self._save()
+                print(f"Baseten placed the sampler for {identity} on {resource['capacity']} capacity.", file=sys.stderr)
                 sampler = self.service.connect(resource, self.model, self.receipt["session_id"], self.ready_timeout)
                 self._samplers[identity] = sampler
                 sampler.ensure_ready(self.ready_timeout)
@@ -242,8 +269,7 @@ class BasetenReplaySampler:
             try:
                 # Valid IDs remain usable for cleanup even if creation returned a
                 # malformed sampler URL or ID and full receipt validation failed.
-                _resource_id(resource.get("model_id"))
-                _resource_id(resource.get("deployment_id"))
+                _control_path(resource)
                 self.service.deactivate(resource)
                 resource["status"] = "inactive"
             except BaseException as exc:
@@ -253,8 +279,8 @@ class BasetenReplaySampler:
         self._save()
         if failures:
             raise PipelineError(
-                f"Baseten sampler cleanup needs attention; GPU charges may continue. Inspect {self.output_dir / 'sampler.json'} "
-                "and deactivate its recorded deployments; reconcile unknown creates using the saved session ID."
+                f"Baseten sampler cleanup needs attention; charges may continue. Inspect {self.output_dir / 'sampler.json'} "
+                "and run its recorded cleanup commands; reconcile unknown creates using the saved session ID."
             )
 
     def __exit__(self, exc_type, exc, tb):

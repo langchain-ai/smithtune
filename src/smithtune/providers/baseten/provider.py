@@ -9,6 +9,7 @@ import os
 import random
 import re
 import signal
+import sys
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
@@ -22,6 +23,7 @@ from smithtune.inference_contract import InferenceContract
 from smithtune.capabilities import open_without_redirects, preflight_model
 from smithtune.models import resolve_model_options, resolve_prepared_model
 from smithtune.rendering import load_training_renderer, render_row_tokens, resolve_rendering_model
+from smithtune.providers.baseten import CAPACITY
 from smithtune.providers.base import (
     CommonSFTSettings,
     ModelOptions,
@@ -94,7 +96,9 @@ MODEL_SPECS = {
     ),
 }
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]
-BASETEN_CAPABILITIES_URL = "https://api.baseten.co/v1/loops/capabilities"
+# Smithtune trains without a paired sampler, which Baseten calls the SFT use
+# case; its enabled sequence limits differ from the default RL use case.
+BASETEN_CAPABILITIES_URL = "https://api.baseten.co/v1/loops/capabilities?use_case=sft"
 BASETEN_API_ROOT = "https://api.baseten.co/v1/loops"
 MAX_CAPABILITIES_RESPONSE_BYTES = 1024 * 1024
 MAX_MANAGEMENT_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -277,6 +281,9 @@ class BasetenModelCapability:
     # None on an API that does not send the enablement fields yet.
     enabled: bool | None = None
     enablement_details: BasetenEnablementDetails | None = None
+    # Baseten sends this only to workspaces with serverless Loops; None means
+    # the workspace cannot use serverless capacity for any model.
+    serverless: bool | None = None
 
 
 class BasetenModelNotEnabled(BasetenRuntimeError):
@@ -405,11 +412,29 @@ def fetch_model_capability(
     supported = _optional_sequence_limit(matches[0], "max_seq_len")
     enabled_limit = _optional_sequence_limit(matches[0], "max_enabled_seq_len")
     enabled, details = _enablement(matches[0])
+    serverless = matches[0].get("serverless")
+    if serverless is not None and not isinstance(serverless, bool):
+        raise BasetenRuntimeError("Baseten returned an invalid serverless flag")
     capability = BasetenModelCapability(
-        model, maximum, vision, supported, enabled_limit, enabled, details,
+        model, maximum, vision, supported, enabled_limit, enabled, details, serverless,
     )
     _validate_capability(capability, model, max_sequence_length)
     return capability
+
+
+def _placement_note(capability: BasetenModelCapability, lora_rank: int, max_seq_len: int) -> str:
+    """Explain where Baseten will place the trainer; the run response does not say."""
+    model = capability.model_name
+    if capability.serverless:
+        return (
+            f"Baseten offers serverless Loops for {model} in this workspace. It uses shared "
+            f"serverless capacity when a pool supports LoRA rank {lora_rank} at "
+            f"{max_seq_len:,} tokens, otherwise this workspace's own capacity."
+        )
+    return (
+        f"Baseten does not offer serverless Loops for {model} in this workspace; "
+        "the trainer uses this workspace's own capacity."
+    )
 
 
 def retry_idempotent(operation: Any, *, sleeper: Any = time.sleep, attempts: int = 3) -> Any:
@@ -825,7 +850,7 @@ class BasetenProvider:
                 "early_stopping_min_delta": settings.early_stopping_min_delta,
                 "seed": settings.seed,
                 "replicas": settings.replicas,
-                "capacity": "dedicated",
+                "capacity": CAPACITY,
                 "with_sampler": False,
                 "max_dropped_training_rows": settings.max_dropped_training_rows,
             },
@@ -852,8 +877,8 @@ class BasetenProvider:
 
             preview = preview_replay_for_plan(data_dir, replay)
             value["replay"] = {**preview, "serving_mode": "sampler", "evaluated_models": 2,
-                               "capacity": "dedicated", "timing": "after trainer shutdown",
-                               "cleanup": "deactivate both sampler deployments on exit",
+                               "capacity": CAPACITY, "timing": "after trainer shutdown",
+                               "cleanup": "deactivate both samplers on exit",
                                "budget": "sampler and judge costs are separate from the training budget"}
         return value
 
@@ -896,6 +921,7 @@ class BasetenProvider:
             model, capability_resolver=lambda *_: capability,
             required_context=max_seq_len,
         )
+        print(_placement_note(capability, settings.lora_rank, max_seq_len), file=sys.stderr)
 
         loops_types = self._loops_types or _resolve_loops_types()
         render_fn = self._render_fn or render_row
@@ -1195,11 +1221,16 @@ class BasetenProvider:
             sigterm_handler_installed = True
             budget.start()
             service_factory = self._service_factory or loops_types.ServiceClient
+            # "dedicated" availability means capacity that is never preempted, in
+            # contrast to spot; it does not choose dedicated over serverless.
             service = service_factory(availability_model="dedicated")
             session_id = validate_resource_id(service.session_id, kind="session")
             result["session_id"] = session_id
             update_state(baseten_session_id=session_id)
             try:
+                # No scope: Baseten falls back from serverless to dedicated
+                # capacity itself, and the SDK sends an explicit scope only
+                # through an internal route.
                 trainer = service.create_lora_training_client(
                     base_model=model.base_model,
                     rank=settings.lora_rank,
