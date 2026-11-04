@@ -5,11 +5,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from smithtune.artifacts import _load_json
+from smithtune.artifacts import _load_json, _load_jsonl
 from smithtune.providers.base import PipelineError
 from smithtune.run_artifacts import load_checkpoint_context, require_matching_base_model
 from smithtune.training.contracts import sha256_file, verify_artifact
-from smithtune.training.evaluation import EvaluationSettings, load_predictions, request_sha256
+from smithtune.training.evaluation import EvaluationSettings, load_predictions, request_sha256, validate_predictions
 
 SERVING_MODE = "precomputed"
 
@@ -66,7 +66,18 @@ class PrecomputedSampler:
             raise PipelineError("this run generated no evaluation answers; train with --evaluate or run smithtune aws evaluate-job")
         self.settings: EvaluationSettings = summary["settings"]
         predictions = self.artifact_dir / "evaluation/predictions.jsonl"
-        self.records = {record["request_sha256"]: record for record in load_predictions(predictions).values()}
+        cases_path = self.artifact_dir / "evaluation/cases.jsonl"
+        if not cases_path.exists():
+            raise PipelineError("saved replay answers require their original exported evaluation cases")
+        cases = _load_jsonl(cases_path)
+        records = validate_predictions(load_predictions(predictions), cases, self.settings, legacy_cases=cases)
+        self.records = {}
+        for record in records.values():
+            key = record["request_sha256"]
+            previous = self.records.get(key)
+            if previous is not None and any(previous.get(name) != record.get(name) for name in ("candidate", "skipped")):
+                raise PipelineError("saved predictions contain conflicting answers for the same replay request")
+            self.records.setdefault(key, record)
         self.config = {
             "parsing_version": PARSING_VERSION, "provider": "sagemaker", "serving_mode": SERVING_MODE,
             "checkpoint": checkpoint, "base_model": model.base_model, "max_seq_len": model.max_seq_len,
@@ -74,6 +85,7 @@ class PrecomputedSampler:
             "rendering_version": model.rendering_version, "renderer": model.renderer,
             "max_new_tokens": self.settings.max_new_tokens,
             "predictions_sha256": sha256_file(predictions),
+            "cases_sha256": sha256_file(cases_path), "request_identity_version": 2,
         }
 
     def __enter__(self) -> str:
@@ -93,7 +105,8 @@ class PrecomputedSampler:
             raise PipelineError("SageMaker replay serves only its checkpoint and matching base model")
         if max_tokens != self.settings.max_new_tokens:
             raise PipelineError("replay output budget differs from the answers generated in the job")
-        record = self.records.get(request_sha256(messages, variant, max_tokens))
+        tools = request_contract.tools if request_contract is not None else ()
+        record = self.records.get(request_sha256(messages, variant, max_tokens, tools))
         if record is None:
             raise PipelineError("no saved answer for this replay case; run smithtune aws evaluate-job to generate the missing answers")
         if record.get("candidate") is None:

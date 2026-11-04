@@ -1,11 +1,13 @@
 """In-job replay generation: durable records, resume, bounded stops and failure isolation."""
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 from types import SimpleNamespace
 
 import pytest
 
 from smithtune.providers.base import PipelineError
+from smithtune.inference_contract import json_sha256
 from smithtune.training import evaluation
 from smithtune.training.evaluation import (
     EvaluationSettings, generate_predictions, load_predictions, request_sha256, request_stop, reset_stop,
@@ -63,7 +65,8 @@ def _stop_sequences(monkeypatch):
     monkeypatch.setattr(sampling_formats, "stop_sequences", lambda renderer, spec: ["<stop>"])
 
 
-def test_base_then_tuned_records_are_durable_and_resume_after_a_torn_line(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tail", ["torn", "missing_newline"])
+def test_base_then_tuned_records_are_durable_and_resume_after_a_torn_line(tmp_path, monkeypatch, tail):
     _stop_sequences(monkeypatch)
     model = Model()
     generate, parse = fakes(model)
@@ -80,7 +83,7 @@ def test_base_then_tuned_records_are_durable_and_resume_after_a_torn_line(tmp_pa
     assert records[0]["candidate"]["content"] == "answer 3" and records[0]["truncated"] is False
     # A hard stop mid-write leaves a torn final line; resume repairs and completes only what is missing.
     text = output.read_text().splitlines()
-    output.write_text("\n".join(text[:3]) + "\n" + text[3][:20])
+    output.write_text("\n".join(text[:3]) + ("\n" + text[3][:20] if tail == "torn" else ""))
     model.calls.clear()
     status = generate_predictions(model, renderer(), SPEC, CASES, settings, device="cpu", output_path=output,
                                   generate=generate, parse=parse)
@@ -93,6 +96,59 @@ def test_corrupt_middle_line_is_an_error_not_a_silent_skip(tmp_path):
     path.write_text('{"schema_version": 1, "case_id": "a", "variant": "base", "request_sha256": "x"}\nnot json\n{"schema_version": 1, "case_id": "b", "variant": "base", "request_sha256": "y"}\n')
     with pytest.raises(PipelineError, match="corrupt"):
         load_predictions(path)
+
+
+@pytest.mark.parametrize("change", ["messages", "tools", "budget", "cases"])
+def test_resume_rejects_changed_requests_before_generating(tmp_path, monkeypatch, change):
+    _stop_sequences(monkeypatch)
+    model = Model()
+    generate, parse = fakes(model)
+    output = tmp_path / "predictions.jsonl"
+    settings = EvaluationSettings(max_new_tokens=4, max_cases=10)
+    generate_predictions(model, renderer(), SPEC, CASES, settings, device="cpu", output_path=output,
+                         generate=generate, parse=parse)
+    saved = output.read_bytes()
+    model.calls.clear()
+    cases = deepcopy(CASES)
+    if change == "messages":
+        cases[1]["messages"][0]["content"] = "changed"
+    elif change == "tools":
+        cases[1]["tools"][0]["function"]["name"] = "different_tool"
+    elif change == "budget":
+        settings = EvaluationSettings(max_new_tokens=5, max_cases=10)
+    else:
+        cases.pop()
+    with pytest.raises(PipelineError, match="saved prediction"):
+        generate_predictions(model, renderer(), SPEC, cases, settings, device="cpu", output_path=output,
+                             generate=generate, parse=parse)
+    assert not model.calls and output.read_bytes() == saved
+
+
+def test_duplicate_prediction_records_cannot_silently_replace_an_answer(tmp_path):
+    path = tmp_path / "predictions.jsonl"
+    record = {"schema_version": 1, "case_id": "a", "variant": "base", "request_sha256": "x"}
+    path.write_text(json.dumps(record) + "\n" + json.dumps(record | {"candidate": "different"}) + "\n")
+    with pytest.raises(PipelineError, match="duplicate"):
+        load_predictions(path)
+
+
+@pytest.mark.parametrize("original_cases", [None, CASES])
+def test_legacy_resume_needs_original_exported_tools(tmp_path, monkeypatch, original_cases):
+    _stop_sequences(monkeypatch)
+    model = Model()
+    generate, parse = fakes(model)
+    output = tmp_path / "predictions.jsonl"
+    record = {"schema_version": 1, "case_id": "b", "variant": "base", "candidate": None,
+              "request_sha256": json_sha256({"messages": CASES[1]["messages"], "variant": "base", "max_new_tokens": 4})}
+    output.write_text(json.dumps(record) + "\n")
+    saved = output.read_bytes()
+    cases = deepcopy(CASES)
+    if original_cases is not None:
+        cases[1]["tools"][0]["function"]["name"] = "changed"
+    with pytest.raises(PipelineError, match="legacy saved prediction"):
+        generate_predictions(model, renderer(), SPEC, cases, EvaluationSettings(max_new_tokens=4, max_cases=10),
+                             device="cpu", output_path=output, generate=generate, parse=parse, legacy_cases=original_cases)
+    assert not model.calls and output.read_bytes() == saved
 
 
 def test_deadline_and_stop_request_end_generation_as_incomplete(tmp_path, monkeypatch):

@@ -1,10 +1,13 @@
 """Answers generated in the job feed the shared replay evaluation; no serving resources."""
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from smithtune import cli, rendering
-from smithtune.artifacts import _json_dump, _load_json
+from smithtune.artifacts import _json_dump, _jsonl_dump, _load_json
+from smithtune.bindings import tool_contract
+from smithtune.inference_contract import json_sha256
 from smithtune.evaluation import replay as evaluation
 from smithtune.providers import sagemaker as aws
 from smithtune.providers.base import PipelineError
@@ -184,7 +187,8 @@ def test_collect_prefers_more_complete_answers_from_the_checkpoint_prefix(staged
     assert _load_json(staged.run / "result.json")["evaluation"]["status"] == "complete"
 
 
-def test_evaluation_only_job_resumes_the_run_checkpoint_prefix(staged, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_evaluation_only_job_resumes_the_run_checkpoint_prefix(staged, monkeypatch, legacy):
     output = staged.data / "model"
     worker.run(staged.run / "input", output, staged.data / "checkpoints", device="cpu")
     finish_job(staged, output)
@@ -204,6 +208,14 @@ def test_evaluation_only_job_resumes_the_run_checkpoint_prefix(staged, monkeypat
     checkpoints = staged.data / "resumed-checkpoints"
     (checkpoints / "evaluation").mkdir(parents=True)
     lines = (staged.data / "checkpoints/evaluation/predictions.jsonl").read_text().splitlines()
+    if legacy:
+        cases = {case["id"]: case for case in map(json.loads, (output / "evaluation/cases.jsonl").read_text().splitlines())}
+        records = [json.loads(line) for line in lines]
+        for record in records:
+            record["schema_version"] = 1
+            record["request_sha256"] = json_sha256({"messages": cases[record["case_id"]]["messages"],
+                                                    "variant": record["variant"], "max_new_tokens": 4})
+        lines = [json.dumps(record) for record in records]
     (checkpoints / "evaluation/predictions.jsonl").write_text("\n".join(lines[:3]) + "\n")
     result = worker.run_evaluation_only(job_dir / "input", staged.data / "model-eval", checkpoints, device="cpu")
     assert result["evaluation"] == {"status": "complete", "completed": 4, "total": 4}
@@ -216,14 +228,14 @@ def test_precomputed_sampler_serves_only_saved_answers(tmp_path):
     artifact = tmp_path / "artifact"
     (artifact / "evaluation").mkdir(parents=True)
     messages = [{"role": "user", "content": "hello"}]
+    _jsonl_dump(artifact / "evaluation/cases.jsonl", [{"id": "c1", "messages": messages, "tools": []}])
     records = [
-        {"schema_version": 1, "case_id": "c1", "variant": "tuned", "request_sha256": request_sha256(messages, "tuned", 8),
+        {"schema_version": 2, "case_id": "c1", "variant": "tuned", "request_sha256": request_sha256(messages, "tuned", 8),
          "candidate": {"role": "assistant", "content": "tuned answer", "sampling": {"format_valid": True}},
          "prompt_tokens": 3, "output_tokens": 2, "stop_reason": "stop"},
-        {"schema_version": 1, "case_id": "c1", "variant": "base", "request_sha256": request_sha256(messages, "base", 8),
+        {"schema_version": 2, "case_id": "c1", "variant": "base", "request_sha256": request_sha256(messages, "base", 8),
          "candidate": None, "skipped": "prompt plus output budget exceeds the model context", "prompt_tokens": 3},
     ]
-    import json
     (artifact / "evaluation/predictions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
     _json_dump(artifact / "evaluation/evaluation.json", {"schema_version": 1, "status": "complete", "completed": 2, "total": 2,
                                                          "settings": {"max_new_tokens": 8, "max_cases": 50, "max_points_per_trajectory": None}})
@@ -244,3 +256,64 @@ def test_precomputed_sampler_serves_only_saved_answers(tmp_path):
             sampler.generate(*arguments)
     with pytest.raises(PipelineError, match="JSON mode"):
         sampler.generate(model.base_model, messages, 8, True)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_precomputed_sampler_keeps_identical_messages_with_different_tools_separate(tmp_path, monkeypatch, legacy):
+    from tests.test_open_training_evaluation import Model, SPEC, _stop_sequences, fakes, renderer
+    from smithtune.training.evaluation import EvaluationSettings, generate_predictions, write_evaluation_summary
+
+    _stop_sequences(monkeypatch)
+    artifact = tmp_path / "artifact"
+    output = artifact / "evaluation"
+    output.mkdir(parents=True)
+    messages = [{"role": "user", "content": "lookup"}]
+    cases = [{"id": name, "messages": messages, "tools": [{"type": "function", "function": {
+        "name": name, "parameters": {"type": "object", "properties": {}}}}]} for name in ("search", "fetch")]
+    model = Model()
+    generate, _ = fakes(model)
+
+    def parse(_renderer, _spec, _tokens, _reason, *, tools):
+        return {"role": "assistant", "content": tools[0]["function"]["name"]}
+
+    settings = EvaluationSettings(max_new_tokens=4, max_cases=10)
+    status = generate_predictions(model, renderer(), SPEC, cases, settings, device="cpu",
+                                  output_path=output / "predictions.jsonl", generate=generate, parse=parse)
+    write_evaluation_summary(output / "evaluation.json", status, settings)
+    _jsonl_dump(output / "cases.jsonl", cases)
+    if legacy:
+        records = [json.loads(line) for line in (output / "predictions.jsonl").read_text().splitlines()]
+        for record in records:
+            record["schema_version"] = 1
+            record["request_sha256"] = json_sha256({"messages": messages, "variant": record["variant"], "max_new_tokens": 4})
+        _jsonl_dump(output / "predictions.jsonl", records)
+    spec = aws.MODEL_SPECS["qwen3p5-9b"]
+    sampler = PrecomputedSampler(spec, "sagemaker://run/adapter@epoch-2", artifact)
+    for case in cases:
+        for route in (spec.base_model, sampler.checkpoint):
+            answer = sampler.generate(route, messages, 4, request_contract=tool_contract(case["tools"]))
+            assert answer["content"] == case["id"]
+    with pytest.raises(PipelineError, match="no saved answer"):
+        sampler.generate(spec.base_model, messages, 4)
+
+
+@pytest.mark.parametrize("same_answer", [False, True])
+def test_precomputed_sampler_does_not_overwrite_conflicting_requests(tmp_path, same_answer):
+    artifact = tmp_path / "artifact"
+    output = artifact / "evaluation"
+    output.mkdir(parents=True)
+    messages = [{"role": "user", "content": "same request"}]
+    cases = [{"id": name, "messages": messages, "tools": []} for name in ("a", "b")]
+    _jsonl_dump(output / "cases.jsonl", cases)
+    _jsonl_dump(output / "predictions.jsonl", [
+        {"schema_version": 2, "case_id": case["id"], "variant": "base", "request_sha256": request_sha256(messages, "base", 8),
+         "candidate": {"role": "assistant", "content": "same" if same_answer else case["id"]}} for case in cases])
+    _json_dump(output / "evaluation.json", {"schema_version": 1, "status": "incomplete", "completed": 2, "total": 4,
+                                           "settings": {"max_new_tokens": 8, "max_cases": 50, "max_points_per_trajectory": None}})
+    model = aws.MODEL_SPECS["qwen3p5-9b"]
+    if same_answer:
+        sampler = PrecomputedSampler(model, "sagemaker://run/adapter@epoch-2", artifact)
+        assert sampler.generate(model.base_model, messages, 8)["content"] == "same"
+    else:
+        with pytest.raises(PipelineError, match="conflicting answers"):
+            PrecomputedSampler(model, "sagemaker://run/adapter@epoch-2", artifact)

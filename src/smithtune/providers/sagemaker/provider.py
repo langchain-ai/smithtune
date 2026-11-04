@@ -211,9 +211,9 @@ class SageMakerProvider:
             "warnings": [
                 *(["CPU training exercises the pipeline with the 0.8B test profile only; its timings and memory say nothing about GPU runs."]
                   if settings.device == "cpu" else []),
-                "Single GPU/process worker; additional GPUs in an instance are not used. Only a short Qwen3.5-9B LoRA smoke on L40S has passed; validate the required context and hardware.",
+                "Single-process worker; GPU jobs use one GPU. Validate the required model, context length and hardware.",
                 "Model context is a formatting ceiling, not a memory/throughput guarantee. No truncation is allowed.",
-                "No automatic endpoint, replay, Spot recovery or cross-job resume in this prototype.",
+                "No automatic endpoint, Spot recovery or cross-job training resume. With --evaluate, replay answers are generated in the job.",
                 "The worker downloads public model weights from Hugging Face; VPC jobs need outbound access or a compatible cache.",
             ],
         }
