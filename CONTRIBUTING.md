@@ -57,14 +57,14 @@ uv run --no-sync pytest
 uv run --no-sync ruff check
 ```
 
-For the optional Deep Agents judge runner:
+To check the council runner:
 
 ```bash
-sfw uv sync --locked --extra test --extra deepagents --python 3.12
+sfw uv sync --locked --extra test --python 3.12
 uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage_coordinator.py tests/test_triage.py
 ```
 
-Deep Agents, its OpenAI adapter, and Monty are pinned in the optional `deepagents` extra.
+Deep Agents, its OpenAI adapter, and Monty are pinned in the standard installation.
 Tests use the actual coordinator graph with a deterministic local model. They
 check skill loading, Python dispatch, bounded concurrency, one full-message
 request per judge, provider context rejection, and resume.
@@ -171,8 +171,9 @@ python scripts/check_dist.py
 This builds smithtune's wheel and source distribution, installs dependencies from
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
-The default wheel is tested first, then the optional Deep Agents extra. Both
-distributions must include the workflow skill as package data.
+The default wheel includes the council runner; the optional Baseten deployment
+extra is tested separately. Both distributions must include the workflow skill
+as package data.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves
@@ -195,7 +196,7 @@ approval if desired. Publishing permissions are limited to the upload job.
 Customers install the released version with:
 
 ```bash
-uv tool install --python 3.12 'smithtune[deepagents]'
+uv tool install --python 3.12 smithtune
 ```
 
 Use `uv tool upgrade smithtune` to upgrade; `smithtune --version` reads the

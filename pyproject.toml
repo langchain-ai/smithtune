@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smithtune"
 version = "0.1.8"
-description = "Fine-tune models on LangSmith trajectories with Fireworks or Baseten, then compare base and tuned models in LangSmith."
+description = "LangSmith Fine-Tuning CLI: train and evaluate models on agent trajectories with Fireworks or Baseten."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -34,6 +34,9 @@ dependencies = [
   "trl==1.13.0",
   "pillow>=13.0.0,<14",
   "datasets>=5.0.1,<6",
+  "deepagents==0.7.14",
+  "langchain-openai==1.6.2",
+  "pydantic-monty==0.0.23",
 ]
 
 [project.scripts]
@@ -47,7 +50,6 @@ Issues = "https://github.com/langchain-ai/smithtune/issues"
 [project.optional-dependencies]
 baseten-deploy = ["truss==0.18.30"]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
-deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]
 
 [tool.setuptools.package-data]
 smithtune = ["skills/*/*.md"]

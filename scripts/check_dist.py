@@ -42,7 +42,8 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     run(python, "-I", "-c", "import sys, smithtune, training; from pathlib import Path; "
         "assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (smithtune, training)); "
         "from training.recipes import sft_loop; import baseten.loops; "
-        "from fireworks.training.sdk import FireworksClient", cwd=work, env=env)
+        "from fireworks.training.sdk import FireworksClient; "
+        "from smithtune.triage_agent import check_installation; check_installation()", cwd=work, env=env)
     # Copy only test inputs and project metadata; never application source.
     shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
     for name in ("README.md", "pyproject.toml"):
@@ -52,10 +53,6 @@ def check(dist: Path, scratch: Path, *, full_tests: bool) -> None:
     run(python, "-I", "-c", "from importlib.resources import files; root = files('smithtune'); "
         "assert root.joinpath('skills/smithtune/SKILL.md').is_file()", cwd=work, env=env)
     if full_tests:
-        # Verify the opt-in runtime from the installed wheel, with real graphs
-        # and deterministic local models. The default install is tested first.
-        run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[deepagents]")
-        run(python, "-I", "-m", "pytest", "tests/test_triage_agent.py", "tests/test_triage_coordinator.py", "tests/test_triage.py", cwd=work, env=env)
         run("sfw", "uv", "pip", "install", "--python", python, str(wheel) + "[baseten-deploy]")
         run(python, "-I", "-m", "pytest", "tests/baseten/test_truss.py", "tests/baseten/test_deployment.py", "tests/baseten/test_deploy_cli.py", cwd=work, env=env)
         # Commit a clean source snapshot in a disposable repository. This tests

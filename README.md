@@ -1,6 +1,6 @@
 <h1 align="center">smithtune</h1>
 
-Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
+The **LangSmith Fine-Tuning CLI**. Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
 recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
 in LangSmith, then optionally deploy an endpoint for your application.
 
@@ -13,7 +13,7 @@ between releases. If you run into issues, please report them in the
 Install the CLI with [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-uv tool install --python 3.12 'smithtune[deepagents]'
+uv tool install --python 3.12 smithtune
 ```
 
 Install the smithtune skill so your coding agent (Claude Code, Codex, Cursor, and
@@ -53,8 +53,7 @@ prepare → plan → train --evaluate → deploy (optional)
 
 ## Setup
 
-The [quickstart](#quickstart) install includes the `deepagents` extra, used by the
-optional agent council that votes on which trajectories to keep. To update:
+The standard install includes the optional agent council for reviewing trajectories. To update:
 
 ```bash
 uv tool upgrade smithtune
@@ -211,7 +210,6 @@ Omit `--no-triage` from the first `pull`, then run `triage` before `push`. A
 council of models judges each whole trajectory against your rubric and keeps it
 on a strict majority. You need:
 
-- the `deepagents` extra (included in the install above);
 - keys for the judges: `BASETEN_API_KEY` for the default council (DeepSeek
   V4.1 Flash and GLM-5.3-Flash on Baseten), 'FIREWORKS_API_KEY' or pick others with `--judges`
   (see [judge options](https://github.com/langchain-ai/smithtune/blob/main/docs/datasets.md#review-training-examples-with-an-agent-council));
