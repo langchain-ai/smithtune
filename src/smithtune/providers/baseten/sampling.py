@@ -45,7 +45,11 @@ def _capacity(created: dict) -> str:
 
 
 def _control_path(resource: dict) -> str:
-    """The resource whose status proves the sampler stopped; receipts without capacity predate serverless."""
+    """Return the route whose status shows the sampler stopped.
+
+    A receipt without a capacity is dedicated, because it was written before Smithtune
+    supported serverless samplers.
+    """
     if resource.get("capacity") == SERVERLESS:
         return f"/v1/loops/samplers/{_resource_id(resource.get('id'))}"
     model_id = _resource_id(resource.get("model_id"))

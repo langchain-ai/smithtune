@@ -533,7 +533,7 @@ or sampling settings, pass a fresh `--output-dir` to both commands.
 
 Fireworks reuses the saved checkpoint and training mode; a promoted model ID
 alone cannot be sampled. Baseten replay uses two temporary samplers, on serverless
-or dedicated capacity as Baseten chooses, deactivated on exit; their
+or dedicated capacity as Baseten chooses, and deactivates them on exit. Their
 sampling and judge costs fall outside the training spend guard. See [sampler behavior](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#sampler-behavior)
 for capacity and cleanup details.
 

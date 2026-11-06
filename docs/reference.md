@@ -20,10 +20,11 @@ training stop before any paid work and repeat Baseten's own explanation and
 remediation instead of reporting the model as unavailable.
 
 Baseten chooses where Loops trainers and samplers run. Smithtune sends no
-placement scope, so Baseten's default applies, which can place them on serverless
-capacity when the workspace has serverless Loops for the model. Training prints
-whether Baseten reports serverless Loops for the model; `plan.json` records
-`capacity: baseten_default`, and `replay/sampler.json` records each sampler's capacity.
+placement scope, so Baseten's default applies. That default can place them on
+serverless capacity when the workspace has serverless Loops for the model.
+Training prints whether Baseten reports serverless Loops for the model.
+`plan.json` records `capacity: baseten_default`, and `replay/sampler.json`
+records each sampler's capacity, `serverless` or `dedicated`.
 
 ## Preparation defaults
 

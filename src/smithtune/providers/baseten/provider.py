@@ -97,7 +97,8 @@ MODEL_SPECS = {
 }
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]
 # Smithtune trains without a paired sampler, which Baseten calls the SFT use
-# case; its enabled sequence limits differ from the default RL use case.
+# case. Baseten enables different sequence limits for it than for the default
+# RL use case.
 BASETEN_CAPABILITIES_URL = "https://api.baseten.co/v1/loops/capabilities?use_case=sft"
 BASETEN_API_ROOT = "https://api.baseten.co/v1/loops"
 MAX_CAPABILITIES_RESPONSE_BYTES = 1024 * 1024
@@ -281,7 +282,7 @@ class BasetenModelCapability:
     # None on an API that does not send the enablement fields yet.
     enabled: bool | None = None
     enablement_details: BasetenEnablementDetails | None = None
-    # Baseten sends this only to workspaces with serverless Loops; None means
+    # Baseten sends this only to workspaces with serverless Loops, so None means
     # the workspace cannot use serverless capacity for any model.
     serverless: bool | None = None
 
@@ -423,7 +424,7 @@ def fetch_model_capability(
 
 
 def _placement_note(capability: BasetenModelCapability, lora_rank: int, max_seq_len: int) -> str:
-    """Say what decides the trainer's placement; the run response does not report it."""
+    """Say what decides the trainer's placement, because the run response does not report it."""
     model = capability.model_name
     if capability.serverless:
         return (
@@ -1228,8 +1229,8 @@ class BasetenProvider:
             result["session_id"] = session_id
             update_state(baseten_session_id=session_id)
             try:
-                # No scope: Baseten chooses placement, and the SDK sends an
-                # explicit scope only through an internal route.
+                # Send no scope, so Baseten chooses placement. The SDK sends an explicit
+                # scope only through a route that only Baseten's own workspaces can use.
                 trainer = service.create_lora_training_client(
                     base_model=model.base_model,
                     rank=settings.lora_rank,
