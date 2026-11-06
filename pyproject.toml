@@ -24,7 +24,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@09bbe1170c804eb5e5d7e7286f0feeef4e26055a#subdirectory=training",
   "fireworks-ai[training]==1.2.11",
-  "baseten-loops==0.21.0",
+  "baseten-loops==0.33.0",
   "jsonschema==4.26.0",
   "langsmith==0.12.4",
   "referencing==0.37.0",

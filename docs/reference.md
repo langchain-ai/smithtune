@@ -19,6 +19,13 @@ up to a shorter sequence length. When Baseten reports either, preparation and
 training stop before any paid work and repeat Baseten's own explanation and
 remediation instead of reporting the model as unavailable.
 
+Baseten chooses where Loops trainers and samplers run. Smithtune sends no
+placement scope, so Baseten's default applies. That default can place them on
+serverless capacity when the workspace has serverless Loops for the model.
+Training prints whether Baseten reports serverless Loops for the model.
+`plan.json` records `capacity: baseten_default`, and `replay/sampler.json`
+records each sampler's capacity, `serverless` or `dedicated`.
+
 ## Preparation defaults
 
 - One complete trajectory per dataset example
@@ -120,6 +127,7 @@ Training artifacts also include `plan.json`, `run-state.json`, `epochs.json`, an
 `validations.json` (each completed validation and its checkpoint) in that directory.
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
+It multiplies elapsed active time by the rate you pass, whichever capacity Baseten chose.
 
 ### Remote controller recovery
 
@@ -272,7 +280,7 @@ training mode:
 | --- | --- |
 | Fireworks serverless (default) | Shared serverless sampling for base and tuned models |
 | Fireworks dedicated | Two temporary dedicated deployments, for base and tuned models |
-| Baseten Loops | Two temporary dedicated samplers, after training resources shut down |
+| Baseten Loops | Two temporary samplers, after training resources shut down, on serverless or dedicated capacity as Baseten chooses |
 
 Fireworks requests deletion of owned dedicated resources on exit; Baseten
 deactivates its samplers. Dedicated capacity is billed for allocated time; judge
@@ -371,8 +379,8 @@ are reused; saved generations can be judged without sampling again. A fully
 completed evaluation makes no model calls. Training checkpoints survive replay
 failures. Use a new training run directory only when training again.
 
-If the process was killed or Baseten cleanup failed, use the deployment IDs and
-cleanup instructions in `sampler.json` to stop paid capacity before resuming.
+If the process was killed or Baseten cleanup failed, use the sampler IDs and
+cleanup commands in `sampler.json` to stop paid capacity before resuming.
 
 | Artifact | Contents |
 | --- | --- |
