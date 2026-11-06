@@ -535,8 +535,21 @@ bundled (source-only, needs the CUDA compiler); its layer uses PyTorch's
 convolution. The worker's `runtime` log event reports which kernels loaded, and
 each epoch record includes `train_seconds` and `validation_seconds`. The
 Dockerfile still sets `TORCH_DISABLE_NATIVE_JIT=1` so PyTorch 2.14's eager Triton
-overrides stay off; an early run without a compiler failed in that path. Measure
-the kernels' speed and memory effect before relying on it.
+overrides stay off; an early run without a compiler failed in that path.
+
+Measured on 2026-11-06 with the same data and settings as the earlier PyTorch-path runs
+(one epoch, attention LoRA rank 8, TRL chunked loss, gradient checkpointing):
+
+| Longest example | GPU | Training time (before → after) | Peak memory (before → after) |
+|---|---|---|---|
+| 4,848 tokens | RTX PRO 4500 (32 GB) | 265 s → 170 s | 22.05 → 20.08 GiB |
+| 18,751 tokens | L40S (48 GB) | 650 s → 174 s | 34.62 → 27.04 GiB |
+
+Losses matched step for step within bf16 noise. The first optimizer step of each job
+includes roughly 80 seconds of Triton compilation; later steps were about 3× faster
+at 4.8K tokens and about 10× faster at 18.8K. The two points fit
+17.65 GiB + 0.50 GiB per 1K tokens (previously 0.91); lengths beyond 18.8K are
+extrapolated until measured.
 Inspect the image before pushing to the customer's approved ECR repository,
 then use its immutable digest
 in the job config. No image is automatically built or pushed by SmithTune.
