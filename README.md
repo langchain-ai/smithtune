@@ -1,7 +1,7 @@
 <h1 align="center">smithtune</h1>
 
-The **LangSmith Fine-Tuning CLI**. Fine-tune models on [trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
-recorded in LangSmith. Train with Fireworks or Baseten, compare the base and tuned models
+The **LangSmith Fine-Tuning CLI**. Fine-tune models using [agent trajectories](https://docs.langchain.com/langsmith/observability-concepts#trajectories)
+recorded in LangSmith. Prepare training data, train models, compare the base and tuned models
 in LangSmith, then optionally deploy an endpoint for your application.
 
 smithtune is an early beta project; commands and saved-directory formats may change

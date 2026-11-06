@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smithtune"
-version = "0.1.8"
-description = "LangSmith Fine-Tuning CLI: train and evaluate models on agent trajectories with Fireworks or Baseten."
+version = "0.1.9"
+description = "LangSmith Fine-Tuning CLI: fine-tune models using agent trajectories recorded in LangSmith."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
