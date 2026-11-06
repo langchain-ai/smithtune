@@ -160,7 +160,9 @@ non-yanked patch release unless compatibility checks establish a newer version.
 To update the cookbook, change its version in `pyproject.toml`, inspect the upstream
 diff, run `sfw uv lock`, and run the distribution checks below. Retain the renderer
 reference unless a reviewed upstream behavior change requires updating it. Security
-minimums for Pillow and Datasets are declared in smithtune's dependencies.
+minimums for Pillow, Datasets, LangGraph, LangGraph SDK, OpenTelemetry API, and
+Setuptools are declared in smithtune's dependencies and apply to fresh installs.
+The build backend uses the same patched Setuptools minimum.
 
 ## Distribution checks
 

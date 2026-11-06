@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77,<83"]
+requires = ["setuptools>=84.1,<85"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -37,6 +37,10 @@ dependencies = [
   "deepagents==0.7.14",
   "langchain-openai==1.6.2",
   "pydantic-monty==0.0.23",
+  "langgraph>=1.2.14,<2",
+  "langgraph-sdk>=0.4.6,<0.5",
+  "opentelemetry-api>=1.45.1,<2",
+  "setuptools>=84.1,<85",
 ]
 
 [project.scripts]

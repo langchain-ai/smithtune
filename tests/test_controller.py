@@ -58,6 +58,7 @@ class Provider:
         (run_dir / "epochs.json").write_text('[{"epoch": 1, "resume_checkpoint": "saved-checkpoint"}]')
         print("local trainer ready", flush=True)
         try:
+            (run_dir / "ready").touch()
             while not (run_dir / "release").exists():
                 time.sleep(.02)
             if os.environ.get("FAKE_TRAIN_FAILURE"):
@@ -84,7 +85,7 @@ cli.get_provider = lambda name: Provider(name)
         assert launched.returncode == 0, launched.stderr
         receipt = json.loads(launched.stdout)
         runs.append((run, receipt))
-        wait_for(lambda: (run / "invocation.json").exists())
+        wait_for(lambda: (run / "ready").exists())
         return run, receipt
 
     yield start
