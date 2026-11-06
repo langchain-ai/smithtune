@@ -1,4 +1,4 @@
-"""Optional Deep Agents runner for the triage council coordinator."""
+"""Deep Agents runner for the optional triage council."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def check_installation() -> None:
         import langchain_openai  # noqa: F401
         import pydantic_monty  # noqa: F401
     except ImportError:
-        raise PipelineError("Deep Agents support is optional; install smithtune with the [deepagents] extra") from None
+        raise PipelineError("Council dependencies are missing; reinstall smithtune, then run smithtune doctor") from None
 
 
 def _model(judge: dict, max_tokens: int):

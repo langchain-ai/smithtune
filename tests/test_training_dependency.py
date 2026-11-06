@@ -2,10 +2,9 @@
 
 from tests.binding_fixtures import bound_row
 
-from importlib import metadata, resources
+from importlib import metadata
 import json
 from pathlib import Path
-import tomllib
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -38,24 +37,6 @@ TOOLS = [{"type": "function", "function": {
     "name": "weather", "description": "Look up weather.",
     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
 }}]
-OVERRIDDEN_REQUIREMENTS = {
-    ("fireworks-training-cookbook", "transformers"),
-    ("tinker-cookbook", "transformers"),
-}
-
-
-def configured_transformers_override() -> Requirement:
-    project = Path(__file__).resolve().parents[1]
-    override_lines = [line.strip() for line in (project / "overrides.txt").read_text().splitlines()
-                      if line.strip() and not line.lstrip().startswith("#")]
-    assert len(override_lines) == 1
-    override = Requirement(override_lines[0])
-    settings = tomllib.loads((project / "pyproject.toml").read_text())
-    assert settings["tool"]["uv"]["override-dependencies"] == override_lines
-    direct = next(Requirement(value) for value in settings["project"]["dependencies"]
-                  if canonicalize_name(Requirement(value).name) == "transformers")
-    assert direct.specifier == override.specifier
-    return override
 
 
 def renderer_snapshot():
@@ -100,15 +81,27 @@ def test_real_renderer_context_boundaries(monkeypatch):
     assert validate_replay_context([case], replace(model, max_seq_len=prompt_limit - 1), 32)[0] == []
 
 
-def test_cookbook_is_installed_from_the_declared_upstream_commit():
-    requirement = next(value for value in metadata.requires("smithtune") if value.startswith("fireworks-training-cookbook"))
-    revision = requirement.rsplit("@", 1)[1].split("#", 1)[0]
-    distribution = metadata.distribution("fireworks-training-cookbook")
-    source = json.loads(distribution.read_text("direct_url.json"))
-    assert source["url"].removesuffix(".git") == "https://github.com/fw-ai/cookbook"
-    assert source["vcs_info"]["commit_id"] == revision
-    assert source["subdirectory"] == "training"
-    assert "Apache" in resources.files("training").joinpath("_vendor/tinker_cookbook_0_4_3/LICENSE").read_text()
+def test_cookbook_is_installed_from_the_declared_pypi_version():
+    requirements = [Requirement(value) for value in metadata.requires("smithtune")]
+    assert all(requirement.url is None for requirement in requirements)
+    cookbook = next(r for r in requirements if canonicalize_name(r.name) == "fireworks-training-cookbook")
+    assert str(cookbook.specifier) == "==2026.11.5.2"
+    assert cookbook.specifier.contains(metadata.version(cookbook.name))
+
+
+def test_rendering_identity_tracks_installed_cookbook_version(monkeypatch):
+    from dataclasses import replace
+    from smithtune.providers.fireworks.provider import DEFAULT_MODEL
+    from smithtune.rendering import load_training_renderer, rendering_version
+    from smithtune.providers.base import PipelineError
+
+    identity = rendering_version(DEFAULT_MODEL)
+    assert f"fireworks-cookbook=={metadata.version('fireworks-training-cookbook')}" in identity
+    saved = replace(DEFAULT_MODEL, rendering_version=identity)
+    original_version = metadata.version
+    monkeypatch.setattr(metadata, "version", lambda name: "2026.11.5.3" if name == "fireworks-training-cookbook" else original_version(name))
+    with pytest.raises(PipelineError, match="rendering implementation differs from preparation"):
+        load_training_renderer(saved)
 
 
 def test_upstream_training_dependencies_are_importable():
@@ -121,10 +114,6 @@ def test_upstream_training_dependencies_are_importable():
     assert FireworksClient is not None
     assert baseten.loops is not None
     assert callable(get_training_chat_template)
-    assert metadata.version("fireworks-training-cookbook") == "0.1.0"
-    assert metadata.version("tinker-cookbook") == "0.4.3"
-    override = configured_transformers_override()
-    assert override.specifier.contains(metadata.version("transformers"), prereleases=True)
     assert metadata.version("transformers") == "5.10.4"
     assert metadata.version("trl") == "1.13.0"
 
@@ -144,24 +133,15 @@ def test_transformers_rejects_chat_template_path_traversal(tmp_path):
     assert not (tmp_path / "escaped.jinja").exists()
 
 
-def test_installed_dependencies_are_compatible_except_for_recorded_overrides():
-    override = configured_transformers_override()
+def test_installed_dependencies_are_compatible():
     conflicts = []
-    overridden = set()
     for distribution in metadata.distributions():
         owner = canonicalize_name(distribution.metadata["Name"])
         for text in distribution.requires or []:
             requirement = Requirement(text)
             if requirement.marker and not requirement.marker.evaluate():
                 continue
-            name = canonicalize_name(requirement.name)
-            installed = metadata.version(name)
-            if requirement.specifier.contains(installed, prereleases=True):
-                continue
-            pair = (owner, name)
-            if pair in OVERRIDDEN_REQUIREMENTS and override.specifier.contains(installed, prereleases=True):
-                overridden.add(pair)
-                continue
-            conflicts.append(f"{owner} requires {requirement}; installed {installed}")
+            installed = metadata.version(requirement.name)
+            if not requirement.specifier.contains(installed, prereleases=True):
+                conflicts.append(f"{owner} requires {requirement}; installed {installed}")
     assert not conflicts, "\n".join(conflicts)
-    assert overridden == OVERRIDDEN_REQUIREMENTS

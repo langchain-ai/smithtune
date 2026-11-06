@@ -1567,7 +1567,7 @@ def _resolve_loops_types() -> Any:
         import baseten.loops
     except ImportError as exc:
         raise BasetenDataError(
-            "Baseten Loops is unavailable; reinstall using the GitHub installation command in the README, then run smithtune doctor"
+            "Baseten Loops is unavailable; reinstall using the installation command in the README, then run smithtune doctor"
         ) from exc
     return baseten.loops
 

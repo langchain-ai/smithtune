@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=77,<83"]
+requires = ["setuptools>=84.1,<85"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "smithtune"
-version = "0.1.7"
-description = "Fine-tune models on LangSmith trajectories with Fireworks or Baseten, then compare base and tuned models in LangSmith."
+version = "0.1.8"
+description = "LangSmith Fine-Tuning CLI: train and evaluate models on agent trajectories with Fireworks or Baseten."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -22,8 +22,8 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@09bbe1170c804eb5e5d7e7286f0feeef4e26055a#subdirectory=training",
-  "fireworks-ai[training]==1.2.11",
+  "fireworks-training-cookbook==2026.11.5.2",
+  "fireworks-ai[training]==1.2.30",
   "baseten-loops==0.21.0",
   "jsonschema==4.26.0",
   "langsmith==0.12.4",
@@ -34,6 +34,13 @@ dependencies = [
   "trl==1.13.0",
   "pillow>=13.0.0,<14",
   "datasets>=5.0.1,<6",
+  "deepagents==0.7.14",
+  "langchain-openai==1.6.2",
+  "pydantic-monty==0.0.23",
+  "langgraph>=1.2.14,<2",
+  "langgraph-sdk>=0.4.6,<0.5",
+  "opentelemetry-api>=1.45.1,<2",
+  "setuptools>=84.1,<85",
 ]
 
 [project.scripts]
@@ -47,13 +54,6 @@ Issues = "https://github.com/langchain-ai/smithtune/issues"
 [project.optional-dependencies]
 baseten-deploy = ["truss==0.18.30"]
 test = ["pytest==9.1.1", "ruff==0.14.0"]
-deepagents = ["deepagents==0.7.14", "langchain-openai==1.6.2", "pydantic-monty==0.0.23"]
-
-[tool.uv]
-# The upstream cookbook metadata still pins a Transformers release affected by
-# CVE-2026-9856. Tool installs do not inherit this project setting, so customers
-# must also pass the matching overrides.txt file documented in README.md.
-override-dependencies = ["transformers==5.10.4"]
 
 [tool.setuptools.package-data]
 smithtune = ["skills/*/*.md"]
