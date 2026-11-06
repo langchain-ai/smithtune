@@ -527,13 +527,16 @@ After pushing, verify ECR's `imageManifestMediaType` is
 `application/vnd.docker.distribution.manifest.v2+json` and use the published digest.
 
 The locked PyTorch wheel supplies CUDA user-space libraries; the L40S
-SageMaker host passed the GPU smoke. The Dockerfile sets
-`TORCH_DISABLE_NATIVE_JIT=1` before Python starts: PyTorch 2.14's eager Triton
-overrides otherwise require a C compiler absent from this slim image. An initial
-GPU run failed in that path; disabling the override allowed training to finish
-with the same data and training objective. This is not a performance comparison.
-Optional fast linear-attention/causal-convolution kernels are not bundled; the initial Qwen
-worker uses the PyTorch fallback, whose GPU throughput must be benchmarked.
+SageMaker host passed the GPU smoke. The `aws-training` extra pins
+`flash-linear-attention`, whose Triton kernels replace the PyTorch fallback for
+Qwen3.5's linear-attention layers on CUDA; the image installs `gcc` and libc
+headers because Triton builds its launchers at runtime. `causal-conv1d` is not
+bundled (source-only, needs the CUDA compiler); its layer uses PyTorch's
+convolution. The worker's `runtime` log event reports which kernels loaded, and
+each epoch record includes `train_seconds` and `validation_seconds`. The
+Dockerfile still sets `TORCH_DISABLE_NATIVE_JIT=1` so PyTorch 2.14's eager Triton
+overrides stay off; an early run without a compiler failed in that path. Measure
+the kernels' speed and memory effect before relying on it.
 Inspect the image before pushing to the customer's approved ECR repository,
 then use its immutable digest
 in the job config. No image is automatically built or pushed by SmithTune.

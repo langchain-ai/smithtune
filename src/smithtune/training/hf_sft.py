@@ -69,6 +69,14 @@ def gpu_diagnostics() -> dict:
 
         result = {"torch": torch.__version__, "cuda_runtime": torch.version.cuda,
                   "cuda_available": torch.cuda.is_available()}
+        try:
+            # Qwen3.5 linear-attention layers use these kernels when present; otherwise the slower torch path.
+            from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
+
+            result.update(flash_linear_attention=is_flash_linear_attention_available(),
+                          causal_conv1d=is_causal_conv1d_available())
+        except Exception as exc:
+            result["kernel_inspection_error_type"] = type(exc).__name__
         if result["cuda_available"]:
             properties = torch.cuda.get_device_properties(0)
             result.update(gpu_name=properties.name, gpu_total_bytes=properties.total_memory,

@@ -504,6 +504,15 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/77/850bef8d72ffb9219f0b1aac23fbc1bf7d038ee6ea666f331fa273031aa2/einops-0.8.2.tar.gz", hash = "sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827", size = 56261, upload-time = "2026-01-26T04:13:17.638Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl", hash = "sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193", size = 65638, upload-time = "2026-01-26T04:13:18.546Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "4.2.9"
 source = { registry = "https://pypi.org/simple" }
@@ -592,6 +601,31 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/12/84/7fd31db9f0bbf6c798660404df578a2c2c3b33053e4dfbe82457dd8e5636/fireworks_training_cookbook-2026.11.5.2.tar.gz", hash = "sha256:27643a0b24ade65b47ae6071e8fc454c2a8daea315205b645d7f6842f179e1ea", size = 4267836, upload-time = "2026-11-05T19:43:32.648Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/86/91/e6874fe849a00d499ff260b10370d3fce84649bbb20d5a564549ddfcc9f4/fireworks_training_cookbook-2026.11.5.2-py3-none-any.whl", hash = "sha256:ecdca62bac42d4e1ce2aa2dab313341cef61249049deb8f3e6a98f43b3754af5", size = 4653829, upload-time = "2026-11-05T19:43:30.871Z" },
+]
+
+[[package]]
+name = "fla-core"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/49/2d/3181d715d021c12db379ce0bc51ba78c5b6282ff6c3c79cc2f64d183d1b2/fla_core-0.6.0.tar.gz", hash = "sha256:cdd5b7ff6d5c0e5c08fde73f2624d76e0b506f8684af4e316bc7f2d8bfd9a623", size = 775665, upload-time = "2026-10-23T17:48:03.213Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/08/a1a16725117cddded90bb11afed4b31f23d97f7f554775e66af998818ef9/fla_core-0.6.0-py3-none-any.whl", hash = "sha256:b0708b70e0b119cd58a0a5146ea56cb175cef6ed969d8ac60267e3e077ce3ebd", size = 1085221, upload-time = "2026-10-23T17:48:00.23Z" },
+]
+
+[[package]]
+name = "flash-linear-attention"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fla-core" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/2f/6e07920d032e97fcc1a09d7578a7aa595b7dece535280bd712bb7077a3fa/flash_linear_attention-0.6.0.tar.gz", hash = "sha256:4110ff0f94ca54b76fc5499f0c169f5cbd44738d875e0199adc3a11ab0e241fa", size = 222155, upload-time = "2026-10-23T17:48:04.341Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/c1/ad271e49528b06c7032c35e6dca85592f96ef8390e6ce1b803d6b23eae0a/flash_linear_attention-0.6.0-py3-none-any.whl", hash = "sha256:6dec9735f8454523c13553622e98aff30152dde6586b4ac7d88010fbb7a06b5f", size = 403549, upload-time = "2026-10-23T17:48:01.882Z" },
 ]
 
 [[package]]
@@ -2603,6 +2637,7 @@ aws = [
     { name = "boto3" },
 ]
 aws-training = [
+    { name = "flash-linear-attention" },
     { name = "peft" },
     { name = "torch" },
 ]
@@ -2627,6 +2662,7 @@ requires-dist = [
     { name = "deepagents", specifier = "==0.7.14" },
     { name = "fireworks-ai", extras = ["training"], specifier = "==1.2.30" },
     { name = "fireworks-training-cookbook", specifier = "==2026.11.5.2" },
+    { name = "flash-linear-attention", marker = "extra == 'aws-training'", specifier = "==0.6.0" },
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "langchain-aws", marker = "extra == 'bedrock'", specifier = "==1.9.1" },
     { name = "langchain-openai", specifier = "==1.6.2" },

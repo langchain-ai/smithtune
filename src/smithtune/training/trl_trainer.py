@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import deque
 import math
 import random
+import time
 
 from smithtune.providers.base import PipelineError
 
@@ -74,6 +75,11 @@ def train(model, train_rows, validation_rows, settings, *, tokenizer, output_dir
     history = []
 
     class EpochCallback(TrainerCallback):
+        epoch_started = 0.0
+
+        def on_epoch_begin(self, args, state, control, **kwargs):
+            self.epoch_started = time.monotonic()
+
         def on_log(self, args, state, control, logs=None, **kwargs):
             nonlocal train_sum, train_targets
             if logs and "loss" in logs and group_tokens:
@@ -87,6 +93,9 @@ def train(model, train_rows, validation_rows, settings, *, tokenizer, output_dir
         def on_epoch_end(self, args, state, control, **kwargs):
             nonlocal best_loss, patience_loss, best_epoch, stale_epochs, train_sum, train_targets
             epoch = len(history) + 1
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            validation_started = time.monotonic()
             model.eval()
             val_sum = val_count = 0
             with torch.no_grad():
@@ -106,7 +115,10 @@ def train(model, train_rows, validation_rows, settings, *, tokenizer, output_dir
                 raise PipelineError("non-finite TRL adapter weights")
             record = {"epoch": epoch, "train_loss": train_sum / max(train_targets, 1), "validation_loss": validation_loss,
                       "optimizer_steps": state.global_step, "new_best": improved,
-                      "train_target_tokens": int(train_targets), "validation_target_tokens": val_count}
+                      "train_target_tokens": int(train_targets), "validation_target_tokens": val_count,
+                      # Wall-clock timings for kernel and hardware comparisons; not part of the objective.
+                      "train_seconds": round(validation_started - self.epoch_started, 3),
+                      "validation_seconds": round(time.monotonic() - validation_started, 3)}
             history.append(record)
             snapshot = {"schema_version": 1, "completed_epoch": epoch, "optimizer_steps": state.global_step,
                         "best_epoch": best_epoch, "best_validation_loss": best_loss,
