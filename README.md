@@ -13,9 +13,7 @@ between releases. If you run into issues, please report them in the
 Install the CLI with [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.7/overrides.txt \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.7'
+uv tool install --python 3.12 'smithtune[deepagents]'
 ```
 
 Install the smithtune skill so your coding agent (Claude Code, Codex, Cursor, and
@@ -56,9 +54,11 @@ prepare → plan → train --evaluate → deploy (optional)
 ## Setup
 
 The [quickstart](#quickstart) install includes the `deepagents` extra, used by the
-optional agent council that votes on which trajectories to keep. The overrides file
-selects a newer Hugging Face Transformers release; when installing another tag, use
-the same tag in both URLs. To update, rerun the install with the new tag and `--force`.
+optional agent council that votes on which trajectories to keep. To update:
+
+```bash
+uv tool upgrade smithtune
+```
 
 Install the [LangSmith CLI](https://github.com/langchain-ai/langsmith-cli) for reading traces and datasets:
 

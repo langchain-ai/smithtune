@@ -230,6 +230,8 @@ def _session_checkpoint_rows(job_id: str):
 
 def _promotable_checkpoint(rows, checkpoint_name, *, run_id=None):
     expected = (f"{run_id}-{checkpoint_name}", f"{run_id}:{checkpoint_name}") if run_id else (checkpoint_name,)
+    # Full-parameter exports use a separate BASE name from hotload deltas.
+    expected = (*expected, *(f"{name}-base" for name in expected))
     matching = [row for row in rows if isinstance(row.get("name"), str) and row.get("promotable")
                 and re.sub(r"-[0-9a-f]{8}$", "", row["name"].rsplit("/", 1)[-1]) in expected]
     if not matching:

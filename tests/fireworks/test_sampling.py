@@ -137,6 +137,7 @@ def test_glm_sampler_keeps_reasoning_separate_from_visible_answer_and_tools(tmp_
     tokenizer = _tokenizer()
     tokenizer.add_special_tokens({"additional_special_tokens": [
         "[gMASK]", "[sop]", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+        "<|image|>", "<|begin_of_image|>", "<|end_of_image|>",
     ]})
     renderer = get_renderer(model.renderer, tokenizer)
     monkeypatch.setattr(sampling, "load_training_renderer", lambda _: renderer)

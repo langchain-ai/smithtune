@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import replace
 from importlib import metadata
@@ -30,12 +29,8 @@ def rendering_version(model: ModelSpec) -> str:
                 else f"{HF_RENDERING_VERSION};trl={metadata.version('trl')}"
             )
         else:
-            distribution = metadata.distribution("fireworks-training-cookbook")
-            source = json.loads(distribution.read_text("direct_url.json") or "{}")
-            commit = source.get("vcs_info", {}).get("commit_id")
-            if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
-                raise PipelineError("the Fireworks cookbook installation has no pinned source revision")
-            implementation = f"smithtune-target-v2;fireworks-cookbook@{commit}"
+            cookbook_version = metadata.version("fireworks-training-cookbook")
+            implementation = f"smithtune-target-v2;fireworks-cookbook=={cookbook_version}"
             if model.reasoning_effort is not None:
                 implementation += f";reasoning_effort={model.reasoning_effort}"
     except metadata.PackageNotFoundError as exc:
@@ -194,7 +189,7 @@ def resolved_renderer_name(model: ModelSpec) -> str:
     try:
         from training.utils.supervised import resolve_renderer_plan
     except ImportError as exc:
-        raise PipelineError("training dependencies are missing; reinstall using the GitHub installation command in the README, then run smithtune doctor") from exc
+        raise PipelineError("training dependencies are missing; reinstall using the installation command in the README, then run smithtune doctor") from exc
     try:
         return resolve_renderer_plan(
             model.tokenizer_model,

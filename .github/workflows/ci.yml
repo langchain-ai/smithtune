@@ -40,5 +40,4 @@ jobs:
           name: distributions
           path: |
             dist/smithtune-*
-            overrides.txt
           if-no-files-found: error
