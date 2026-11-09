@@ -228,10 +228,10 @@ colon, while evaluation's `--judge-model` uses a slash (`baseten/<model-id>`).
 
 ### Bedrock council models
 
-Install the optional `bedrock` extra alongside `deepagents`. For a source checkout:
+The council dependencies ship with the standard install; add the optional `bedrock` extra for Bedrock models. For a source checkout:
 
 ```bash
-sfw uv sync --locked --extra deepagents --extra bedrock --python 3.12
+sfw uv sync --locked --extra bedrock --python 3.12
 ```
 
 Bedrock uses the AWS SDK credential chain, just like the AWS CLI. It can use

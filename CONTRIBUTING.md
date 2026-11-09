@@ -110,7 +110,7 @@ test uses paid inference or creates a live deployment.
 For optional Bedrock council support:
 
 ```bash
-sfw uv sync --locked --extra test --extra deepagents --extra bedrock --python 3.12
+sfw uv sync --locked --extra test --extra bedrock --python 3.12
 uv run --no-sync pytest tests/test_bedrock.py tests/test_triage.py tests/test_triage_agent.py tests/test_triage_coordinator.py
 ```
 

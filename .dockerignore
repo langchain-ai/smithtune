@@ -2,7 +2,6 @@
 **
 !pyproject.toml
 !uv.lock
-!overrides.txt
 !README.md
 !src/
 !src/**

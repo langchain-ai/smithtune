@@ -18,7 +18,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
 
 WORKDIR /opt/smithtune
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
-COPY pyproject.toml uv.lock overrides.txt README.md ./
+COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv sfw uv sync --locked --no-dev --no-install-project --extra aws-training --python /usr/local/bin/python
 COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.cache/uv sfw uv sync --locked --no-dev --no-editable --extra aws-training --python /usr/local/bin/python
