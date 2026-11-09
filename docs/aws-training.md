@@ -547,9 +547,13 @@ Measured on 2026-11-06 with the same data and settings as the earlier PyTorch-pa
 
 Losses matched step for step within bf16 noise. The first optimizer step of each job
 includes roughly 80 seconds of Triton compilation; later steps were about 3× faster
-at 4.8K tokens and about 10× faster at 18.8K. The two points fit
-17.65 GiB + 0.50 GiB per 1K tokens (previously 0.91); lengths beyond 18.8K are
-extrapolated until measured.
+at 4.8K tokens and about 10× faster at 18.8K. Two longer synthetic probes on
+the same image then measured 37.46 GiB at 39,469 tokens (L40S) and 65.23 GiB at
+94,439 tokens (`ml.g7e.2xlarge`, RTX PRO 6000 Blackwell, 96 GB). All four points fit
+17.60 GiB + 0.504 GiB per 1K tokens within 0.05 GiB (previously 0.91 GiB per 1K
+without the kernels). At that rate the 131,072-token limit needs about 84 GiB, so
+a 96 GB card holds it on one GPU. In `us-west-2`, `ml.p5.4xlarge` (one H100) training
+requires a flexible training plan; on-demand submission is rejected.
 Inspect the image before pushing to the customer's approved ECR repository,
 then use its immutable digest
 in the job config. No image is automatically built or pushed by SmithTune.
