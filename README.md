@@ -294,7 +294,8 @@ The CLI selects the saved model checkpoint with the lowest validation loss and
 compares it with the base model on held-out test data. Evaluation uses provider
 sampling clients to generate responses; [serving capacity, costs, and cleanup
 depend on the training mode](docs/reference.md#sampler-behavior). Fireworks supports
-serverless and dedicated LoRA training; Baseten uses temporary dedicated samplers.
+serverless and dedicated LoRA training. Baseten evaluates on temporary samplers and chooses
+whether they run on serverless or dedicated capacity.
 You do not need to run `deploy` for this step.
 Omit `--evaluate` and its replay options to train only.
 

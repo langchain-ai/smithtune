@@ -9,11 +9,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import urllib.error
+import urllib.parse
 
 import pytest
 
 from smithtune import dataset
-from smithtune.providers.baseten import provider as baseten
+from smithtune.providers.baseten import CAPACITY, provider as baseten
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, ModelSpec, PipelineError, TrainingOptions
 
 
@@ -187,7 +188,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
         "early_stopping_min_delta": 0.0,
         "seed": 42,
         "replicas": 1,
-        "capacity": "dedicated",
+        "capacity": CAPACITY,
         "with_sampler": False,
     }
 
@@ -549,11 +550,37 @@ def test_capability_preflight_accepts_a_response_without_the_enablement_fields()
         ({"enabled": False, "enablement_details": "needs_approval"}, "invalid model enablement details"),
         ({"enabled": False, "enablement_details": {"reason": 7}}, "invalid model enablement details"),
         ({"enabled": False, "enablement_details": {"remediation": " "}}, "invalid model enablement details"),
+        ({"serverless": "true"}, "invalid serverless flag"),
+        ({"serverless": 1}, "invalid serverless flag"),
     ],
 )
 def test_malformed_enablement_fields_are_rejected(overrides: dict, message: str):
     with pytest.raises(baseten.BasetenRuntimeError, match=message):
         _fetch_capability(_capability_response(**overrides))
+
+
+@pytest.mark.parametrize(("overrides", "expected"), [
+    ({"serverless": True}, True),
+    ({"serverless": False}, False),
+    # Baseten omits the flag for workspaces without serverless Loops.
+    ({}, None),
+])
+def test_capability_preflight_asks_about_trainer_only_runs_and_keeps_the_serverless_flag(
+    overrides: dict, expected: bool | None,
+):
+    requests = []
+
+    def opener(request, timeout):
+        requests.append(request)
+        return io.BytesIO(json.dumps(_capability_response(**overrides)).encode())
+
+    capability = baseten.fetch_model_capability(
+        "Qwen/Qwen3.8-27B", 131_072, api_key="fake-key", opener=opener,
+    )
+
+    assert capability.serverless is expected
+    assert len(requests) == 1
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[0].full_url).query) == {"use_case": ["sft"]}
 
 
 def test_capability_read_retries_a_transient_response_with_bounded_backoff():
@@ -954,6 +981,31 @@ def test_train_runs_forward_only_validation_selects_the_best_checkpoint_and_clea
     assert all(item["epoch_end"] for item in validations)
     assert json.loads((run_dir / "result.json").read_text()) == result
 
+
+
+@pytest.mark.parametrize(("serverless", "note"), [
+    (True, "for LoRA rank 8 at 131,072 tokens, and may use serverless capacity"),
+    (False, "does not offer serverless Loops for Qwen/Qwen3.8-27B"),
+    (None, "does not offer serverless Loops for Qwen/Qwen3.8-27B"),
+])
+def test_train_explains_placement_and_leaves_the_scope_to_baseten(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], serverless: bool | None, note: str,
+):
+    _write_prepared_dataset(tmp_path)
+    service = FakeService(FakeTrainer())
+    provider = _provider(
+        service, FakeManagement(inactive=[True]),
+        capability_resolver=lambda model, length: baseten.BasetenModelCapability(
+            model, length, serverless=serverless,
+        ),
+    )
+
+    result = _train(provider, tmp_path)
+
+    assert note in capsys.readouterr().err
+    assert result["capability"]["serverless"] is serverless
+    assert result["configuration"]["capacity"] == CAPACITY
+    assert "scope" not in service.create_calls[0]
 
 
 def test_plan_estimates_steps_from_all_assistant_targets_without_rendering(tmp_path: Path):

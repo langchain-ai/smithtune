@@ -15,6 +15,12 @@ from tests.test_pipeline import write_manifest
 
 
 CHECKPOINT = "bt://loops:run-1/sampler_weights/best-2"
+DEDICATED_URL = "https://model-model1.api.baseten.co/deployment/deployment1/sync"
+SERVERLESS_URL = f"https://{sampling.SERVERLESS_SAMPLER_HOST}"
+DEDICATED = {"id": "sampler1", "capacity": sampling.DEDICATED, "model_id": "model1", "deployment_id": "deployment1",
+             "base_url": DEDICATED_URL}
+SERVERLESS = {"id": "sampler1", "capacity": sampling.SERVERLESS, "model_id": None, "deployment_id": None,
+              "base_url": SERVERLESS_URL}
 
 
 @pytest.fixture
@@ -36,8 +42,10 @@ def renderer(monkeypatch):
 
 
 class FakeService:
-    def __init__(self, directory, *, fail_ready=None, fail_create=None, fail_cleanup=None, missing_field=None):
+    def __init__(self, directory, *, fail_ready=None, fail_create=None, fail_cleanup=None, missing_field=None,
+                 serverless=False):
         self.directory = directory
+        self.serverless = serverless
         self.fail_ready = fail_ready
         self.fail_create = fail_create
         self.fail_cleanup = fail_cleanup
@@ -58,8 +66,13 @@ class FakeService:
         self.events.append(("create", body))
         if self.fail_create == self.created:
             raise TimeoutError("unknown create outcome")
-        resource = {"id": f"sampler-{self.created}", "model_id": f"model-{self.created}",
-                    "deployment_id": f"deployment-{self.created}", "base_url": "https://model-id.api.baseten.co/sync"}
+        if self.serverless:
+            # Shared capacity has no model or deployment of the sampler's own.
+            resource = {"id": f"sampler-{self.created}", "model_id": None, "deployment_id": None,
+                        "base_url": SERVERLESS_URL}
+        else:
+            resource = {"id": f"sampler-{self.created}", "model_id": f"model-{self.created}",
+                        "deployment_id": f"deployment-{self.created}", "base_url": "https://model-id.api.baseten.co/sync"}
         if self.missing_field:
             resource.pop(self.missing_field)
         return resource
@@ -69,7 +82,7 @@ class FakeService:
         index = self.created
         # The paid resource is recoverable even if SDK construction fails.
         saved = json.loads((self.directory / "sampler.json").read_text())
-        assert saved["resources"][-1]["deployment_id"] == resource["deployment_id"]
+        assert saved["resources"][-1]["id"] == resource["id"]
 
         class Client:
             def ensure_ready(self, timeout):
@@ -87,8 +100,9 @@ class FakeService:
         return Client()
 
     def deactivate(self, resource):
-        self.events.append(("deactivate", resource["deployment_id"]))
-        if resource["deployment_id"] == self.fail_cleanup:
+        owned = resource["id"] if self.serverless else resource["deployment_id"]
+        self.events.append(("deactivate", owned))
+        if owned == self.fail_cleanup:
             raise OSError("cleanup failed")
 
     def is_inactive(self, resource):
@@ -146,7 +160,7 @@ def test_readiness_interrupt_deactivates_all_created_resources(tmp_path, rendere
 
 def test_body_failure_deactivates_every_resource_even_when_one_cleanup_fails(tmp_path, renderer):
     service = FakeService(tmp_path, fail_cleanup="deployment-2")
-    with pytest.raises(PipelineError, match="GPU charges may continue"), sampling.BasetenReplaySampler(DEFAULT_MODEL, CHECKPOINT, tmp_path, service=service):
+    with pytest.raises(PipelineError, match="charges may continue"), sampling.BasetenReplaySampler(DEFAULT_MODEL, CHECKPOINT, tmp_path, service=service):
         raise RuntimeError("judge failed")
     assert ("deactivate", "deployment-1") in service.events
     receipt = json.loads((tmp_path / "sampler.json").read_text())
@@ -228,17 +242,25 @@ def test_checkpoint_remote_identity_is_checked_before_creation(monkeypatch):
         sampling._SamplerService().validate_checkpoint(CHECKPOINT, DEFAULT_MODEL.base_model)
 
 
-def test_gpu_deactivation_waits_for_inactive(monkeypatch):
+@pytest.mark.parametrize("resource,path,inactive", [
+    (DEDICATED, "/v1/models/model1/deployments/deployment1",
+     {"id": "deployment1", "model_id": "model1", "status": "INACTIVE"}),
+    # Receipts written before serverless support have no capacity field.
+    ({"model_id": "model1", "deployment_id": "deployment1"}, "/v1/models/model1/deployments/deployment1",
+     {"id": "deployment1", "model_id": "model1", "status": "INACTIVE"}),
+    (SERVERLESS, "/v1/loops/samplers/sampler1", {"sampler": {"id": "sampler1", "status": {"name": "INACTIVE"}}}),
+])
+def test_deactivation_waits_for_inactive(monkeypatch, resource, path, inactive):
     monkeypatch.setenv("BASETEN_API_KEY", "test")
     events = []
 
-    def request(method, path):
-        events.append((method, path))
-        return {"status": "INACTIVE"}
+    def request(method, requested):
+        events.append((method, requested))
+        return inactive
 
     monkeypatch.setattr(sampling, "_request", request)
-    sampling._SamplerService().deactivate({"model_id": "m1", "deployment_id": "d1"})
-    assert events == [("POST", "/v1/models/m1/deployments/d1/deactivate"), ("GET", "/v1/models/m1/deployments/d1")]
+    sampling._SamplerService().deactivate(resource)
+    assert events == [("POST", path + "/deactivate"), ("GET", path)]
 
 
 def test_sdk_client_is_pinned_to_saved_weights_with_no_live_trainer(monkeypatch):
@@ -248,8 +270,7 @@ def test_sdk_client_is_pinned_to_saved_weights_with_no_live_trainer(monkeypatch)
     calls = []
     monkeypatch.setattr(sampling_client, "SamplingClient", lambda **kwargs: calls.append(kwargs) or object())
     service = sampling._SamplerService()
-    resource = {"id": "sampler1", "model_id": "model1", "deployment_id": "deployment1",
-                "base_url": "https://model-model1.api.baseten.co/deployment/deployment1/sync", "checkpoint": CHECKPOINT}
+    resource = {**DEDICATED, "checkpoint": CHECKPOINT}
     service.connect(resource, DEFAULT_MODEL, "session1", 12)
     assert calls[0]["checkpoint_path"] == CHECKPOINT
     assert calls[0]["base_model"] == DEFAULT_MODEL.base_model
@@ -262,6 +283,61 @@ def test_sdk_client_is_pinned_to_saved_weights_with_no_live_trainer(monkeypatch)
     with pytest.raises(PipelineError, match="invalid sampler URL"):
         service.connect({**resource, "base_url": "https://untrusted.example/sync"}, DEFAULT_MODEL, "session1", 12)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("resource,deployment_type", [
+    (DEDICATED, "BasetenDeployment"),
+    (SERVERLESS, "ServerlessDeployment"),
+])
+def test_sdk_client_targets_the_capacity_baseten_chose(monkeypatch, resource, deployment_type):
+    from baseten.loops import sampling_client
+
+    monkeypatch.setenv("BASETEN_API_KEY", "test")
+    calls = []
+    monkeypatch.setattr(sampling_client, "SamplingClient", lambda **kwargs: calls.append(kwargs) or object())
+    sampling._SamplerService().connect(resource, DEFAULT_MODEL, "session1", 12)
+    assert type(calls[0]["deployment"]).__name__ == deployment_type
+    assert calls[0]["deployment"].base_url == resource["base_url"]
+
+
+@pytest.mark.parametrize("resource,base_url", [
+    (DEDICATED, SERVERLESS_URL),
+    (SERVERLESS, DEDICATED_URL),
+    (SERVERLESS, SERVERLESS_URL + ".untrusted.example"),
+    (SERVERLESS, SERVERLESS_URL.replace("https://", "http://")),
+    (SERVERLESS, SERVERLESS_URL.replace("https://", "https://user@")),
+])
+def test_sampler_url_must_match_its_capacity(monkeypatch, resource, base_url):
+    monkeypatch.setenv("BASETEN_API_KEY", "test")
+    with pytest.raises(PipelineError, match="invalid sampler URL"):
+        sampling._SamplerService().connect({**resource, "base_url": base_url}, DEFAULT_MODEL, "session1", 12)
+
+
+def test_serverless_samplers_are_recorded_and_deactivated_by_sampler_id(tmp_path, renderer, capsys):
+    service = FakeService(tmp_path, serverless=True)
+    with sampling.BasetenReplaySampler(DEFAULT_MODEL, CHECKPOINT, tmp_path, service=service) as identity:
+        assert identity == CHECKPOINT
+        assert json.loads((tmp_path / "sampler.json").read_text())["status"] == "running"
+    assert [event for event in service.events if isinstance(event, tuple) and event[0] == "deactivate"] == [
+        ("deactivate", "sampler-2"), ("deactivate", "sampler-1"),
+    ]
+    receipt = json.loads((tmp_path / "sampler.json").read_text())
+    assert receipt["status"] == "closed"
+    assert [resource["capacity"] for resource in receipt["resources"]] == [sampling.SERVERLESS] * 2
+    assert capsys.readouterr().err.count(f"on {sampling.SERVERLESS} capacity") == 2
+    assert receipt["resources"][0]["cleanup_command"].endswith(f"{sampling.API_ROOT}/v1/loops/samplers/sampler-1/deactivate")
+
+
+def test_serverless_create_without_a_sampler_id_needs_session_reconciliation(tmp_path, renderer):
+    service = FakeService(tmp_path, serverless=True, missing_field="id")
+    with pytest.raises(PipelineError, match="reconcile unknown creates"), sampling.BasetenReplaySampler(
+            DEFAULT_MODEL, CHECKPOINT, tmp_path, service=service):
+        pass
+    # Without its ID, a serverless sampler can only be found from the saved session.
+    assert not [event for event in service.events if isinstance(event, tuple) and event[0] == "deactivate"]
+    receipt = json.loads((tmp_path / "sampler.json").read_text())
+    assert receipt["status"] == "cleanup_required"
+    assert receipt["session_id"] == "session-1"
 
 
 def test_persistence_failure_after_create_still_deactivates_gpu(tmp_path, renderer, monkeypatch):
@@ -318,14 +394,22 @@ def test_manually_cleaned_receipt_is_rechecked_before_creating(tmp_path, rendere
     assert (tmp_path / "sampler.json").read_bytes() == before
 
 
-@pytest.mark.parametrize("response,expected", [
-    ({"id": "d1", "model_id": "m1", "status": "INACTIVE"}, True),
-    ({"id": "d1", "model_id": "m1", "status": "DEACTIVATING"}, False),
-    ({"id": "different", "model_id": "m1", "status": "INACTIVE"}, False),
+@pytest.mark.parametrize("resource,response,expected,path", [
+    ({"model_id": "m1", "deployment_id": "d1"}, {"id": "d1", "model_id": "m1", "status": "INACTIVE"}, True,
+     "/v1/models/m1/deployments/d1"),
+    ({"model_id": "m1", "deployment_id": "d1"}, {"id": "d1", "model_id": "m1", "status": "DEACTIVATING"}, False,
+     "/v1/models/m1/deployments/d1"),
+    ({"model_id": "m1", "deployment_id": "d1"}, {"id": "different", "model_id": "m1", "status": "INACTIVE"}, False,
+     "/v1/models/m1/deployments/d1"),
+    (SERVERLESS, {"sampler": {"id": "sampler1", "status": {"name": "INACTIVE"}}}, True, "/v1/loops/samplers/sampler1"),
+    (SERVERLESS, {"sampler": {"id": "sampler1", "status": {"name": "ACTIVE"}}}, False, "/v1/loops/samplers/sampler1"),
+    (SERVERLESS, {"sampler": {"id": "different", "status": {"name": "INACTIVE"}}}, False, "/v1/loops/samplers/sampler1"),
+    (SERVERLESS, {"sampler": {"id": "sampler1", "status": "INACTIVE"}}, False, "/v1/loops/samplers/sampler1"),
+    (SERVERLESS, {}, False, "/v1/loops/samplers/sampler1"),
 ])
-def test_manual_cleanup_verification_reads_exact_deployment(monkeypatch, response, expected):
+def test_manual_cleanup_verification_reads_exact_sampler(monkeypatch, resource, response, expected, path):
     monkeypatch.setenv("BASETEN_API_KEY", "test")
     calls = []
     monkeypatch.setattr(sampling, "_request", lambda *args: calls.append(args) or response)
-    assert sampling._SamplerService().is_inactive({"model_id": "m1", "deployment_id": "d1"}) is expected
-    assert calls == [("GET", "/v1/models/m1/deployments/d1")]
+    assert sampling._SamplerService().is_inactive(resource) is expected
+    assert calls == [("GET", path)]
