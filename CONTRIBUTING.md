@@ -1,8 +1,8 @@
 # Contributing
 
-Use Python 3.12, uv, and Git. The Fireworks cookbook is a direct Git dependency,
-pinned to a full upstream commit in `pyproject.toml`. No source snapshot or fork
-is maintained here, and there is no bootstrap step.
+Use Python 3.12, uv, and Git. The Fireworks cookbook is pinned to its published
+PyPI version in `pyproject.toml`. No source snapshot or fork is maintained here,
+and there is no bootstrap step.
 
 Provider-specific training, sampling, and deployment modules live under
 `src/smithtune/providers/<provider>/`, with matching tests in `tests/<provider>/`.
@@ -60,14 +60,14 @@ uv run --no-sync pytest
 uv run --no-sync ruff check
 ```
 
-For the optional Deep Agents judge runner:
+To check the council runner:
 
 ```bash
-sfw uv sync --locked --extra test --extra deepagents --python 3.12
+sfw uv sync --locked --extra test --python 3.12
 uv run --no-sync pytest tests/test_triage_agent.py tests/test_triage_coordinator.py tests/test_triage.py
 ```
 
-Deep Agents, its OpenAI adapter, and Monty are pinned in the optional `deepagents` extra.
+Deep Agents, its OpenAI adapter, and Monty are pinned in the standard installation.
 Tests use the actual coordinator graph with a deterministic local model. They
 check skill loading, Python dispatch, bounded concurrency, one full-message
 request per judge, provider context rejection, and resume.
@@ -101,7 +101,7 @@ CI runs `ruff check` with the rules in `pyproject.toml`; it does not enforce
 To install your checkout as an isolated CLI:
 
 ```bash
-sfw uv tool install --python 3.12 --overrides overrides.txt .
+sfw uv tool install --python 3.12 .
 ```
 
 For Baseten checkpoint deployment, install the optional `baseten-deploy` extra.
@@ -125,16 +125,12 @@ changes, local upload/prepare roundtrips, and capture checkpoint recovery.
 
 ## Dependency compatibility
 
-Transformers is pinned to the patched `5.10.4`. The upstream Fireworks cookbook
-still requires `5.5.4`, and its Tinker cookbook dependency caps Transformers at
-`5.5.4`, so `overrides.txt` and the matching `tool.uv.override-dependencies`
-setting replace those constraints without patching or copying upstream source.
-Customers must pass the override file to `uv tool install`; contributor sync uses
-the project setting automatically. Tests verify the installed upstream Git
-revision and Transformers version, permit only these two recorded metadata
-conflicts, and compare renderer outputs to a pinned reference using a
-deterministic test tokenizer. Remove both overrides when upstream supports the
-patched version.
+Transformers is pinned to the patched `5.10.4`, matching the published Fireworks
+cookbook. Installs require no dependency overrides. Tests verify installed package
+versions, reject dependency metadata conflicts, and compare renderer outputs to
+a pinned reference using a deterministic test tokenizer. The prepared-data identity
+records the cookbook package version; prepare older Fireworks artifacts again
+when upgrading from a Git-based installation.
 
 Baseten uses Transformers' assistant-token masks and TRL `1.13.0` training
 templates. Keep TRL pinned: its template and mask conventions are part of the
@@ -164,10 +160,12 @@ Transformers `5.10.4` includes the fix for
 `5.10.0`, the first fixed release, was withdrawn from PyPI; keep the tested,
 non-yanked patch release unless compatibility checks establish a newer version.
 
-To update the cookbook, change its commit in `pyproject.toml`, inspect the upstream
+To update the cookbook, change its version in `pyproject.toml`, inspect the upstream
 diff, run `sfw uv lock`, and run the distribution checks below. Retain the renderer
 reference unless a reviewed upstream behavior change requires updating it. Security
-minimums for Pillow and Datasets are declared in smithtune's dependencies.
+minimums for Pillow, Datasets, LangGraph, LangGraph SDK, OpenTelemetry API, and
+Setuptools are declared in smithtune's dependencies and apply to fresh installs.
+The build backend uses the same patched Setuptools minimum.
 
 ## Distribution checks
 
@@ -178,27 +176,33 @@ python scripts/check_dist.py
 This builds smithtune's wheel and source distribution, installs dependencies from
 their declared sources in clean environments, and runs tests outside the checkout.
 It also tests `uv tool install` and rebuilding the wheel from the source archive.
-The default wheel is tested first, then the optional Deep Agents extra. Both
-distributions must include the workflow skill as package data.
+The default wheel includes the council runner; the optional Baseten deployment
+extra is tested separately. Both distributions must include the workflow skill
+as package data.
 
 CI performs these checks on Linux x86-64 and macOS ARM64 with Python 3.12. Windows
 and other Python versions are not yet part of the supported test matrix. CI saves
-the smithtune artifacts and matching `overrides.txt` for inspection.
+the smithtune artifacts for inspection.
 
-## Releases from GitHub
+## Releases
 
 Merge the changes and let CI pass. Set the version in `pyproject.toml`, regenerate
-`uv.lock`, and tag the tested commit (for example, `v0.1.7`). Customers install that
-tag directly, and the README quickstart pins the same tag (update both URLs there when releasing):
+`uv.lock`, and publish a GitHub release
+for that tested commit (for example, `v0.1.8`). The `publish.yml` workflow verifies
+that the tag matches the package version, builds and tests the wheel and source
+distribution, then publishes them to PyPI using Trusted Publishing.
+
+One-time setup: create the GitHub environment `pypi`, then add a GitHub trusted
+publisher to the existing `smithtune` PyPI project with owner `langchain-ai`,
+repository `smithtune`, workflow `publish.yml`, and environment `pypi`. No PyPI API
+token is needed. Restrict environment deployment tags to `v*` and require release
+approval if desired. Publishing permissions are limited to the upload job.
+
+Customers install the released version with:
 
 ```bash
-uv tool install --python 3.12 \
-  --overrides https://raw.githubusercontent.com/langchain-ai/smithtune/v0.1.7/overrides.txt \
-  'smithtune[deepagents] @ git+https://github.com/langchain-ai/smithtune.git@v0.1.7'
+uv tool install --python 3.12 smithtune
 ```
 
-The example tag must be created before this command works. Repeat the command with
-the next tag to upgrade; `smithtune --version` reads the installed version metadata.
-No PyPI projects, publishing environments, or second-package releases are needed.
-PyPI does not accept the direct Git dependency in smithtune's package metadata, so
-these distributions are intended for GitHub/direct installation.
+Use `uv tool upgrade smithtune` to upgrade; `smithtune --version` reads the
+installed version metadata.

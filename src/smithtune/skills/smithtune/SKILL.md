@@ -263,7 +263,6 @@ Check:
 Skip this step with `--no-triage`.
 
 **What is needed:**
-- The `deepagents` extra (included in the README install).
 - Keys for the judge models. The default council is DeepSeek V4.1 Flash and
   GLM-5.3-Flash on Baseten, so only `BASETEN_API_KEY` (with Model API access).
   With two judges a trajectory is kept only when both vote keep; add a third
@@ -603,7 +602,7 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | Most trajectories excluded at pull | Missing per-assistant tool data, multimodal content, provider built-in tools | Read reasons in `download_summary` and per-trajectory errors |
 | Triage `incomplete` | Judge timeouts or rate limits | `dataset resume DIR --confirm`; lower `--concurrency` if rate-limited |
 | "council review needs selection criteria" | No `--rubric` or `--rule` given | Write `rubric.md` with the user (step 3) and pass `--rubric` |
-| Triage fails immediately with a key error | Missing judge key or `deepagents` extra | Set the judge keys, or choose judges you have keys for with `--judges` |
+| Triage fails immediately with a key error | Missing judge key | Set the judge keys, or choose judges you have keys for with `--judges` |
 | "council judging is incomplete" on push | Votes pending | `dataset resume DIR --confirm`, then push |
 | "cannot collect more candidates after upload started" | Pull after push in the same directory | New directory |
 | Changing filter/rubric/limits/review mode is rejected | Settings are frozen | New directory |

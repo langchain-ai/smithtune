@@ -328,7 +328,8 @@ def test_invalid_validation_loss_never_publishes_checkpoint(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("dedicated", [False, True])
-def test_cookbook_reused_metadata_alias_keeps_exact_save_responses_and_earlier_best(tmp_path, monkeypatch, dedicated):
+@pytest.mark.parametrize("lora_rank", [0, 8])
+def test_cookbook_reused_metadata_alias_keeps_exact_save_responses_and_earlier_best(tmp_path, monkeypatch, dedicated, lora_rank):
     from training.utils.checkpoints import TrainingCheckpoints
     from smithtune.artifacts import _utc_now
 
@@ -360,7 +361,7 @@ def test_cookbook_reused_metadata_alias_keeps_exact_save_responses_and_earlier_b
     session.checkpoints = TrainingCheckpoints(
         session.checkpoint_client, session.resources.control, trainer_id=session.job_id, log_path=str(tmp_path),
         serverless=not dedicated, current_run_id=run_id,
-        save_appear_timeout_s=0.1, save_stabilize_s=0, save_poll_s=0,
+        save_appear_timeout_s=0.1, save_stabilize_s=0, save_poll_s=0, lora_rank=lora_rank,
     )
     result = fireworks.run_early_stopping(fireworks.SFTSettings(max_epochs=2), session.run_epoch)
     assert [step for kind, step in events if kind == "eval"] == [2, 3, 4, 6]
@@ -371,6 +372,8 @@ def test_cookbook_reused_metadata_alias_keeps_exact_save_responses_and_earlier_b
     state_path = best["resume_checkpoint"].split(":", 1)[1] if dedicated else best["resume_checkpoint"]
     assert states[state_path] == 2
     assert snapshots[best["sampler_snapshot"]] == 2
+    suffix = "-base" if lora_rank == 0 else ""
+    assert best["promotable_checkpoint"].endswith(f"s-2{suffix}-abcdef01")
     session.client.load_state = Mock(side_effect=AssertionError("best replay must use its saved sampler"))
     assert session.snapshot(best["resume_checkpoint"]) == best["sampler_snapshot"]
     session.client.load_state.assert_not_called()

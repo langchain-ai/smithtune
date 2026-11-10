@@ -27,6 +27,7 @@ def glm_tokenizer(monkeypatch):
     tokenizer = _tokenizer()
     tokenizer.add_special_tokens({"additional_special_tokens": [
         "[gMASK]", "[sop]", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+        "<|image|>", "<|begin_of_image|>", "<|end_of_image|>",
     ]})
     monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: tokenizer)
     monkeypatch.setattr(training.utils.supervised, "load_tokenizer", lambda *args, **kwargs: tokenizer)

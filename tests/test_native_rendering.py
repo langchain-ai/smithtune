@@ -187,6 +187,7 @@ def test_fireworks_glm_masks_each_assistant_target_and_preserves_replay_history(
     tokenizer = _tokenizer()
     tokenizer.add_special_tokens({"additional_special_tokens": [
         "[gMASK]", "[sop]", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+        "<|image|>", "<|begin_of_image|>", "<|end_of_image|>",
     ]})
     monkeypatch.setattr(training.utils.tokenizers, "load_tokenizer", lambda *args, **kwargs: tokenizer)
     model = fireworks.MODEL_SPECS["glm-5p3-flash"]

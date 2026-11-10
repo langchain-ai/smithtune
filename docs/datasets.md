@@ -208,7 +208,7 @@ files; the CLI saves the rubric but does not verify human agreement.
 `triage` reads only downloaded trajectories. Its default council is DeepSeek
 V4.1 Flash and GLM-5.3-Flash on Baseten (so only `BASETEN_API_KEY` is needed); with two
 judges a trajectory is kept only when both vote keep. The council is managed by a
-Deep Agent. The [README installation](../README.md#quickstart) includes the `deepagents` extra.
+Deep Agent, included in the standard installation.
 Use `--concurrency` to set concurrent judge tasks (default 4, maximum 16).
 
 Choose judges with `--judges`, as comma-separated aliases or `provider:model` values:
