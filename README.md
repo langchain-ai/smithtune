@@ -253,8 +253,8 @@ It assigns about 80% to training, 10% to validation, and 10% to testing. Each so
 stays in one split; the memberships are also published to the LangSmith dataset.
 
 Recorded system messages are preserved; reasoning is omitted by default. Unsupported
-or overlong trajectories are excluded without truncation and listed in
-`"$data_dir/prepared/rejected.json"`. By default, each supported assistant message
+or overlong trajectories are excluded without truncation, and exact duplicate training
+examples are kept once; both are listed in `"$data_dir/prepared/rejected.json"`. By default, each supported assistant message
 becomes one training target, with its preceding context and tools. To keep initial
 assistant history as context only, [choose a supervision scope](docs/datasets.md#choose-assistant-teaching-targets)
 when pulling the dataset. Context-only messages may have unknown tool availability;

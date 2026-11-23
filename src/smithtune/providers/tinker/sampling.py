@@ -13,7 +13,7 @@ from typing import Any
 
 from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.providers.base import PipelineError
-from smithtune.providers.tinker import CAPACITY, close_service, service_client
+from smithtune.providers.tinker import CAPACITY, close_service, resolved, service_client
 from smithtune.rendering import load_training_renderer
 from smithtune.run_artifacts import load_checkpoint_context, require_matching_base_model
 
@@ -66,8 +66,10 @@ class TinkerReplaySampler:
         try:
             self._service = self.service_factory(user_metadata={"smithtune_replay": self.checkpoint})
             self._samplers = {
-                self.checkpoint: self._service.create_sampling_client(model_path=self.checkpoint),
-                self.model.base_model: self._service.create_sampling_client(base_model=self.model.base_model),
+                self.checkpoint: resolved(self._service.create_sampling_client(model_path=self.checkpoint)),
+                self.model.base_model: resolved(
+                    self._service.create_sampling_client(base_model=self.model.base_model)
+                ),
             }
         except BaseException:
             self._close()

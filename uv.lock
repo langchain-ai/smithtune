@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -2653,7 +2653,7 @@ requires-dist = [
     { name = "rich", specifier = "==13.9.4" },
     { name = "ruff", marker = "extra == 'test'", specifier = "==0.14.0" },
     { name = "setuptools", specifier = ">=84.1,<85" },
-    { name = "tinker", specifier = "==0.23.0" },
+    { name = "tinker", specifier = "==0.39.2" },
     { name = "transformers", specifier = "==5.10.4" },
     { name = "trl", specifier = "==1.13.0" },
     { name = "truss", marker = "extra == 'baseten-deploy'", specifier = "==0.18.30" },
@@ -2737,7 +2737,7 @@ wheels = [
 
 [[package]]
 name = "tinker"
-version = "0.23.0"
+version = "0.39.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2751,13 +2751,18 @@ dependencies = [
     { name = "pyqwest" },
     { name = "rich" },
     { name = "sniffio" },
+    { name = "tiktoken" },
     { name = "transformers" },
     { name = "typing-extensions" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/33/ce/0d30f80d7234ea88e8310b91d4ef58e9d27a96be5c579553407f831bba6b/tinker-0.23.0.tar.gz", hash = "sha256:b48f3e74128e56ad34bee18124f9b3a109a502bfa602853e999679eaf128aa49", size = 247551, upload-time = "2026-07-15T17:16:40.621Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/2b/517946249765672739c71517d5f845a548fd96abada00f1a7f6536db95c1/tinker-0.39.2.tar.gz", hash = "sha256:83ef7d0d130c6b3e58ae754492268cb3585f3d6406e32ef8d70a73315b33eed9", size = 265623, upload-time = "2026-11-18T21:32:06.577Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/a6/17932357c145c6dbe988832613b36bc7630a661148e17db1f6017ddca01a/tinker-0.23.0-py3-none-any.whl", hash = "sha256:416a20f2cc62fc83cc92c5b69de7f6aa8736bceee0156fda07fbe2fef1b00936", size = 237099, upload-time = "2026-07-15T17:16:39.183Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/df/31d0b1354a3c4e96a090cdb187ef70525a1107d8614d9f3edf438cc7f50d/tinker-0.39.2-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:9a642da7cea8f6599ee350d661451223246c2b75e770e3cfd16df08ed956fe52", size = 502898, upload-time = "2026-11-18T21:31:58.475Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/e1/bff1cfee2590f6ebfef89720588858ebf9cdc615e63691503886f7eb9527/tinker-0.39.2-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:9604f6b8125960f9fdf3f644aff9f9d6792248c8d1fbcf7c7f985c2e255f714c", size = 500418, upload-time = "2026-11-18T21:32:00.445Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/d9/899a734443f110ddfb3112df26d15eaf77076930d75a78b358719c2845a0/tinker-0.39.2-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a37060564f5c93f2567708094b05cdbc71f2b26624d7c5cd35b1b4159961d1fe", size = 514448, upload-time = "2026-11-18T21:32:02.086Z" },
+    { url = "https://files.pythonhosted.org/packages/57/c0/56cab0b062469b5dc51711be9422585e8f2ac1cce8d890e0ca83c53651d8/tinker-0.39.2-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6dad8e0cc7c9721cb8bfb055eb3c82107396d0eca24b7d9b138da51a22c5dcd7", size = 531960, upload-time = "2026-11-18T21:32:03.865Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/17/b56fb9a690f75a56068e7b481344a35665581e3198846b4f233942de75e2/tinker-0.39.2-cp311-abi3-win_amd64.whl", hash = "sha256:861f38599d3b9a6558f90de681491c83453e8a54c3971c376a3e52c88d98c806", size = 424164, upload-time = "2026-11-18T21:32:05.211Z" },
 ]
 
 [[package]]

@@ -22,16 +22,36 @@ def require_api_key(*, message: str = "TINKER_API_KEY is not set") -> str:
     return key
 
 
-def service_client(**kwargs):
-    """Open a Tinker session at the standard API with the checked credential."""
-    key = require_api_key()
+def _sdk():
     try:
         import tinker
     except ImportError as exc:
         raise PipelineError(
             "the Tinker SDK is unavailable; reinstall using the installation command in the README, then run smithtune doctor"
         ) from exc
-    return tinker.ServiceClient(api_key=key, base_url=TINKER_BASE_URL, **kwargs)
+    return tinker
+
+
+def service_client(**kwargs):
+    """Open a Tinker session at the standard API with the checked credential."""
+    key = require_api_key()
+    return _sdk().ServiceClient(api_key=key, base_url=TINKER_BASE_URL, **kwargs)
+
+
+def rest_client():
+    """Read account-level metadata without a session; its shared connections are never closed."""
+    key = require_api_key()
+    return _sdk().RestClient(api_key=key, base_url=TINKER_BASE_URL)
+
+
+def resolved(value):
+    """Return a Tinker future's result; values that are not futures pass through.
+
+    Tinker's client factories and REST reads return futures; using a client
+    future as the client directly is deprecated.
+    """
+    result = getattr(value, "result", None)
+    return result() if callable(result) else value
 
 
 def close_service(service) -> None:

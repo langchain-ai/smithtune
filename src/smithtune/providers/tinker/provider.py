@@ -22,7 +22,7 @@ from smithtune.providers.base import (
     TerminationRequested,
     TrainingOptions,
 )
-from smithtune.providers.tinker import CAPACITY, close_service, require_api_key, service_client
+from smithtune.providers.tinker import CAPACITY, close_service, require_api_key, resolved, rest_client, service_client
 from smithtune.rendering import load_training_renderer, render_row_tokens, resolve_rendering_model
 
 
@@ -101,20 +101,19 @@ class TinkerModelCapability:
 
 
 def fetch_model_capability(
-    model: str, required_context: int, *, service_factory: Any = service_client,
+    model: str, required_context: int, *, client_factory: Any = rest_client,
 ) -> TinkerModelCapability:
-    """Read Tinker's supported models without creating a trainer."""
-    service = None
+    """Read Tinker's supported models without opening a session or creating a trainer.
+
+    REST clients share process-wide connections that Tinker keeps open and that
+    must not be closed, unlike session clients.
+    """
     try:
-        service = service_factory()
-        response = service.get_server_capabilities()
+        response = resolved(client_factory().get_server_capabilities())
     except PipelineError:
         raise
     except Exception as exc:
         raise TinkerRuntimeError(f"Tinker capabilities request failed ({type(exc).__name__})") from None
-    finally:
-        if service is not None:
-            close_service(service)
     matches = [
         item for item in getattr(response, "supported_models", None) or []
         if getattr(item, "model_name", None) == model
@@ -459,12 +458,12 @@ class TinkerProvider:
             sigterm_handler_installed = True
             metadata = {"smithtune_run_id": run_id}
             service = (self._service_factory or service_client)(user_metadata=metadata)
-            trainer = service.create_lora_training_client(
+            trainer = resolved(service.create_lora_training_client(
                 base_model=model.base_model,
                 rank=settings.lora_rank,
                 seed=settings.seed,
                 user_metadata=metadata,
-            )
+            ))
             tinker_run_id = getattr(trainer, "model_id", None)
             if not isinstance(tinker_run_id, str) or not tinker_run_id.strip():
                 raise TinkerRuntimeError("Tinker training client did not return a run ID")

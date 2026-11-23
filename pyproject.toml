@@ -29,7 +29,7 @@ dependencies = [
   "langsmith==0.12.4",
   "referencing==0.37.0",
   "rich==13.9.4",
-  "tinker==0.23.0",
+  "tinker==0.39.2",
   "transformers==5.10.4",
   "trl==1.13.0",
   "pillow>=13.0.0,<14",

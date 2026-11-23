@@ -302,29 +302,31 @@ class CapabilityService:
     def get_server_capabilities(self):
         if self.failure is not None:
             raise self.failure
-        return SimpleNamespace(supported_models=[SimpleNamespace(model_name=name, max_context_length=limit)
-                                                 for name, limit in self.models])
+        # Tinker returns a future of the response.
+        response = SimpleNamespace(supported_models=[SimpleNamespace(model_name=name, max_context_length=limit)
+                                                     for name, limit in self.models])
+        return SimpleNamespace(result=lambda: response)
 
 
-def test_capability_preflight_checks_the_advertised_model_and_context_then_closes_the_session():
+def test_capability_preflight_checks_the_advertised_model_and_context_without_closing_shared_connections():
     service = CapabilityService([("Qwen/Qwen3.8-27B", 65_536), ("Qwen/Qwen3.5-9B", None)])
-    capability = tinker.fetch_model_capability("Qwen/Qwen3.8-27B", 65_536, service_factory=lambda: service)
+    capability = tinker.fetch_model_capability("Qwen/Qwen3.8-27B", 65_536, client_factory=lambda: service)
     assert capability == tinker.TinkerModelCapability("Qwen/Qwen3.8-27B", 65_536)
-    assert service.holder.closed == 1
+    # REST connections are shared across the process; closing one breaks later reads.
+    assert service.holder.closed == 0
     # A model without an advertised limit is checked again by the trainer.
-    assert tinker.fetch_model_capability("Qwen/Qwen3.5-9B", 65_536, service_factory=lambda: service).max_context_length is None
+    assert tinker.fetch_model_capability("Qwen/Qwen3.5-9B", 65_536, client_factory=lambda: service).max_context_length is None
     with pytest.raises(tinker.TinkerRuntimeError, match="--max-seq-len 65536"):
-        tinker.fetch_model_capability("Qwen/Qwen3.8-27B", 131_072, service_factory=lambda: service)
+        tinker.fetch_model_capability("Qwen/Qwen3.8-27B", 131_072, client_factory=lambda: service)
     with pytest.raises(tinker.TinkerRuntimeError, match="does not advertise"):
-        tinker.fetch_model_capability("Qwen/Qwen3.8-32B", 1_024, service_factory=lambda: service)
+        tinker.fetch_model_capability("Qwen/Qwen3.8-32B", 1_024, client_factory=lambda: service)
 
 
-def test_capability_failures_hide_provider_details_and_close_the_session():
+def test_capability_failures_hide_provider_details():
     service = CapabilityService(failure=RuntimeError("tml-secret"))
     with pytest.raises(tinker.TinkerRuntimeError) as failure:
-        tinker.fetch_model_capability("Qwen/Qwen3.8-27B", 1_024, service_factory=lambda: service)
+        tinker.fetch_model_capability("Qwen/Qwen3.8-27B", 1_024, client_factory=lambda: service)
     assert "tml-secret" not in str(failure.value)
-    assert service.holder.closed == 1
 
 
 @pytest.mark.parametrize("value", ["", "  "])
@@ -367,3 +369,9 @@ def test_tinker_shares_the_hugging_face_rendering_implementation():
     from smithtune.rendering import rendering_version
 
     assert rendering_version(tinker.DEFAULT_MODEL) == rendering_version(replace(BASETEN_MODEL, provider="baseten"))
+
+
+def test_futures_are_resolved_and_plain_values_pass_through():
+    client = object()
+    assert tinker_package.resolved(client) is client
+    assert tinker_package.resolved(SimpleNamespace(result=lambda: client)) is client

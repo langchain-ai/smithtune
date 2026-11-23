@@ -390,8 +390,9 @@ requests, see [reasoning settings](https://github.com/langchain-ai/smithtune/blo
 Check:
 - Split counts. Validation and test must be non-empty for training and
   evaluation to mean anything; tiny datasets can produce empty splits.
-- `"$data_dir/prepared/rejected.json"`: trajectories dropped as unsupported or
-  over the context limit (never truncated). If many are too long, ask the user
+- `"$data_dir/prepared/rejected.json"`: trajectories dropped as unsupported,
+  over the context limit (never truncated), or exact duplicate training examples
+  (same messages, targets, and tools) of a kept trajectory. If many are too long, ask the user
   before lowering `--max-seq-len` or choosing a longer-context model.
 - Split publication succeeded. If only publication failed, run
   `smithtune dataset publish-splits --data-dir "$data_dir"`; do not re-prepare.

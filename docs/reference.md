@@ -41,6 +41,7 @@ and refuses to run when `TINKER_BASE_URL` points elsewhere.
 - All assistant messages are targets unless you [choose a different supervision scope](datasets.md#choose-assistant-teaching-targets)
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; lower the limit with `--max-seq-len`, for example `--max-seq-len 32768`
+- Exact duplicate training examples are kept once: same messages (roles, content, names, and tool calls), same assistant targets, and same tools available at each target. `prepared/rejected.json` lists each dropped copy with `duplicate_of`. Trajectories that share messages but differ in targets or tools are kept, in the same split, so a conversation never appears in both training and evaluation
 
 For Fireworks GLM-5.3-Flash, `prepare --reasoning-effort low|high|max` selects
 the native thinking-effort prompt used by training and replay. The default is

@@ -285,7 +285,9 @@ def validate_canonical_rows(rows: list[dict[str, Any]], *, split: str) -> None:
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    # JSON strings may contain Unicode line separators such as U+2028, which
+    # str.splitlines() would treat as record boundaries; JSONL uses only "\n".
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line]
     if not all(isinstance(row, dict) for row in rows):
         raise PipelineError(f"prepared data rows in {path.name} must be objects")
     return rows
