@@ -9,8 +9,8 @@ Recorded system messages are preserved; Qwen requires them at the start.
 
 ## Supported models
 
-Run `smithtune models list --provider fireworks` or
-`smithtune models list --provider baseten` to list supported model aliases and IDs.
+Run `smithtune models list --provider <fireworks|baseten|tinker>` to list supported
+model aliases and IDs.
 Only listed models are supported. Preparation and training check provider
 availability and select the tokenizer and renderer for the model.
 
@@ -25,6 +25,13 @@ serverless capacity when the workspace has serverless Loops for the model.
 Training prints whether Baseten reports serverless Loops for the model.
 `plan.json` records `capacity: baseten_default`, and `replay/sampler.json`
 records each sampler's capacity, `serverless` or `dedicated`.
+
+Tinker trains and samples on its shared fleet and bills per token, so smithtune
+provisions no capacity and records `capacity: tinker_shared`. Smithtune supports
+Tinker's default 64K-context variants of Qwen3.8 27B and Qwen3.5 9B; preparation
+and training stop if Tinker does not list the model or reports a shorter
+context. Set `TINKER_API_KEY`. Smithtune sends it only to the standard Tinker API
+and refuses to run when `TINKER_BASE_URL` points elsewhere.
 
 ## Preparation defaults
 
@@ -128,6 +135,13 @@ Training artifacts also include `plan.json`, `run-state.json`, `epochs.json`, an
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 It multiplies elapsed active time by the rate you pass, whichever capacity Baseten chose.
+Tinker bills training tokens and has no spend guard; review the token and step
+counts in `plan`. Tinker keeps saved checkpoints until you delete them.
+
+Tinker sums cross-entropy over weighted tokens. Smithtune scales each optimizer
+step's loss weights by the inverse of that step's active target tokens, so each
+update minimizes the mean loss per target token. Logged training and validation
+losses are those token means. `plan.config.loss_normalization` records this.
 
 ### Remote controller recovery
 
@@ -165,7 +179,7 @@ operations may have succeeded before their IDs or checkpoints were saved locally
 Recovery options depend on the provider and training workflow; use the matching
 procedure below rather than inferring them from controller health.
 
-#### Fireworks Training API and Baseten Loops
+#### Fireworks Training API, Baseten Loops, and Tinker
 
 These integrations recover unfinished training by initializing a new run from a
 saved training-state checkpoint. They do not resume the same logical Smithtune
@@ -179,7 +193,8 @@ run. Sampler-only weights cannot initialize training.
    or management API when receipts are incomplete. Closing a client or deleting
    a VM does not establish that GPU capacity was released. Baseten's local spend
    guard cannot enforce a limit after the controller dies; sampler and judge
-   costs are separate from its training budget.
+   costs are separate from its training budget. Tinker holds no capacity
+   between requests; its `run-state.json` records `tinker_run_id` and checkpoints.
 2. **If training is unfinished, inspect `validations.json` for a saved resumable
    checkpoint** (`epochs.json` for older runs). Baseten also records
    `last_resumable_state_uri` in `run-state.json`; Fireworks records
@@ -227,9 +242,9 @@ the held-out validation split, separately from replay evaluation.
 
 `plan.training_schedule` shows steps per epoch and expected validation passes
 through `--max-epochs`; early stopping or spend limits can reduce the count.
-Fireworks batches training trajectories; Baseten Loops batches rendered assistant
-targets through gradient accumulation. Baseten's preview is an estimate; training
-recalculates it from the retained rendered sequences before provisioning.
+Fireworks batches training trajectories; Baseten Loops and Tinker batch rendered
+assistant targets through gradient accumulation. Their previews are estimates;
+training recalculates them from the retained rendered sequences before provisioning.
 
 The lowest validation loss across all checks selects the best checkpoint,
 recording its epoch and global optimizer step. `validations.json` preserves
@@ -262,6 +277,7 @@ throughput or cost.
 | --- | --- |
 | Fireworks dedicated | Increase `--batch-size` gradually, then tune `--pipeline-depth` separately to overlap more submitted training steps. Batches count trajectories, each potentially producing multiple assistant targets. |
 | Baseten Loops | Increase `--microbatch-token-budget` to fit more tokens per forward/backward call; keep it large enough for the longest sequence. `--batch-size` controls the effective batch through gradient accumulation; increasing it alone can just add accumulation work. |
+| Tinker | Same controls as Baseten Loops. Tinker schedules its own capacity, so throughput also depends on its shared queue. |
 
 Use short trials on representative data within authorized spend, each in a new
 run directory. Change one setting at a time, holding data, model, capacity, LoRA
@@ -273,7 +289,7 @@ validation quality before committing to a full run.
 
 ## Sampler behavior
 
-Replay uses `SamplingClient` for both providers; serving capacity depends on the
+Replay uses `SamplingClient` for every provider; serving capacity depends on the
 training mode:
 
 | Training mode | Replay capacity |
@@ -281,6 +297,7 @@ training mode:
 | Fireworks serverless (default) | Shared serverless sampling for base and tuned models |
 | Fireworks dedicated | Two temporary dedicated deployments, for base and tuned models |
 | Baseten Loops | Two temporary samplers, after training resources shut down, on serverless or dedicated capacity as Baseten chooses |
+| Tinker | Tinker's shared sampling fleet for the base model and the saved sampler weights, billed per token; nothing to release |
 
 Fireworks requests deletion of owned dedicated resources on exit; Baseten
 deactivates its samplers. Dedicated capacity is billed for allocated time; judge

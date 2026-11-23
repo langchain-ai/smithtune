@@ -199,6 +199,14 @@ def preflight_model(
             raise PipelineError("Fireworks model metadata does not match the selected tokenizer")
         # Generic trainingContextLength can differ from the shared pool's
         # documented limit (notably Kimi K3); the pool limit governs this API.
+    elif model.provider == "tinker":
+        from smithtune.providers.tinker.provider import fetch_model_capability as fetch_tinker_capability
+        from smithtune.providers.tinker.provider import validate_capability
+
+        if model.tokenizer_model != model.base_model.partition(":")[0]:
+            raise PipelineError("Tinker tokenizer must match the official base model identity")
+        resolver = capability_resolver or fetch_tinker_capability
+        validate_capability(resolver(model.base_model, context), model.base_model, context)
     else:
         raise PipelineError("unsupported training provider for model preflight")
     return model

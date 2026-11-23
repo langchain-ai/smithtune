@@ -6,6 +6,9 @@ Deploy when you need an endpoint for your application. The standard
 [base-versus-tuned evaluation](../README.md#evaluate-a-trained-model) uses training
 API samplers and handles their lifecycle without a `deploy` command.
 
+Smithtune deploys Fireworks and Baseten checkpoints. It cannot deploy Tinker
+checkpoints yet; Tinker evaluation samples them directly.
+
 ## Deploy a Baseten checkpoint
 
 Use a Baseten training run and its prepared data. Set these paths to the

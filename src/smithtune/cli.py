@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune models on LangSmith trajectories with Fireworks or Baseten, then compare base and tuned models in LangSmith."""
+"""Fine-tune models on LangSmith trajectories with Fireworks, Baseten, or Tinker, then compare base and tuned models in LangSmith."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from smithtune.providers.fireworks.provider import (
     FireworksProvider,
     SFTSettings as FireworksSFTSettings,
 )
+from smithtune.providers.tinker.provider import MODEL_SPECS as TINKER_MODEL_SPECS, TinkerRuntimeError
 from smithtune.providers.base import CommonSFTSettings, ModelOptions, PipelineError, TrainingOptions
 from smithtune.providers import PROVIDERS, get_provider
 from smithtune.providers.baseten import CAPACITY as BASETEN_CAPACITY, deployment as baseten_deployment, require_api_key as require_baseten_key
@@ -87,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         description="List smithtune's supported training models as JSON. No credentials or downloads are needed; live provider availability is checked during prepare and train.",
     )
     models_list.add_argument(
-        "--provider", choices=tuple(PROVIDERS), help="filter by provider (default: both providers)",
+        "--provider", choices=tuple(PROVIDERS), help="filter by provider (default: all providers)",
     )
 
     curate = sub.add_parser("dataset", help="curate trajectories from a tracing project")
@@ -161,11 +162,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     prep.add_argument(
         "--validation-fraction", type=float,
-        help=f"validation fraction for either provider (default: {dataset.DEFAULT_VALIDATION_FRACTION})",
+        help=f"validation fraction for any provider (default: {dataset.DEFAULT_VALIDATION_FRACTION})",
     )
     prep.add_argument(
         "--test-fraction", type=float,
-        help=f"test fraction for either provider (default: {dataset.DEFAULT_TEST_FRACTION}; use 0 for no test split)",
+        help=f"test fraction for any provider (default: {dataset.DEFAULT_TEST_FRACTION}; use 0 for no test split)",
     )
     prep.add_argument("--split-from", type=Path, help="reuse split assignments from a previous data directory")
     prep.add_argument("--model", required=True, help="provider model ID or supported model alias")
@@ -208,7 +209,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--evaluate", action="store_true", help="compare base and best checkpoint through provider samplers after training")
         _add_replay_options(command)
         shared = command.add_argument_group(
-            "Shared training options", "Supported by both Fireworks and Baseten.",
+            "Shared training options", "Supported by every provider.",
         )
         shared.add_argument(
             "--max-epochs", type=int, default=common_defaults.max_epochs,
@@ -232,7 +233,7 @@ def _parser() -> argparse.ArgumentParser:
         )
         shared.add_argument(
             "--batch-size", type=int, default=common_defaults.batch_size,
-            help="training batch size; Baseten accumulates microbatches to this effective size (default: %(default)s)",
+            help="training batch size; Baseten and Tinker accumulate microbatches to this effective size (default: %(default)s)",
         )
         shared.add_argument(
             "--seed", type=int, default=common_defaults.seed,
@@ -240,10 +241,10 @@ def _parser() -> argparse.ArgumentParser:
         )
         shared.add_argument(
             "--lora-rank", type=int,
-            help="LoRA rank for either provider (default: the prepared model profile's default_lora_rank)",
+            help="LoRA rank for any provider (default: the prepared model profile's default_lora_rank)",
         )
         fireworks = command.add_argument_group(
-            "Fireworks-only options", "Require --provider fireworks; rejected by Baseten.",
+            "Fireworks-only options", "Require --provider fireworks; rejected by Baseten and Tinker.",
         )
         fireworks.add_argument(
             "--lora-alpha", type=int,
@@ -265,12 +266,19 @@ def _parser() -> argparse.ArgumentParser:
             "--provisioning-timeout", type=float,
             help="dedicated placement/readiness budget in seconds per stage (default: 1800)",
         )
-        baseten = command.add_argument_group(
-            "Baseten-only options", "Require --provider baseten; rejected by Fireworks.",
+        microbatched = command.add_argument_group(
+            "Baseten and Tinker options", "Require --provider baseten or tinker; rejected by Fireworks.",
         )
-        baseten.add_argument(
+        microbatched.add_argument(
             "--microbatch-token-budget", type=int,
             help="token budget per microbatch (default: the prepared model's max_seq_len)",
+        )
+        microbatched.add_argument(
+            "--max-dropped-training-rows", type=int,
+            help=f"maximum training rows excluded above the trainer context limit (default: {baseten_defaults.max_dropped_training_rows})",
+        )
+        baseten = command.add_argument_group(
+            "Baseten-only options", "Require --provider baseten; rejected by Fireworks and Tinker.",
         )
         baseten.add_argument(
             "--max-spend-usd", type=float,
@@ -287,10 +295,6 @@ def _parser() -> argparse.ArgumentParser:
         baseten.add_argument(
             "--spend-reserve-fraction", type=float,
             help=f"fraction of spend ceiling reserved for cleanup (default: {baseten_defaults.spend_reserve_fraction})",
-        )
-        baseten.add_argument(
-            "--max-dropped-training-rows", type=int,
-            help=f"maximum training rows excluded above the trainer context limit (default: {baseten_defaults.max_dropped_training_rows})",
         )
 
     deployment = sub.add_parser("deploy", help="deploy the selected checkpoint and test it; automatically promotes on Fireworks")
@@ -319,7 +323,7 @@ def _parser() -> argparse.ArgumentParser:
             help="optional cap; default evaluates every assistant turn",
         )
         command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
-        serving = command.add_argument_group("Baseten serving options", "Fireworks uses --run-dir and automatically compares the base model.")
+        serving = command.add_argument_group("Baseten serving options", "Fireworks and Tinker use --run-dir and automatically compare the base model.")
         serving.add_argument("--model-id", help="existing Baseten model ID")
         serving.add_argument("--max-seq-len", type=int, help="existing endpoint's configured context limit (required unless using --run-dir)")
         serving.add_argument("--serving-mode", choices=("sampler", "existing", "temporary"), help="default: sampler; explicit endpoint IDs use existing serving")
@@ -547,6 +551,47 @@ def _run_baseten_sampler_evaluation(args):
     )
 
 
+def _run_tinker_sampler_evaluation(args):
+    from smithtune.providers.tinker import CAPACITY as TINKER_CAPACITY
+    from smithtune.providers.tinker.sampling import TinkerReplaySampler, checkpoint_from_run
+
+    if args.serving_mode not in (None, "sampler") or any(value is not None for value in (
+        args.model_id, args.deployment_id, args.max_seq_len, args.tuned_model, args.accelerator,
+    )) or args.deployment_timeout != 600:
+        raise PipelineError("Tinker replay samples the saved checkpoint in --run-dir; omit endpoint and deployment options")
+    dataset._require_prepared_provider(_load_json(args.data_dir / "prepared" / "manifest.json"), "tinker")
+    model = checkpoint = None
+    if args.run_dir is not None:
+        if args.run_dir.resolve() == args.output_dir.resolve():
+            raise PipelineError("--run-dir and --output-dir must be different directories")
+        model, checkpoint = checkpoint_from_run(args.data_dir, args.run_dir)
+    if args.command == "eval-plan":
+        with output_lock(args.output_dir):
+            value = replay_evaluation.prepare_replay_evaluation(
+                args.data_dir, args.output_dir, args.max_points_per_trajectory, args.max_output_tokens,
+            )
+            value.update(serving_mode="sampler", evaluated_models=2, capacity=TINKER_CAPACITY,
+                         cleanup="no owned serving resources; closes the sampling session")
+            if checkpoint is not None:
+                value["checkpoint"] = checkpoint
+            _json_dump(args.output_dir / "plan.json", value)
+            return value
+    if checkpoint is None:
+        raise PipelineError("Tinker evaluation requires --run-dir containing the saved training result")
+    if args.base_model not in (None, model.base_model):
+        raise PipelineError("sampler replay compares the checkpoint with its own base model")
+    if not args.confirm:
+        raise PipelineError("Tinker sampling and judge inference require --confirm")
+    replay_evaluation.validate_judge_credentials(args.judge_model)
+    sampler = TinkerReplaySampler(model, checkpoint, args.output_dir)
+    return replay_evaluation.run_replay_evaluation(
+        args.data_dir, args.output_dir, checkpoint, args.judge_model,
+        base_model=model.base_model, concurrency=args.concurrency,
+        max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
+        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
+    )
+
+
 def _eval_baseten_endpoint(args) -> BasetenEndpoint | None:
     if args.provider != "baseten":
         if args.model_id is not None or args.max_seq_len is not None or args.run_dir is not None:
@@ -595,7 +640,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "doctor":
             value = diagnose()
         elif args.command == "models":
-            profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS}
+            profiles = {"baseten": BASETEN_MODEL_SPECS, "fireworks": FIREWORKS_MODEL_SPECS, "tinker": TINKER_MODEL_SPECS}
             value = {
                 "source": "smithtune_support_registry",
                 "live_availability_checked": False,
@@ -686,6 +731,11 @@ def main(argv: list[str] | None = None) -> None:
                     init_from_checkpoint=args.init_from_checkpoint, **replay,
                 )
             value = {**result, "run_id": run_id, "run_dir": str(run_dir.resolve())}
+        elif args.command in ("deploy", "undeploy") and args.provider == "tinker":
+            raise PipelineError(
+                f"smithtune cannot {args.command} Tinker checkpoints yet; Tinker training and evaluation "
+                "need no deployment. Use --provider tinker with evaluate to compare the checkpoint with its base model"
+            )
         elif args.command == "deploy":
             fireworks_options = (args.account_id, args.output_model_id, args.deployment_id, args.deployment_shape)
             if args.provider == "baseten":
@@ -713,6 +763,12 @@ def main(argv: list[str] | None = None) -> None:
                     raise PipelineError("supply --run-dir or --output-dir")
                 args.output_dir = args.run_dir / "replay"
             value = _run_fireworks_evaluation(args)
+        elif args.command in ("eval-plan", "evaluate") and args.provider == "tinker":
+            if args.output_dir is None:
+                if args.run_dir is None:
+                    raise PipelineError("supply --run-dir or --output-dir")
+                args.output_dir = args.run_dir / "replay"
+            value = _run_tinker_sampler_evaluation(args)
         elif args.command in ("eval-plan", "evaluate") and (
             args.serving_mode == "sampler" or (
                 args.serving_mode is None and args.model_id is None and args.deployment_id is None
@@ -772,7 +828,7 @@ def main(argv: list[str] | None = None) -> None:
                     raise PipelineError("Fireworks undeploy requires --account-id and --deployment-id")
                 FireworksProvider().undeploy(args.account_id, args.deployment_id, confirm=args.confirm)
                 value = {"status": "deleted", "deployment_id": args.deployment_id}
-    except (PipelineError, BasetenRuntimeError, subprocess.CalledProcessError) as exc:
+    except (PipelineError, BasetenRuntimeError, TinkerRuntimeError, subprocess.CalledProcessError) as exc:
         activity.close()
         # Runtime failures are not usage mistakes; keep argparse's status without its usage banner.
         parser.exit(2, f"{parser.prog}: error: {exc}\n")

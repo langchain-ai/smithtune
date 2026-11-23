@@ -8,6 +8,7 @@ from smithtune.providers.base import PipelineError, TrainingProvider
 PROVIDERS = {
     "fireworks": ("smithtune.providers.fireworks.provider", "FireworksProvider"),
     "baseten": ("smithtune.providers.baseten.provider", "BasetenProvider"),
+    "tinker": ("smithtune.providers.tinker.provider", "TinkerProvider"),
 }
 
 

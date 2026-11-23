@@ -329,8 +329,8 @@ class FireworksProvider:
             options.replicas, options.spend_reserve_fraction, options.max_dropped_training_rows
         )):
             raise PipelineError(
-                "--microbatch-token-budget, --max-spend-usd, --hourly-rate-usd, --replicas, "
-                "--spend-reserve-fraction, and --max-dropped-training-rows are Baseten-only"
+                "--max-spend-usd, --hourly-rate-usd, --replicas, and --spend-reserve-fraction are Baseten-only; "
+                "--microbatch-token-budget and --max-dropped-training-rows require Baseten or Tinker"
             )
         if options.provisioning_timeout is not None and options.training_mode != "dedicated":
             raise PipelineError("--provisioning-timeout requires --training-mode dedicated")

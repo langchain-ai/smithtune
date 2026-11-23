@@ -655,10 +655,19 @@ def run_replay_evaluation(
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
     sampler_provider = replay_sampler.config["provider"] if replay_sampler is not None else None
-    candidate_credential = "BASETEN_API_KEY" if baseten_endpoint or sampler_provider == "baseten" else "FIREWORKS_API_KEY"
+    if baseten_endpoint or sampler_provider == "baseten":
+        candidate_credential = "BASETEN_API_KEY"
+    elif sampler_provider == "tinker":
+        candidate_credential = "TINKER_API_KEY"
+    else:
+        candidate_credential = "FIREWORKS_API_KEY"
     if chat is None:
         if candidate_credential == "BASETEN_API_KEY":
             require_baseten_key()
+        elif candidate_credential == "TINKER_API_KEY":
+            from smithtune.providers.tinker import require_api_key as require_tinker_key
+
+            require_tinker_key()
         else:
             require_fireworks_key()
     judge_url = judge_endpoint(judge_model)

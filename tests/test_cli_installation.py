@@ -27,7 +27,7 @@ def test_module_entrypoint_and_version_outside_checkout(tmp_path):
     ["--help"], ["models", "list", "--help"],
     ["dataset", "triage", "--help"], ["dataset", "publish-splits", "--help"],
     ["models", "list"], ["models", "list", "--provider", "baseten"],
-    ["models", "list", "--provider", "fireworks"],
+    ["models", "list", "--provider", "fireworks"], ["models", "list", "--provider", "tinker"],
 ])
 def test_discovery_does_not_import_training_sdks_or_access_network(tmp_path, argv):
     script = '''
@@ -35,7 +35,7 @@ import builtins
 import socket
 original_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
-    if name.split('.')[0] in {'training', 'torch', 'transformers', 'fireworks', 'baseten', 'deepagents', 'langchain_openai', 'pydantic_monty', 'openai', 'anthropic'}:
+    if name.split('.')[0] in {'training', 'torch', 'transformers', 'fireworks', 'baseten', 'tinker', 'deepagents', 'langchain_openai', 'pydantic_monty', 'openai', 'anthropic'}:
         raise AssertionError(name)
     return original_import(name, *args, **kwargs)
 def no_network(*args, **kwargs):
@@ -56,7 +56,7 @@ from smithtune.cli import main
         report = json.loads(result.stdout)
         assert report["source"] == "smithtune_support_registry"
         assert report["live_availability_checked"] is False
-        expected_providers = {argv[-1]} if "--provider" in argv else {"baseten", "fireworks"}
+        expected_providers = {argv[-1]} if "--provider" in argv else {"baseten", "fireworks", "tinker"}
         assert {model["provider"] for model in report["models"]} == expected_providers
         for model in report["models"]:
             adapter = get_provider(model["provider"])

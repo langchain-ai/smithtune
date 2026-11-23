@@ -13,6 +13,7 @@ from smithtune import capabilities, dataset
 from smithtune import cli as pipeline
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.fireworks import provider as fireworks
+from smithtune.providers.tinker import provider as tinker
 from smithtune.providers.base import PipelineError
 from smithtune.providers import get_provider
 
@@ -116,7 +117,7 @@ def test_provider_specific_training_options_are_rejected(monkeypatch):
         pipeline._settings_from_args(fireworks)
 
 
-@pytest.mark.parametrize("provider", ["fireworks", "baseten"])
+@pytest.mark.parametrize("provider", ["fireworks", "baseten", "tinker"])
 @pytest.mark.parametrize("test_fraction", [None, 0.0])
 def test_cli_preparation_can_be_planned_by_standalone_provider(
     tmp_path, monkeypatch, capsys, provider, test_fraction
@@ -133,9 +134,14 @@ def test_cli_preparation_can_be_planned_by_standalone_provider(
         capability_calls.append((model, length))
         return baseten.BasetenModelCapability(model, 262_144)
 
+    def tinker_capability(model, length):
+        capability_calls.append((model, length))
+        return tinker.TinkerModelCapability(model, 65_536)
+
     monkeypatch.setattr(capabilities, "fetch_fireworks_model_capability", fireworks_capability)
     monkeypatch.setattr(baseten, "fetch_model_capability", baseten_capability)
-    adapter_module = fireworks if provider == "fireworks" else baseten
+    monkeypatch.setattr(tinker, "fetch_model_capability", tinker_capability)
+    adapter_module = {"fireworks": fireworks, "baseten": baseten, "tinker": tinker}[provider]
     monkeypatch.setattr(adapter_module, "resolve_rendering_model", lambda model: model)
     monkeypatch.setattr(
         dataset,
@@ -188,7 +194,7 @@ from pathlib import Path
 
 original_import = builtins.__import__
 def without_cli_or_sdk(name, *args, **kwargs):
-    if name.split('.')[0] in {'pipeline', 'baseten', 'fireworks', 'training'}:
+    if name.split('.')[0] in {'pipeline', 'baseten', 'fireworks', 'training', 'tinker'}:
         raise AssertionError(f'planning must not import {name}')
     return original_import(name, *args, **kwargs)
 builtins.__import__ = without_cli_or_sdk
@@ -215,6 +221,7 @@ print(json.dumps(plan))
 def test_training_provider_registry_returns_adapters():
     assert get_provider("fireworks").name == "fireworks"
     assert get_provider("baseten").name == "baseten"
+    assert get_provider("tinker").name == "tinker"
     with pytest.raises(PipelineError, match="unknown training provider"):
         get_provider("missing")
 
@@ -237,7 +244,7 @@ def test_judge_credentials_reject_missing_or_blank_provider_key(monkeypatch, pro
         validate_judge_credentials(f"{provider}/test-model")
 
 
-@pytest.mark.parametrize("provider", ["fireworks", "baseten"])
+@pytest.mark.parametrize("provider", ["fireworks", "baseten", "tinker"])
 @pytest.mark.parametrize("explicit_paths", [False, True])
 def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider, explicit_paths):
     run_dir = tmp_path / "run"
@@ -259,7 +266,7 @@ def test_cli_training_requires_confirmation_without_traceback(tmp_path, provider
     assert not (tmp_path / "runs").exists()
 
 
-@pytest.mark.parametrize("provider_name", ["fireworks", "baseten"])
+@pytest.mark.parametrize("provider_name", ["fireworks", "baseten", "tinker"])
 @pytest.mark.parametrize("run_id,run_dir", [(None, None), ("my-sft", None), (None, "output"), ("my-sft", "output")])
 def test_cli_training_generates_identity_and_preserves_overrides(
     tmp_path, monkeypatch, capsys, provider_name, run_id, run_dir

@@ -19,6 +19,9 @@ class TerminationRequested(BaseException):
 
 
 ReasoningPolicy = Literal["omit", "preserve"]
+# Token-level providers that render with official Hugging Face chat templates
+# rather than the Fireworks cookbook renderers.
+HF_RENDERED_PROVIDERS = frozenset({"baseten", "tinker"})
 
 
 @dataclass(frozen=True)

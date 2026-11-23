@@ -23,8 +23,8 @@ others) can run the whole flow:
 npx skills add langchain-ai/smithtune
 ```
 
-Set `LANGSMITH_API_KEY` and `BASETEN_API_KEY` (or `FIREWORKS_API_KEY`; see
-[credentials](#credentials-and-first-use-setup)), then check your setup:
+Set `LANGSMITH_API_KEY` and `BASETEN_API_KEY` (or `FIREWORKS_API_KEY` or
+`TINKER_API_KEY`; see [credentials](#credentials-and-first-use-setup)), then check your setup:
 
 ```bash
 smithtune acknowledge-data-rights
@@ -34,7 +34,7 @@ smithtune doctor
 Then ask your agent:
 
 ```text
-Use the smithtune skill to fine-tune a model on my LangSmith project <project> with [Baseten or Fireworks].
+Use the smithtune skill to fine-tune a model on my LangSmith project <project> with [Baseten, Fireworks, or Tinker].
 ```
 
 The flow:
@@ -87,6 +87,7 @@ Set these environment variables in the shell where you run smithtune:
 | `LANGSMITH_API_KEY` | Every workflow: dataset access, split publication, and LangSmith experiments |
 | `BASETEN_API_KEY` | Baseten training and evaluation, plus the default council and evaluation judge (DeepSeek V4.1 Flash and GLM-5.3-Flash on Baseten Model APIs) |
 | `FIREWORKS_API_KEY` | Fireworks training and evaluation, and Fireworks-hosted judges |
+| `TINKER_API_KEY` | Tinker training and evaluation; judges still need a Baseten, Fireworks, or Anthropic key |
 
 The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
 
@@ -125,7 +126,7 @@ Use the same provider and paths throughout. For an existing run, use its origina
 provider and directories. Set the workspace to the one containing your dataset:
 
 ```bash
-provider=fireworks # or baseten
+provider=fireworks # or baseten, tinker
 model=qwen3p8-27b
 workspace_id='<workspace-id>'
 data_dir='./data/my-sft'
@@ -135,25 +136,24 @@ judge_model='baseten/zai-org/GLM-5.3-Flash'  # Fireworks only: accounts/firework
 smithtune models list --provider "$provider"
 ```
 
-`qwen3p8-27b` works with both providers. Choose another supported model from the list;
+`qwen3p8-27b` works with every provider. Choose another supported model from the list;
 preparation selects its tokenizer and formatting.
 
 ### Supported Models
 
 The following models are supported for fine-tuning:
 
-| Model | Fireworks training | Baseten training |
-| --- | --- | --- |
-| Qwen3.8 27B | ✓ | ✓ |
-| Kimi K3 | ✓ | ✓ |
-| DeepSeek V4 Flash 0731 | ✓ | — |
-| Muse Glimmer 30B | ✓ | — |
-| Qwen3.5 9B | — | ✓ |
-| GLM-5.3 Flash | ✓ | ✓ |
+| Model | Fireworks training | Baseten training | Tinker training |
+| --- | --- | --- | --- |
+| Qwen3.8 27B | ✓ | ✓ | ✓ (64K context) |
+| Kimi K3 | ✓ | ✓ | — |
+| DeepSeek V4 Flash 0731 | ✓ | — | — |
+| Muse Glimmer 30B | ✓ | — | — |
+| Qwen3.5 9B | — | ✓ | ✓ (64K context) |
+| GLM-5.3 Flash | ✓ | ✓ | — |
 
-Run `smithtune models list --provider fireworks` or
-`smithtune models list --provider baseten` for the aliases and IDs supported by
-your installed version. See [Supported models](docs/reference.md#supported-models)
+Run `smithtune models list --provider <fireworks|baseten|tinker>` for the
+aliases and IDs supported by your installed version. See [Supported models](docs/reference.md#supported-models)
 for provider access requirements and the [deployment guide](docs/deployment.md)
 for serving options. Training support does not imply serverless inference availability.
 
@@ -295,7 +295,8 @@ compares it with the base model on held-out test data. Evaluation uses provider
 sampling clients to generate responses; [serving capacity, costs, and cleanup
 depend on the training mode](docs/reference.md#sampler-behavior). Fireworks supports
 serverless and dedicated LoRA training. Baseten evaluates on temporary samplers and chooses
-whether they run on serverless or dedicated capacity.
+whether they run on serverless or dedicated capacity. Tinker samples from its shared
+fleet and bills per token, so there is no capacity to clean up.
 You do not need to run `deploy` for this step.
 Omit `--evaluate` and its replay options to train only.
 
@@ -305,7 +306,7 @@ When the selected workflow's `plan` reports `execution.requires_active_client: t
 run Smithtune on an existing Linux VM to keep training independent of your local
 machine. Use a persistent disk and keep the VM running.
 
-For the Fireworks Training API and Baseten Loops integrations, GPUs run at the
+For the Fireworks Training API, Baseten Loops, and Tinker integrations, GPUs run at the
 provider. The controller VM needs CPU and memory for tokenization and data loading,
 plus outbound access to the providers and LangSmith; it needs no local GPU.
 
@@ -380,8 +381,8 @@ To change the judge, replay cap, or sampling settings, use a fresh
 
 ## Deploy a trained model
 
-Deploy when you want an endpoint for your application. Both providers
-use `deploy`; Fireworks handles promotion automatically and reuses saved promotions.
+Deploy when you want an endpoint for your application. Fireworks and Baseten
+use `deploy`; smithtune cannot deploy Tinker checkpoints yet. Fireworks handles promotion automatically and reuses saved promotions.
 Run the command for your training provider:
 
 **Fireworks**: install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl)

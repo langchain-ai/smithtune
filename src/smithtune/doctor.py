@@ -18,6 +18,7 @@ CREDENTIALS = {
     "LANGSMITH_API_KEY": "every workflow: dataset access, split publication, experiments",
     "BASETEN_API_KEY": "Baseten training and evaluation; the default triage council and default evaluation judge",
     "FIREWORKS_API_KEY": "Fireworks training and evaluation; Fireworks judges",
+    "TINKER_API_KEY": "Tinker training and evaluation",
     "ANTHROPIC_API_KEY": "anthropic/<model> evaluation judges",
     "OPENAI_API_KEY": "the optional gpt-5.6-terra triage judge",
 }
@@ -42,7 +43,7 @@ def diagnose() -> dict:
     from smithtune import data_rights
 
     packages = {}
-    for name in ("smithtune", "fireworks-training-cookbook", "fireworks-ai", "baseten-loops", "jsonschema", "langsmith", "transformers", "trl", "torch", "deepagents", "langchain-openai", "pydantic-monty"):
+    for name in ("smithtune", "fireworks-training-cookbook", "fireworks-ai", "baseten-loops", "tinker", "jsonschema", "langsmith", "transformers", "trl", "torch", "deepagents", "langchain-openai", "pydantic-monty"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
