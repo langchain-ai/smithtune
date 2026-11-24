@@ -30,9 +30,14 @@ def create_service():
     )
 
 
-def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, dict[str, Any]]:
+def checkpoint_from_run(data_dir: Path, run_dir: Path, *, step: int | None = None) -> tuple[Any, dict[str, Any]]:
     model, plan, result = load_checkpoint_context(data_dir, run_dir, provider="fireworks")
-    best = result.get("best") if isinstance(result, dict) else None
+    if step is None:
+        best = result.get("best") if isinstance(result, dict) else None
+    else:
+        from smithtune.run_artifacts import validation_at_step
+
+        best = validation_at_step(run_dir, step)
     checkpoint = best.get("resume_checkpoint") if isinstance(best, dict) else None
     mode = plan.get("training_mode", "serverless")
     if mode not in ("serverless", "dedicated"):

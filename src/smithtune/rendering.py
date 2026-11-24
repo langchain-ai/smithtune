@@ -7,7 +7,7 @@ from dataclasses import replace
 from importlib import metadata
 from typing import Any
 
-from smithtune.providers.base import ModelSpec, PipelineError
+from smithtune.providers.base import HF_RENDERED_PROVIDERS, ModelSpec, PipelineError
 
 
 SFT_TARGET_POLICY = "last_assistant_message"
@@ -20,7 +20,7 @@ def rendering_version(model: ModelSpec) -> str:
     """Identify the installed formatting implementation, not just its alias."""
     try:
         transformers_version = metadata.version("transformers")
-        if model.provider == "baseten":
+        if model.provider in HF_RENDERED_PROVIDERS:
             from smithtune.hf_rendering import HF_RENDERING_VERSION
             from smithtune.native_rendering import NATIVE_MODELS, NATIVE_RENDERING_VERSION
 
@@ -42,7 +42,7 @@ def load_training_renderer(model: ModelSpec) -> Any:
     renderer_name = resolved_renderer_name(model)
     if model.rendering_version and model.rendering_version != rendering_version(model):
         raise PipelineError("rendering implementation differs from preparation; restore dependencies or prepare again")
-    if model.provider == "baseten":
+    if model.provider in HF_RENDERED_PROVIDERS:
         from smithtune.hf_rendering import HFRenderer, load_tokenizer
         from smithtune.native_rendering import NATIVE_MODELS, NativePrefixRenderer
 
@@ -132,7 +132,7 @@ def render_row_tokens(
     _validate_renderer_messages(row["messages"], model)
     result = []
     for target in training_targets(row):
-        if model.provider == "baseten":
+        if model.provider in HF_RENDERED_PROVIDERS:
             datums = renderer.render(target["messages"], tools=target["tools"], final_target=True)
         else:
             datums = render_fireworks_target(target, renderer, include_loss_mask=include_loss_mask, reduction=reduction)
@@ -164,6 +164,7 @@ def validate_reasoning_support(model: ModelSpec) -> None:
     if resolved_renderer_name(model) not in {
         "qwen3_8_preserved", "kimi_k3", "hf_assistant", "deepseek_v4", "muse_glimmer",
         "hf_prefix_kimi_k3", "hf_prefix_qwen3_5", "hf_prefix_glm53_flash",
+        "hf_prefix_nemotron3_super", "hf_prefix_nemotron3_5_lightning",
         "glm53_flash_preserve_thinking",
     }:
         raise PipelineError(
@@ -174,7 +175,7 @@ def validate_reasoning_support(model: ModelSpec) -> None:
 
 def resolved_renderer_name(model: ModelSpec) -> str:
     """Validate an explicit thinking-history mode against the renderer registry."""
-    if model.provider == "baseten":
+    if model.provider in HF_RENDERED_PROVIDERS:
         from smithtune.hf_rendering import validate_hf_model
         from smithtune.native_rendering import NATIVE_MODELS, validate_native_model
 
@@ -289,6 +290,7 @@ def validate_replay_context(
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     *,
     max_seq_len: int | None = None,
+    reasoning_policy: str = "omit",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Reject complete replay cases that cannot fit the model context."""
     if max_output_tokens < 1:
@@ -297,6 +299,10 @@ def validate_replay_context(
         raise PipelineError("serving context must be a positive integer")
     context_limit = min(model.max_seq_len, max_seq_len) if max_seq_len is not None else model.max_seq_len
     renderer = load_training_renderer(model)
+    if model.provider in HF_RENDERED_PROVIDERS:
+        from smithtune.native_rendering import configure_replay_reasoning
+
+        configure_replay_reasoning(renderer, reasoning_policy)
     has_tools = any(case.get("tools") for case in cases)
     if has_tools and not model.requires_tool_declarations:
         raise PipelineError(
@@ -311,7 +317,7 @@ def validate_replay_context(
     rejected: list[dict[str, Any]] = []
     for case in cases:
         _validate_renderer_messages(case["messages"], model)
-        if model.provider == "baseten":
+        if model.provider in HF_RENDERED_PROVIDERS:
             prompt_tokens = len(renderer.prompt_tokens(case["messages"], tools=case.get("tools")))
         else:
             prompt_tokens = len(replay_prompt(case["messages"], case.get("tools"), model, renderer).to_ints())

@@ -75,10 +75,19 @@ def validate_judge_credentials(judge_model: str) -> None:
         require_fireworks_key(message="FIREWORKS_API_KEY is not set for the judge")
 
 
-def training_metadata(run_dir: Path | None) -> dict:
+def training_metadata(run_dir: Path | None, step: int | None = None) -> dict:
     """Read the run and selected checkpoint's epoch/step when recorded."""
     if run_dir is None:
         return {}
+    if step is not None:
+        from smithtune.run_artifacts import validation_at_step
+
+        plan_path = run_dir / "plan.json"
+        plan = _load_json(plan_path) if plan_path.exists() else {}
+        validation = validation_at_step(run_dir, step)
+        values = {"parent_training_run_id": plan.get("run_id"), "checkpoint_epoch": validation.get("epoch"),
+                  "checkpoint_step": step, "checkpoint_selection": "step"}
+        return {key: value for key, value in values.items() if value is not None}
     plan_path, result_path = run_dir / "plan.json", run_dir / "result.json"
     plan = _load_json(plan_path) if plan_path.exists() else {}
     result = _load_json(result_path) if result_path.exists() else {}
@@ -294,7 +303,9 @@ def prepare_replay_evaluation(
             except ContractError as exc:
                 raise PipelineError(f"replay case {case['id']} violates inference contract: {exc}") from exc
     context_options = {"max_seq_len": baseten_context_limit} if baseten_context_limit else {}
-    accepted, rejected = validate_replay_context(cases, model, max_output_tokens, **context_options)
+    accepted, rejected = validate_replay_context(
+        cases, model, max_output_tokens, reasoning_policy=reasoning_policy, **context_options,
+    )
     if not accepted:
         raise PipelineError("the test split contains no usable assistant replay cases")
     case_types = Counter(case["case_type"] for case in accepted)
@@ -655,10 +666,19 @@ def run_replay_evaluation(
     if concurrency < 1:
         raise PipelineError("evaluation concurrency must be positive")
     sampler_provider = replay_sampler.config["provider"] if replay_sampler is not None else None
-    candidate_credential = "BASETEN_API_KEY" if baseten_endpoint or sampler_provider == "baseten" else "FIREWORKS_API_KEY"
+    if baseten_endpoint or sampler_provider == "baseten":
+        candidate_credential = "BASETEN_API_KEY"
+    elif sampler_provider == "tinker":
+        candidate_credential = "TINKER_API_KEY"
+    else:
+        candidate_credential = "FIREWORKS_API_KEY"
     if chat is None:
         if candidate_credential == "BASETEN_API_KEY":
             require_baseten_key()
+        elif candidate_credential == "TINKER_API_KEY":
+            from smithtune.providers.tinker import require_api_key as require_tinker_key
+
+            require_tinker_key()
         else:
             require_fireworks_key()
     judge_url = judge_endpoint(judge_model)
@@ -716,6 +736,10 @@ def run_replay_evaluation(
         max_output_tokens,
         baseten_endpoint=baseten_endpoint,
     )
+    if replay_sampler is not None and hasattr(replay_sampler, "renderer"):
+        from smithtune.native_rendering import configure_replay_reasoning
+
+        configure_replay_reasoning(replay_sampler.renderer, plan["reasoning_policy"])
     cases = _load_jsonl(output_dir / "cases.jsonl")
     manifest = _load_json(data_dir / "prepared" / "manifest.json")
     global_contract = _prepared_inference_contract(data_dir, manifest)

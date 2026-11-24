@@ -133,7 +133,7 @@ def test_prepare_manifest_and_replay_use_same_policy(tmp_path, monkeypatch, poli
         "omitted": 1 if policy == "preserve" else 4,
     }
     assert manifest["conversion"]["messages_removed"] == (1 if policy == "preserve" else 2)
-    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *args: (
+    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *args, **kwargs: (
         [{**case, "prompt_tokens": 10} for case in cases], [],
     ))
     plan = evaluation.prepare_replay_evaluation(tmp_path, tmp_path / "eval")

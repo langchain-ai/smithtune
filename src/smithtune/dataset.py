@@ -889,6 +889,16 @@ def _load_split_assignments(data_dir: Path, settings: dict, *, required: bool = 
     return assignments
 
 
+def _hashed_split(key: str, validation_fraction: float, test_fraction: float) -> str:
+    """Assign an unseen source by a fixed hash range."""
+    rank = int(hashlib.sha256(f"{SPLIT_SEED}:{key}".encode()).hexdigest(), 16)
+    if rank < int(validation_fraction * 2**256):
+        return "validation"
+    if rank < int((validation_fraction + test_fraction) * 2**256):
+        return "test"
+    return "train"
+
+
 def split_rows(
     rows: list[dict[str, Any]],
     validation_fraction: float = DEFAULT_VALIDATION_FRACTION,
@@ -902,13 +912,7 @@ def split_rows(
     for row in rows:
         key = _split_key(row)
         if key not in assignments:
-            rank = int(hashlib.sha256(f"{SPLIT_SEED}:{key}".encode()).hexdigest(), 16)
-            if rank < int(validation_fraction * 2**256):
-                assignments[key] = "validation"
-            elif rank < int((validation_fraction + test_fraction) * 2**256):
-                assignments[key] = "test"
-            else:
-                assignments[key] = "train"
+            assignments[key] = _hashed_split(key, validation_fraction, test_fraction)
         partitions[assignments[key]].append(row)
     for name, fraction in zip(SPLIT_NAMES, (1 - validation_fraction - test_fraction, validation_fraction, test_fraction), strict=True):
         if fraction > 1e-9 and not partitions[name]:
@@ -946,6 +950,75 @@ def _trajectory_content_hash(row: dict[str, Any]) -> str:
             item["tool_calls"] = calls
         normalized.append(item)
     return hashlib.sha256(_canonical(normalized).encode()).hexdigest()
+
+
+def _training_identity(row: dict[str, Any]) -> str:
+    """Identify a row as a training example: its messages plus each target and its tools.
+
+    Rows with identical messages still differ as training examples when their
+    selected targets or the tools available at a target differ.
+    """
+    from smithtune.bindings import training_targets
+
+    targets = [{"message_index": target["message_index"], "tools": target["tools"]} for target in training_targets(row)]
+    return json_sha256({"messages": _trajectory_content_hash(row), "targets": targets})
+
+
+def _drop_duplicate_trajectories(
+    rows: list[dict[str, Any]], assignments: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep one row per identical training example recorded under different sources.
+
+    A source with a saved split assignment is kept first so earlier splits stay
+    stable; otherwise the lowest source key is kept.
+    """
+    def priority(row: dict[str, Any]) -> tuple[bool, str, str]:
+        key = _split_key(row)
+        return key not in assignments, key, row["_source"]["example_id"]
+
+    identities = {id(row): _training_identity(row) for row in rows}
+    kept_by_identity: dict[str, dict[str, Any]] = {}
+    for row in sorted(rows, key=priority):
+        kept_by_identity.setdefault(identities[id(row)], row)
+    kept_ids = {id(row) for row in kept_by_identity.values()}
+    duplicates = [
+        {
+            "code": "duplicate_trajectory_excluded",
+            "example_id": row["_source"]["example_id"],
+            "source_scope": row["_source"]["source_scope"],
+            "source_scope_id": row["_source"]["source_scope_id"],
+            "duplicate_of": kept_by_identity[identities[id(row)]]["_source"]["example_id"],
+            "reason": "identical training example to another trajectory (messages, targets, and tools); kept one copy",
+        }
+        for row in rows if id(row) not in kept_ids
+    ]
+    return [row for row in rows if id(row) in kept_ids], duplicates
+
+
+def _group_shared_message_splits(
+    rows: list[dict[str, Any]], assignments: dict[str, str],
+    validation_fraction: float, test_fraction: float,
+) -> None:
+    """Give trajectories with identical messages one split before assignment.
+
+    They can remain distinct training examples (different targets or tools), but
+    a copy in each split would leak the conversation into evaluation.
+    """
+    groups: dict[str, set[str]] = {}
+    for row in rows:
+        groups.setdefault(_trajectory_content_hash(row), set()).add(_split_key(row))
+    for keys in groups.values():
+        if len(keys) < 2:
+            continue
+        saved = {assignments[key] for key in keys if key in assignments}
+        if len(saved) > 1:
+            raise PipelineError(
+                "trajectories with identical messages already have different saved splits; "
+                "prepare in a new data directory to reassign them"
+            )
+        split = saved.pop() if saved else _hashed_split(min(keys), validation_fraction, test_fraction)
+        for key in keys:
+            assignments.setdefault(key, split)
 
 
 def _validate_split_isolation(
@@ -1069,8 +1142,16 @@ def prepare_dataset(
             f"({warning['source_scope']} {warning['source_scope_id']}): {warning['reason']}",
             file=sys.stderr,
         )
+    rows, duplicate_rejected = _drop_duplicate_trajectories(rows, assignments)
+    if duplicate_rejected:
+        print(
+            f"Warning: excluding {len(duplicate_rejected)} trajectories that duplicate another trajectory's "
+            "training example; one copy of each is kept. See prepared/rejected.json.",
+            file=sys.stderr,
+        )
     preparation_warnings = [*malformed_warnings, *contract_warnings, *renderer_warnings]
-    rejected = [*malformed_warnings, *contract_warnings, *context_rejected]
+    rejected = [*malformed_warnings, *contract_warnings, *context_rejected, *duplicate_rejected]
+    _group_shared_message_splits(rows, assignments, validation_fraction, test_fraction)
     train, validation, test = split_rows(rows, validation_fraction, test_fraction, assignments=assignments)
     _validate_split_isolation(train, validation, test)
     audit_value = {
@@ -1081,6 +1162,7 @@ def prepare_dataset(
         ),
         "incompatible_inference_contracts": len(contract_warnings),
         "renderer_incompatible_trajectories": len(renderer_warnings),
+        "duplicate_trajectories": len(duplicate_rejected),
     }
     manifest = {
         "schema_version": 2,

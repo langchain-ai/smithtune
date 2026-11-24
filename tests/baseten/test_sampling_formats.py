@@ -8,6 +8,7 @@ import pytest
 
 from smithtune.providers.baseten.sampling_formats import parse_completion, stop_sequences
 from smithtune.providers.baseten.provider import MODEL_SPECS
+from smithtune.providers.tinker.provider import MODEL_SPECS as TINKER_MODEL_SPECS
 
 
 class Tokenizer:
@@ -313,3 +314,39 @@ def test_recursive_object_reference_exposes_concrete_type_without_expanding_chil
     candidate = parse("qwen3p8-27b", text, tools=tools)
     assert candidate["sampling"]["format_valid"], candidate
     assert json.loads(candidate["tool_calls"][0]["function"]["arguments"]) == {"value": {"value": {}}}
+
+
+NEMOTRON = {name: model for name, model in TINKER_MODEL_SPECS.items() if "nemotron" in name}
+
+
+def nemotron_parse(name, text, *, thinking, reason="stop"):
+    renderer = SimpleNamespace(tokenizer=TOKENIZER, thinking_switch=True, replay_thinking=thinking)
+    return parse_completion(renderer, NEMOTRON[name], TOKENIZER.encode(text), reason, TOOLS)
+
+
+@pytest.mark.parametrize("name", sorted(NEMOTRON))
+def test_nemotron_thinking_on_separates_reasoning_and_qwen_style_calls(name):
+    assert stop_sequences(RENDERER, NEMOTRON[name]) == ["<|im_end|>"]
+    candidate = nemotron_parse(name, "Check it.\n</think>\n<tool_call>\n<function=weather>\n<parameter=city>\nParis\n"
+                                     "</parameter>\n</function>\n</tool_call>\n<|im_end|>", thinking=True)
+    assert candidate["sampling"]["format_valid"]
+    assert candidate["reasoning_content"] == "Check it."
+    assert json.loads(candidate["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize("name", sorted(NEMOTRON))
+def test_nemotron_thinking_off_prompt_already_closed_reasoning(name):
+    candidate = nemotron_parse(name, "It is sunny.<|im_end|>", thinking=False)
+    assert candidate["sampling"]["format_valid"]
+    assert candidate["content"] == "It is sunny." and candidate["reasoning_content"] == ""
+    candidate = nemotron_parse(name, "\n<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n"
+                                     "</function>\n</tool_call>\n<|im_end|>", thinking=False)
+    assert candidate["sampling"]["format_valid"] and candidate["tool_calls"]
+
+
+@pytest.mark.parametrize("name", sorted(NEMOTRON))
+@pytest.mark.parametrize("text", ["Reason.</think>Answer.<|im_end|>", "<think>Reason.</think>Answer.<|im_end|>"])
+def test_nemotron_thinking_off_rejects_reasoning_tags(name, text):
+    candidate = nemotron_parse(name, text, thinking=False)
+    assert not candidate["sampling"]["format_valid"]
+    assert candidate["sampling"]["parse_error"] == "unexpected response boundary"

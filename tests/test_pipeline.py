@@ -451,6 +451,86 @@ def test_prepare_keeps_all_rows_and_metadata(tmp_path: Path, monkeypatch: pytest
     assert all("_source" in json.loads(line) for line in train + validation + test)
 
 
+def _duplicate(source: dict, index: int, thread: str) -> dict:
+    copy_ = copy.deepcopy(source)
+    copy_["id"] = f"example-{index}"
+    copy_["metadata"]["source_scope_id"] = thread
+    return copy_
+
+
+def test_prepare_keeps_one_copy_of_identical_trajectories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    examples = [example(i) for i in range(10)]
+    examples += [_duplicate(examples[3], 10, "copy-a"), _duplicate(examples[3], 11, "copy-b")]
+    write_raw(tmp_path, examples)
+    monkeypatch.setattr(dataset_ops, "validate_model_context", lambda rows, model: (rows, [], {}))
+
+    manifest = dataset_ops.prepare_dataset("workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path, fetch=False)
+
+    rows = [json.loads(line) for name in dataset_ops.SPLIT_NAMES
+            for line in (tmp_path / "prepared" / f"{name}.jsonl").read_text(encoding="utf-8").splitlines()]
+    remaining = [row["_source"]["example_id"] for row in rows if row["_source"]["example_id"] in {"example-3", "example-10", "example-11"}]
+    assert len(rows) == 10 and len(remaining) == 1
+    rejected = json.loads((tmp_path / "prepared" / "rejected.json").read_text(encoding="utf-8"))
+    assert sorted(item["example_id"] for item in rejected) == sorted({"example-3", "example-10", "example-11"} - set(remaining))
+    assert all(item["code"] == "duplicate_trajectory_excluded" and item["duplicate_of"] == remaining[0] for item in rejected)
+    assert manifest["prepared"] == {"accepted": 10, "rejected": 2}
+    assert manifest["audit"]["duplicate_trajectories"] == 2
+    assert "excluding 2 trajectories that duplicate another trajectory's training example" in capsys.readouterr().err
+
+
+def _two_turns(index: int, thread: str) -> dict:
+    return example(index, [
+        message("human", "question", f"h1-{index}"), message("ai", "first answer", f"a1-{index}"),
+        message("human", "follow up", f"h2-{index}"), message("ai", "second answer", f"a2-{index}"),
+    ], thread=thread)
+
+
+@pytest.mark.parametrize("variant", ["tools", "targets"])
+def test_identical_messages_that_train_differently_are_kept_in_one_split(tmp_path, monkeypatch, variant):
+    from tests.binding_fixtures import LOOKUP, bound_example
+    from smithtune.supervision import make_supervision
+
+    examples = [example(i) for i in range(20)]
+    # These sources hash to different splits (test and train) unless grouped.
+    original, variant_copy = _two_turns(20, "pair-a"), _two_turns(21, "pair-b0")
+    if variant == "tools":
+        bound_example(variant_copy, tools=[LOOKUP])
+    else:
+        variant_copy["metadata"]["supervision"] = make_supervision(variant_copy["inputs"]["messages"], [3])
+    write_raw(tmp_path, [*examples, original, variant_copy])
+    monkeypatch.setattr(dataset_ops, "validate_model_context", lambda rows, model: (rows, [], {}))
+
+    manifest = dataset_ops.prepare_dataset("workspace-id", "dataset-id", fireworks.DEFAULT_MODEL, tmp_path, fetch=False)
+
+    placed = {row["_source"]["example_id"]: name for name in dataset_ops.SPLIT_NAMES
+              for row in map(json.loads, (tmp_path / "prepared" / f"{name}.jsonl").read_text(encoding="utf-8").splitlines())}
+    assert manifest["audit"]["duplicate_trajectories"] == 0
+    assert placed["example-20"] == placed["example-21"]
+
+
+def test_shared_message_groups_follow_a_saved_split_and_refuse_conflicting_ones():
+    rows = dataset_ops.prepare_sft_rows([_two_turns(1, "pair-a"), _two_turns(2, "pair-b")], workspace_id="workspace-id")
+    first, second = (dataset_ops._split_key(row) for row in rows)
+    assignments = {second: "test"}
+    dataset_ops._group_shared_message_splits(rows, assignments, 0.1, 0.1)
+    assert assignments == {first: "test", second: "test"}
+    with pytest.raises(PipelineError, match="different saved splits"):
+        dataset_ops._group_shared_message_splits(rows, {first: "train", second: "test"}, 0.1, 0.1)
+
+
+def test_duplicate_removal_keeps_a_source_with_a_saved_split():
+    original, later = dataset_ops.prepare_sft_rows(
+        [example(3), _duplicate(example(3), 10, "copy-a")], workspace_id="workspace-id",
+    )
+    kept, dropped = dataset_ops._drop_duplicate_trajectories(
+        [later, original], {dataset_ops._split_key(original): "test"},
+    )
+    assert kept == [original]
+    assert [(item["example_id"], item["duplicate_of"]) for item in dropped] == [("example-10", "example-3")]
+    # Without saved splits, the lowest source key is kept regardless of row order.
+    assert dataset_ops._drop_duplicate_trajectories([original, later], {})[0] == [later]
+
+
 def test_prepare_excludes_malformed_tool_trajectories_with_warning(tmp_path: Path, capsys):
     malformed = example(
         1,
@@ -1081,7 +1161,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
     monkeypatch.setattr(
         replay,
         "validate_replay_context",
-        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+        lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []),
     )
 
     candidate_contracts = []
@@ -1149,7 +1229,7 @@ def test_replay_evaluation_reports_text_scores(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(
         replay,
         "validate_replay_context",
-        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+        lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []),
     )
 
     def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):
@@ -1195,7 +1275,7 @@ def test_replay_resume_rejects_a_different_model_set(
     monkeypatch.setattr(
         replay,
         "validate_replay_context",
-        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+        lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []),
     )
 
     def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):

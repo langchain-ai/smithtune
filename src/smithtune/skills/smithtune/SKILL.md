@@ -1,6 +1,6 @@
 ---
 name: smithtune
-description: Run the smithtune fine-tuning flow end to end — select LangSmith trajectories and upload them as a dataset (pull, optional council triage, push), prepare it for Fireworks or Baseten, plan and train with base-vs-tuned evaluation, and optionally deploy. Use when a user wants to fine-tune a model on their LangSmith traces, build an SFT dataset from a tracing project, train or evaluate with smithtune, or resume/debug a smithtune run.
+description: Run the smithtune fine-tuning flow end to end — select LangSmith trajectories and upload them as a dataset (pull, optional council triage, push), prepare it for Fireworks, Baseten, or Tinker, plan and train with base-vs-tuned evaluation, and optionally deploy. Use when a user wants to fine-tune a model on their LangSmith traces, build an SFT dataset from a tracing project, train or evaluate with smithtune, or resume/debug a smithtune run.
 ---
 
 # smithtune workflow
@@ -35,7 +35,7 @@ before an unfamiliar command.
   run. Settings are frozen into these directories once work starts. To change
   source, filter, time window, limits, review mode, or rubric, use a new
   directory.
-- **Same provider throughout.** One `--provider` (`fireworks` or `baseten`)
+- **Same provider throughout.** One `--provider` (`fireworks`, `baseten`, or `tinker`)
   from `prepare` through `deploy`.
 - **Never guess IDs, fields, or thresholds.** Ask for workspace, project, and
   dataset IDs. Build filters only from fields you have seen in the project.
@@ -61,6 +61,7 @@ Check:
 | Baseten | `LANGSMITH_API_KEY`, `BASETEN_API_KEY` (Model API access covers the default council and evaluation judge) |
 | Fireworks, with a Baseten key | `LANGSMITH_API_KEY`, `FIREWORKS_API_KEY`, `BASETEN_API_KEY` for the default judges |
 | Fireworks only | `LANGSMITH_API_KEY`, `FIREWORKS_API_KEY`; then pass `--judges deepseek-v4.1-flash,glm-5.3-flash` to `triage` and set `judge_model=accounts/fireworks/models/deepseek-v4p1-flash` |
+| Tinker | `LANGSMITH_API_KEY`, `TINKER_API_KEY`, and judge keys: `BASETEN_API_KEY` for the defaults, or `FIREWORKS_API_KEY` with the Fireworks judges above |
 
 - The requested model is in `models list`.
 - Data rights are acknowledged. If not, the user must run
@@ -70,7 +71,7 @@ Check:
 Set the values used below once, and reuse them in every command:
 
 ```bash
-provider=baseten                 # or fireworks; --provider defaults to fireworks, so always pass it
+provider=baseten                 # or fireworks or tinker; --provider defaults to fireworks, so always pass it
 model=qwen3p8-27b                # from `smithtune models list`
 workspace_id='<workspace-id>'
 project_id='<project-id>'
@@ -389,8 +390,9 @@ requests, see [reasoning settings](https://github.com/langchain-ai/smithtune/blo
 Check:
 - Split counts. Validation and test must be non-empty for training and
   evaluation to mean anything; tiny datasets can produce empty splits.
-- `"$data_dir/prepared/rejected.json"`: trajectories dropped as unsupported or
-  over the context limit (never truncated). If many are too long, ask the user
+- `"$data_dir/prepared/rejected.json"`: trajectories dropped as unsupported,
+  over the context limit (never truncated), or exact duplicate training examples
+  (same messages, targets, and tools) of a kept trajectory. If many are too long, ask the user
   before lowering `--max-seq-len` or choosing a longer-context model.
 - Split publication succeeded. If only publication failed, run
   `smithtune dataset publish-splits --data-dir "$data_dir"`; do not re-prepare.
@@ -496,6 +498,9 @@ smithtune train \
   only.
 - Baseten's optional spend guard needs both `--max-spend-usd` and
   `--hourly-rate-usd`.
+- Tinker bills training, prefill, and sampling tokens and has no spend guard.
+  Base the authorization on `plan`'s token and step counts. Saved Tinker
+  checkpoints are kept until the user deletes them.
 
 Check:
 - For a detached run, check `status --run-dir "$run_dir"` and
@@ -530,16 +535,25 @@ smithtune evaluate --provider "$provider" --data-dir "$data_dir" --run-dir "$run
 Rerunning reuses completed predictions and judgments. To change the judge, cap,
 or sampling settings, pass a fresh `--output-dir` to both commands.
 
+To compare checkpoints, for example one per epoch, the run must have been trained
+with `--sampler-checkpoints all` (Baseten and Tinker; Fireworks always saves them).
+Pass `--checkpoint-step N` with a step from `"$run_dir/validations.json"` to both
+commands; results go to `"$run_dir/replay-step-N"`. Suggest the flag at `plan` time
+when the user wants a per-epoch comparison.
+
 Fireworks reuses the saved checkpoint and training mode; a promoted model ID
 alone cannot be sampled. Baseten replay uses two temporary samplers, on serverless
 or dedicated capacity as Baseten chooses, and deactivates them on exit. Their
-sampling and judge costs fall outside the training spend guard. See [sampler behavior](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#sampler-behavior)
+sampling and judge costs fall outside the training spend guard. Tinker leaves
+no capacity to clean up. See [sampler behavior](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#sampler-behavior)
 for capacity and cleanup details.
 
 ## 9. Deploy (optional)
 
 Only when the user wants a standing endpoint; evaluation does not need one.
-`deploy` and `undeploy` work for both providers with provider-specific flags.
+`deploy` and `undeploy` work for Fireworks and Baseten with provider-specific
+flags. Smithtune cannot deploy Tinker checkpoints yet; tell the user that
+`deploy --provider tinker` is refused rather than attempting it.
 See the [deployment guide](https://github.com/langchain-ai/smithtune/blob/main/docs/deployment.md)
 for details.
 
@@ -596,7 +610,7 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | "Data Rights and Permitted Use has not been acknowledged" | First-run acknowledgment missing | User runs `smithtune acknowledge-data-rights` interactively |
-| 401/403 from LangSmith, Fireworks, Baseten, OpenAI, or Anthropic | Key missing, wrong, or for another workspace/account; Baseten judges also need Model API access on the key | Check `doctor`, then the key's workspace; see README credentials |
+| 401/403 from LangSmith, Fireworks, Baseten, Tinker, OpenAI, or Anthropic | Key missing, wrong, or for another workspace/account; Baseten judges also need Model API access on the key | Check `doctor`, then the key's workspace; see README credentials |
 | "BASETEN_API_KEY is not set for the judge" on a Fireworks run | The default council and evaluation judge run on Baseten | Set `BASETEN_API_KEY`, or use the Fireworks judges from step 0 |
 | Pull downloads 0 or very few candidates | Filter fields wrong, or window too narrow | Re-test the filter with `langsmith trace list` over the same window; pull into a new directory |
 | Most trajectories excluded at pull | Missing per-assistant tool data, multimodal content, provider built-in tools | Read reasons in `download_summary` and per-trajectory errors |
@@ -613,9 +627,14 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | "Baseten workspace does not advertise MODEL" | Model not available to the Baseten workspace | Confirm model ID via `models list`; contact Baseten for access |
 | "Baseten workspace context limit is below N" | Sequence length above Baseten's limit | Lower `--max-seq-len` at prepare, or pick another model |
 | "Baseten workspace is enabled for N tokens of MODEL" | Workspace approval is below the model's catalog limit | Prepare again with the suggested `--max-seq-len N` |
+| "Tinker does not advertise MODEL" | Model not offered to this Tinker account | Confirm the model via `models list --provider tinker`; check Tinker's model list |
+| "Tinker supports N tokens of MODEL" | Prepared context above Tinker's limit for that model | Prepare again with the suggested `--max-seq-len N` |
+| "smithtune uses the standard Tinker API; unset TINKER_BASE_URL" | A custom Tinker endpoint is configured | Unset `TINKER_BASE_URL`; smithtune sends Tinker credentials only to the standard API |
 | Pull excludes "returned no messages" for fresh traces | LangSmith had not yet indexed the trajectories | Wait a minute, then pull into a new directory |
 | "Baseten has no capacity to provision this trainer (HTTP 429)" | No trainer capacity available now; nothing was provisioned | Retry later with a new `--run-dir`, or ask Baseten about capacity |
 | "Baseten refused to create the trainer (HTTP 403)" | Trainer GPU quota or access; Baseten's reason follows | Stop running trainers or ask Baseten to raise the limit |
+| "no validation at step N" from `--checkpoint-step` | That step was not validated | Pick a step listed in the error, from `"$run_dir/validations.json"` |
+| "step N saved no sampler weights" | Baseten or Tinker run trained with the default `--sampler-checkpoints best` | Evaluate the best checkpoint, or train a new run with `--sampler-checkpoints all` |
 | Train refuses the run directory | `--run-dir` not empty | New run directory; never clear an old one |
 | Evaluation stops before paid work on resume | Settings differ from the saved run | Re-run with the original settings |
 | "Fireworks blocks firectl from changing resources inside an AI agent" | firectl refuses deploy/undeploy under an agent | Give the user the printed `smithtune` command to run in their own terminal |

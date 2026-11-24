@@ -47,6 +47,23 @@ SDK client does not release capacity: deactivate each owned sampler explicitly.
 Requests send no scope, so Baseten chooses placement, which can be serverless.
 A serverless sampler has no model or deployment ID, so its receipt and cleanup
 use the sampler ID. Test serverless and dedicated samplers when changing either adapter.
+`providers/lora_sft.py` holds the client-driven LoRA loop shared by Baseten Loops
+and Tinker: microbatch packing, gradient accumulation, forward-only validation,
+best-checkpoint pairing, and optional sampler saves at every validation. Providers
+supply trainer operations that return a token-mean loss, plus provisioning, an
+optional guard, and cleanup. Loops reports token-mean losses with a `-100` target
+sentinel. Tinker reports `loss:sum` and indexes real target tokens, so its adapter
+keeps zero-weight real tokens and scales each step's weights by the inverse of its
+active target tokens. Run both providers' tests when changing the shared loop.
+
+`providers/tinker/` trains with the Tinker SDK's `ServiceClient` and samples saved
+`tinker://…/sampler_weights/…` checkpoints through `create_sampling_client`.
+Tinker serves samplers from its shared fleet, so replay owns no capacity; the
+adapter only closes its session. It shares the Hugging Face renderers and
+completion parsers with Baseten (`HF_RENDERED_PROVIDERS`); Nemotron's are Tinker-only.
+Credentials go only to the standard Tinker API. No test contacts Tinker; a paid
+smoke test is still needed after changing either adapter.
+
 `providers/baseten/sampling_formats.py` parses the pinned official model formats without a
 Fireworks renderer dependency. Test native-tokenizer roundtrips, malformed tool
 calls, best-checkpoint identity, cleanup failures, and cached-generation resume

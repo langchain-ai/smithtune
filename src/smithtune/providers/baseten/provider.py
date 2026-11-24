@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import math
 import json
-import hashlib
 import os
-import random
 import re
 import signal
 import sys
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 import urllib.error
@@ -33,7 +30,7 @@ from smithtune.providers.base import (
     TerminationRequested,
     TrainingOptions,
 )
-from smithtune.providers.validation import training_schedule
+from smithtune.providers import lora_sft
 
 
 # Loops uses this sentinel for targets excluded from assistant-only loss.
@@ -119,6 +116,9 @@ class BudgetExceeded(BasetenRuntimeError):
     """The configured Baseten active-time ceiling has been reached."""
 
 
+ERRORS = lora_sft.ProviderErrors("Baseten", BasetenDataError, BasetenRuntimeError)
+
+
 def _maximum_active_seconds(
     max_spend_usd: float | None, hourly_rate_usd: float | None,
     spend_reserve_fraction: float,
@@ -168,6 +168,7 @@ class BasetenSFTSettings(CommonSFTSettings):
     replicas: int = 1
     spend_reserve_fraction: float = 0.1
     max_dropped_training_rows: int = 1
+    sampler_checkpoints: str = "best"
 
     def validate(self) -> None:
         numeric = {
@@ -204,6 +205,8 @@ class BasetenSFTSettings(CommonSFTSettings):
         if invalid_counts:
             raise PipelineError("invalid Baseten count settings: " + ", ".join(invalid_counts))
         super().validate()
+        if self.sampler_checkpoints not in lora_sft.SAMPLER_CHECKPOINT_POLICIES:
+            raise PipelineError("sampler_checkpoints must be 'best' or 'all'")
         _maximum_active_seconds(self.max_spend_usd, self.hourly_rate_usd, self.spend_reserve_fraction)
 
     def maximum_active_seconds(self) -> float | None:
@@ -743,7 +746,7 @@ class BasetenProvider:
             raise PipelineError("--lora-alpha, --pipeline-depth, --training-mode, --training-shape, and --provisioning-timeout are Fireworks-only")
         optional = {
             name: getattr(options, name)
-            for name in ("replicas", "spend_reserve_fraction", "max_dropped_training_rows")
+            for name in ("replicas", "spend_reserve_fraction", "max_dropped_training_rows", "sampler_checkpoints")
             if getattr(options, name) is not None
         }
         settings = BasetenSFTSettings(
@@ -815,12 +818,6 @@ class BasetenProvider:
         _validate_canonical_rows(_train_rows, split="train")
         prepared_max_seq_len = _prepared_max_sequence_tokens(manifest, model)
         max_seq_len = min(prepared_max_seq_len, model.training_context_limit)
-        from smithtune.dataset import _has_message_content
-
-        assistant_targets = sum(
-            message.get("role") == "assistant" and _has_message_content(message)
-            for row in _train_rows for message in row["messages"]
-        )
         value = {
             "run_id": run_id,
             "provider": self.name,
@@ -854,16 +851,15 @@ class BasetenProvider:
                 "capacity": CAPACITY,
                 "with_sampler": False,
                 "max_dropped_training_rows": settings.max_dropped_training_rows,
+                "sampler_checkpoints": settings.sampler_checkpoints,
             },
-            "training_schedule": {
-                **training_schedule(assistant_targets, settings.batch_size,
-                                    settings.max_epochs, settings.validation_every_steps),
-                "training_units": assistant_targets,
-                "training_unit": "assistant_targets",
-                "estimate": True,
-            },
+            "training_schedule": lora_sft.estimated_schedule(_train_rows, settings),
             "evaluation": "forward-only cross-entropy on the held-out validation split",
-            "checkpoint": "resumable state at every validation and sampler weights for each new best",
+            "checkpoint": (
+                "resumable state and sampler weights at every validation"
+                if settings.sampler_checkpoints == "all"
+                else "resumable state at every validation and sampler weights for each new best"
+            ),
             "budget": {
                 "enabled": settings.max_spend_usd is not None,
                 "max_spend_usd": settings.max_spend_usd,
@@ -928,75 +924,22 @@ class BasetenProvider:
         render_fn = self._render_fn or render_row
         renderer_factory = self._renderer_factory or _load_renderer
         renderer = renderer_factory(model)
-        rendered_train = [
-            render_fn(row, model, loops_types=loops_types, renderer=renderer)
-            for row in train_rows
-        ]
-        rendered_validation = [
-            render_fn(row, model, loops_types=loops_types, renderer=renderer)
-            for row in validation_rows
-        ]
-        if any(not values for values in rendered_train + rendered_validation):
-            raise BasetenDataError("every prepared row must render training data")
-
-        dropped_train_rows = [
-            {
-                "prepared_index": index,
-                "model_input_tokens": max(
-                    _datum_token_count(datum) for datum in values
-                ),
-                "reason": f"exceeds trainer limit of {max_seq_len:,} tokens",
-            }
-            for index, values in enumerate(rendered_train)
-            if any(_datum_token_count(datum) > max_seq_len for datum in values)
-        ]
-        if len(dropped_train_rows) > settings.max_dropped_training_rows:
-            raise BasetenDataError(
-                f"{len(dropped_train_rows)} training rows exceed the Baseten trainer limit; "
-                f"configured maximum dropped training rows is {settings.max_dropped_training_rows}"
-            )
-        oversized_validation_rows = [
-            index
-            for index, values in enumerate(rendered_validation)
-            if any(_datum_token_count(datum) > max_seq_len for datum in values)
-        ]
-        if oversized_validation_rows:
-            raise BasetenDataError(
-                "validation data exceeds the Baseten trainer sequence limit"
-            )
-        dropped_indices = {
-            item["prepared_index"] for item in dropped_train_rows
-        }
-        rendered_train = [
-            values
-            for index, values in enumerate(rendered_train)
-            if index not in dropped_indices
-        ]
-        if not rendered_train:
-            raise BasetenDataError("no training rows remain within the trainer limit")
-        training_units = sum(len(values) for values in rendered_train)
-        plan["training_schedule"] = {
-            **training_schedule(training_units, settings.batch_size,
-                                settings.max_epochs, settings.validation_every_steps),
-            "training_units": training_units,
-            "training_unit": "rendered_datums",
-            "estimate": False,
-        }
+        splits = lora_sft.render_splits(
+            train_rows,
+            validation_rows,
+            render=lambda row: render_fn(row, model, loops_types=loops_types, renderer=renderer),
+            max_seq_len=max_seq_len,
+            microbatch_token_budget=settings.microbatch_token_budget,
+            max_dropped_training_rows=settings.max_dropped_training_rows,
+            errors=ERRORS,
+        )
+        plan["training_schedule"] = lora_sft.rendered_schedule(splits, settings)
         plan["dataset"].update(
             {
                 "prepared_train_rows": len(train_rows),
-                "train_rows": len(rendered_train),
-                "dropped_train_rows": dropped_train_rows,
+                "train_rows": len(splits.train),
+                "dropped_train_rows": splits.dropped_train_rows,
             }
-        )
-        # Check the same packing constraints before paid provisioning.
-        pack_microbatches(
-            (datum for values in rendered_train for datum in values),
-            settings.microbatch_token_budget,
-        )
-        validation_batches = pack_microbatches(
-            (datum for values in rendered_validation for datum in values),
-            settings.microbatch_token_budget,
         )
 
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,18 +998,20 @@ class BasetenProvider:
             spend_reserve_fraction=settings.spend_reserve_fraction,
             clock=self._monotonic,
         )
-        epochs: list[dict[str, Any]] = []
-        validations: list[dict[str, Any]] = []
-        step_losses: list[dict[str, Any]] = []
-        lowest_loss = math.inf
-        patience_loss = math.inf
-        epochs_without_patience_improvement = 0
-        best_epoch: int | None = None
-        best_step: int | None = None
-        best_state_uri: str | None = None
-        best_sampler_uri: str | None = None
-        last_state_uri: str | None = None
-        completed_step = 0
+        loop = lora_sft.SFTLoop(
+            trainer=None,  # bound once Baseten provisions the trainer
+            settings=settings,
+            run_id=run_id,
+            splits=splits,
+            run_dir=run_dir,
+            update_state=update_state,
+            errors=ERRORS,
+            guard=budget,
+            deferred=(BudgetExceeded,),
+            retry=lambda operation: retry_idempotent(operation, sleeper=self._sleeper),
+            state_extras=lambda: {"active_seconds": budget.elapsed_seconds},
+            save_every_sampler=settings.sampler_checkpoints == "all",
+        )
         service: Any | None = None
         trainer: Any | None = None
         session_id: str | None = None
@@ -1076,7 +1021,6 @@ class BasetenProvider:
         previous_sigterm_handler: Any = None
         sigterm_handler_installed = False
         budget_stopped = False
-        stopped_early = False
         deactivated: list[str] = []
 
         result: dict[str, Any] = {
@@ -1091,9 +1035,9 @@ class BasetenProvider:
             "split": plan["dataset"],
             "renderer_identity": renderer_identity,
             "capability": asdict(capability),
-            "epochs": epochs,
-            "validations": validations,
-            "step_losses": step_losses,
+            "epochs": loop.epochs,
+            "validations": loop.validations,
+            "step_losses": loop.step_losses,
             "last_resumable_state_uri": None,
             "best_resumable_state_uri": None,
             "best_sampler_weights_uri": None,
@@ -1114,102 +1058,6 @@ class BasetenProvider:
                 "error": None,
             },
         }
-
-        def validate_checkpoint(epoch: int, *, epoch_end: bool) -> tuple[dict[str, Any], BudgetExceeded | None]:
-            nonlocal lowest_loss, best_epoch, best_step, best_state_uri, best_sampler_uri, last_state_uri
-            validation_weighted_loss = 0.0
-            validation_active_tokens = 0.0
-            for microbatch in validation_batches:
-                def validation_forward(microbatch=microbatch):
-                    budget.check("validation step")
-                    return trainer.forward(microbatch, "cross_entropy").result()
-
-                validation_result = retry_idempotent(
-                    validation_forward,
-                    sleeper=self._sleeper,
-                )
-                loss, active_tokens, metrics = _finite_loss_result(
-                    validation_result,
-                    operation="validation forward",
-                    fallback_active_tokens=_batch_active_tokens(microbatch),
-                )
-                validation_weighted_loss += loss * active_tokens
-                validation_active_tokens += active_tokens
-                step_losses.append(
-                    {
-                        "epoch": epoch,
-                        "step": completed_step,
-                        "operation": "validation_forward",
-                        "examples": len(microbatch),
-                        "loss": loss,
-                        "active_tokens": active_tokens,
-                        "metrics": metrics,
-                    }
-                )
-            if validation_active_tokens <= 0:
-                raise BasetenRuntimeError("validation returned no active target tokens")
-            validation_loss = validation_weighted_loss / validation_active_tokens
-            sampler_improved = validation_loss < lowest_loss
-            suffix = (
-                f"epoch-{epoch}" if settings.validation_every_steps is None
-                else f"step-{completed_step}"
-            )
-            post_checkpoint_budget_error: BudgetExceeded | None = None
-            budget.check("validation state checkpoint")
-            candidate_state_uri = _checkpoint_path(
-                trainer.save_state(_checkpoint_name(run_id, f"state-{suffix}")).result(),
-                operation="save_state",
-            )
-            try:
-                budget.check("validation state checkpoint")
-            except BudgetExceeded as exc:
-                if sampler_improved:
-                    raise
-                post_checkpoint_budget_error = exc
-            candidate_sampler_uri: str | None = None
-            if sampler_improved:
-                budget.check("best checkpoint")
-                candidate_sampler_uri = _checkpoint_path(
-                    trainer.save_weights_for_sampler(
-                        _checkpoint_name(run_id, f"sampler-{suffix}")
-                    ).result(),
-                    operation="save_weights_for_sampler",
-                )
-                try:
-                    budget.check("best checkpoint")
-                except BudgetExceeded as exc:
-                    post_checkpoint_budget_error = exc
-
-            # A best checkpoint always pairs resume state and sampler weights
-            # from the same completed optimizer update.
-            validation = {
-                "epoch": epoch,
-                "step": completed_step,
-                "epoch_end": epoch_end,
-                "validation_loss": validation_loss,
-                "resumable_state_uri": candidate_state_uri,
-                "sampler_weights_uri": candidate_sampler_uri,
-                "new_best": sampler_improved,
-            }
-            _atomic_json(validations_path, [*validations, validation])
-            validations.append(validation)
-            last_state_uri = candidate_state_uri
-            if sampler_improved:
-                lowest_loss = validation_loss
-                best_epoch = epoch
-                best_step = completed_step
-                best_state_uri = candidate_state_uri
-                best_sampler_uri = candidate_sampler_uri
-            update_state(
-                completed_step=completed_step,
-                last_resumable_state_uri=last_state_uri,
-                best_resumable_state_uri=best_state_uri,
-                best_sampler_weights_uri=best_sampler_uri,
-                best_epoch=best_epoch,
-                best_step=best_step,
-                active_seconds=budget.elapsed_seconds,
-            )
-            return validation, post_checkpoint_budget_error
 
         try:
             update_state(status="provisioning")
@@ -1256,89 +1104,8 @@ class BasetenProvider:
                 trainer.load_state_with_optimizer(init_from_checkpoint).result()
                 budget.check("checkpoint initialization")
             update_state(status="training")
-
-            for epoch in range(1, settings.max_epochs + 1):
-                epoch_rows = list(rendered_train)
-                random.Random(settings.seed + epoch - 1).shuffle(epoch_rows)
-                train_datums = [datum for values in epoch_rows for datum in values]
-                microbatches = pack_microbatches(
-                    train_datums, settings.microbatch_token_budget
-                )
-                groups = plan_accumulation_groups(
-                    microbatches, effective_batch_size=settings.batch_size
-                )
-                epoch_weighted_loss = 0.0
-                epoch_active_tokens = 0.0
-                optimizer_steps = 0
-                for group_index, group in enumerate(groups, start=1):
-                    for microbatch in group:
-                        budget.check("training step")
-                        training_result = trainer.forward_backward(microbatch).result()
-                        loss, active_tokens, metrics = _finite_loss_result(
-                            training_result,
-                            operation="forward_backward",
-                            fallback_active_tokens=_batch_active_tokens(microbatch),
-                        )
-                        epoch_weighted_loss += loss * active_tokens
-                        epoch_active_tokens += active_tokens
-                        step_losses.append(
-                            {
-                                "epoch": epoch,
-                                "operation": "forward_backward",
-                                "examples": len(microbatch),
-                                "loss": loss,
-                                "active_tokens": active_tokens,
-                                "metrics": metrics,
-                            }
-                        )
-                    budget.check("optimizer step")
-                    optimizer_result = trainer.optim_step(
-                        loops_types.AdamParams(learning_rate=settings.learning_rate)
-                    ).result()
-                    _finite_metrics(optimizer_result, operation="optimizer step")
-                    optimizer_steps += 1
-                    completed_step += 1
-                    epoch_end = group_index == len(groups)
-                    interval_due = (
-                        settings.validation_every_steps is not None
-                        and completed_step % settings.validation_every_steps == 0
-                    )
-                    if not (epoch_end or interval_due):
-                        continue
-                    validation, post_checkpoint_budget_error = validate_checkpoint(
-                        epoch, epoch_end=epoch_end
-                    )
-                    if epoch_end:
-                        if epoch_active_tokens <= 0:
-                            raise BasetenRuntimeError("epoch returned no active target tokens")
-                        validation_loss = validation["validation_loss"]
-                        # Patience counts epochs, independent of interval checks.
-                        if validation_loss < patience_loss - settings.early_stopping_min_delta:
-                            patience_loss = validation_loss
-                            epochs_without_patience_improvement = 0
-                        else:
-                            epochs_without_patience_improvement += 1
-                        epochs.append({
-                            "epoch": epoch,
-                            "step": completed_step,
-                            "train_loss": epoch_weighted_loss / epoch_active_tokens,
-                            "validation_loss": validation_loss,
-                            "optimizer_steps": optimizer_steps,
-                            "resumable_state_uri": validation["resumable_state_uri"],
-                            "sampler_weights_uri": validation["sampler_weights_uri"],
-                            "new_best": validation["new_best"],
-                        })
-                        _atomic_json(epochs_path, epochs)
-                        update_state(completed_epoch=epoch)
-                    if post_checkpoint_budget_error is not None:
-                        raise post_checkpoint_budget_error
-                if (
-                    settings.early_stopping_patience is not None
-                    and epochs_without_patience_improvement
-                    >= settings.early_stopping_patience
-                ):
-                    stopped_early = True
-                    break
+            loop.trainer = _LoopsOperations(trainer, loops_types)
+            loop.run()
         except BudgetExceeded:
             budget_stopped = True
         except BaseException as exc:
@@ -1385,22 +1152,7 @@ class BasetenProvider:
         status = "budget_stopped" if budget_stopped else "completed"
         if primary_error is not None or cleanup_errors:
             status = "failed"
-        result.update(
-            {
-                "status": status,
-                "epochs": epochs,
-                "validations": validations,
-                "step_losses": step_losses,
-                "completed_step": completed_step,
-                "last_resumable_state_uri": last_state_uri,
-                "best_resumable_state_uri": best_state_uri,
-                "best_sampler_weights_uri": best_sampler_uri,
-                "best_epoch": best_epoch,
-                "best_step": best_step,
-                "stopped_early": stopped_early,
-                "primary_error": safe_primary_error,
-            }
-        )
+        result.update({**loop.summary(), "status": status, "primary_error": safe_primary_error})
         result["budget"].update(
             {
                 "elapsed_seconds": final_active_seconds,
@@ -1410,13 +1162,13 @@ class BasetenProvider:
         try:
             update_state(
                 status=status,
-                completed_epoch=len(epochs),
-                completed_step=completed_step,
-                last_resumable_state_uri=last_state_uri,
-                best_resumable_state_uri=best_state_uri,
-                best_sampler_weights_uri=best_sampler_uri,
-                best_epoch=best_epoch,
-                best_step=best_step,
+                completed_epoch=len(loop.epochs),
+                completed_step=loop.completed_step,
+                last_resumable_state_uri=loop.last_state_uri,
+                best_resumable_state_uri=loop.best_state_uri,
+                best_sampler_weights_uri=loop.best_sampler_uri,
+                best_epoch=loop.best_epoch,
+                best_step=loop.best_step,
                 # Active time is measured only by the optional spend guard.
                 active_seconds=(
                     final_active_seconds if settings.max_spend_usd is not None else None
@@ -1430,8 +1182,8 @@ class BasetenProvider:
                 cleanup_error=result["cleanup"]["error"],
                 primary_error=safe_primary_error,
             )
-            _atomic_json(epochs_path, epochs)
-            _atomic_json(validations_path, validations)
+            _atomic_json(epochs_path, loop.epochs)
+            _atomic_json(validations_path, loop.validations)
             _atomic_json(result_path, result)
         except BaseException as exc:
             if primary_error is None:
@@ -1453,6 +1205,7 @@ class BasetenProvider:
             raise primary_error
         if cleanup_error is not None:
             raise cleanup_error
+        best_sampler_uri = loop.best_sampler_uri
         if replay is not None:
             from smithtune.providers.baseten.sampling import BasetenReplaySampler
             from smithtune.evaluation.replay import run_replay_evaluation, training_metadata
@@ -1497,27 +1250,7 @@ def render_row(
 
 def pack_microbatches(datums: Iterable[Any], token_budget: int) -> list[list[Any]]:
     """Greedily pack in order and reject trajectories larger than the budget."""
-    if token_budget < 1:
-        raise BasetenDataError("microbatch token budget must be positive")
-
-    batches: list[list[Any]] = []
-    current: list[Any] = []
-    current_tokens = 0
-    for datum in datums:
-        token_count = _datum_token_count(datum)
-        if token_count > token_budget:
-            raise BasetenDataError(
-                "datum exceeds the configured microbatch token budget"
-            )
-        if current and current_tokens + token_count > token_budget:
-            batches.append(current)
-            current = []
-            current_tokens = 0
-        current.append(datum)
-        current_tokens += token_count
-    if current:
-        batches.append(current)
-    return batches
+    return lora_sft.pack_microbatches(datums, token_budget, error=BasetenDataError)
 
 
 def plan_accumulation_groups(
@@ -1526,67 +1259,51 @@ def plan_accumulation_groups(
     effective_batch_size: int,
 ) -> list[list[list[Any]]]:
     """Group ordered microbatches for example-counted gradient accumulation."""
-    if effective_batch_size < 1:
-        raise BasetenDataError("effective batch size must be positive")
-
-    groups: list[list[list[Any]]] = []
-    current: list[list[Any]] = []
-    examples = 0
-    for batch in microbatches:
-        remaining = list(batch)
-        if not remaining:
-            raise BasetenDataError("microbatches must not be empty")
-        while remaining:
-            capacity = effective_batch_size - examples
-            segment, remaining = remaining[:capacity], remaining[capacity:]
-            current.append(segment)
-            examples += len(segment)
-            if examples == effective_batch_size:
-                groups.append(current)
-                current = []
-                examples = 0
-    if current:
-        groups.append(current)
-    return groups
+    return lora_sft.plan_accumulation_groups(
+        microbatches, effective_batch_size=effective_batch_size, error=BasetenDataError,
+    )
 
 
 def _to_loops_datum(rendered: Any, loops_types: Any, max_sequence_tokens: int) -> Any:
-    try:
-        token_ids = [int(token) for token in rendered.token_ids]
-        token_weights = [float(weight) for weight in rendered.token_weights]
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise BasetenDataError("renderer returned invalid token IDs or weights") from exc
-    if len(token_ids) < 2:
-        raise BasetenDataError("rendered trajectory needs at least two tokens")
-    if len(token_ids) != len(token_weights):
-        raise BasetenDataError("rendered token IDs and weights have different lengths")
-    if len(token_ids) > max_sequence_tokens:
-        raise BasetenDataError(
-            f"rendered trajectory exceeds the {max_sequence_tokens:,}-token limit"
-        )
-    if any(not math.isfinite(weight) or weight not in (0.0, 1.0) for weight in token_weights):
-        raise BasetenDataError("renderer weights must be finite binary assistant masks")
-
-    inputs = token_ids[:-1]
-    weights = token_weights[1:]
-    if not any(weights):
-        raise BasetenDataError("rendered trajectory has no trainable assistant tokens")
-    targets = [token if weight else IGNORE_INDEX for token, weight in zip(token_ids[1:], weights, strict=True)]
-    return loops_types.Datum(
-        model_input=loops_types.ModelInput.from_ints(inputs),
-        loss_fn_inputs={
-            "target_tokens": loops_types.TensorData(
-                data=targets,
-                dtype="int64",
-                shape=[len(inputs)],
-            ),
-            "weights": loops_types.TensorData(
-                data=weights,
-                dtype="float32",
-                shape=[len(inputs)],
-            ),
-        },
+    return lora_sft.to_datum(
+        rendered, loops_types, max_sequence_tokens, ignore_index=IGNORE_INDEX, error=BasetenDataError,
     )
+
+
+class _LoopsOperations:
+    """Interpret Loops results; its losses are already token-weighted means."""
+
+    def __init__(self, trainer: Any, loops_types: Any) -> None:
+        self.trainer = trainer
+        self.loops_types = loops_types
+
+    def forward_backward(self, microbatch: list[Any], *, group_active_tokens: float):
+        return _finite_loss_result(
+            self.trainer.forward_backward(microbatch).result(),
+            operation="forward_backward",
+            fallback_active_tokens=_batch_active_tokens(microbatch),
+        )
+
+    def forward(self, microbatch: list[Any]):
+        return _finite_loss_result(
+            self.trainer.forward(microbatch, "cross_entropy").result(),
+            operation="validation forward",
+            fallback_active_tokens=_batch_active_tokens(microbatch),
+        )
+
+    def optim_step(self, learning_rate: float) -> dict[str, float]:
+        return _finite_metrics(
+            self.trainer.optim_step(self.loops_types.AdamParams(learning_rate=learning_rate)).result(),
+            operation="optimizer step",
+        )
+
+    def save_state(self, name: str) -> str:
+        return _checkpoint_path(self.trainer.save_state(name).result(), operation="save_state")
+
+    def save_weights_for_sampler(self, name: str) -> str:
+        return _checkpoint_path(
+            self.trainer.save_weights_for_sampler(name).result(), operation="save_weights_for_sampler",
+        )
 
 
 def _load_renderer(model: Any) -> Any:
@@ -1604,71 +1321,14 @@ def _resolve_loops_types() -> Any:
 
 
 def _datum_token_count(datum: Any) -> int:
-    try:
-        count = len(datum.model_input.to_ints())
-    except (AttributeError, TypeError) as exc:
-        raise BasetenDataError("datum has no readable model input tokens") from exc
-    if count < 1:
-        raise BasetenDataError("datum has no model input tokens")
-    return count
+    return lora_sft.datum_token_count(datum, error=BasetenDataError)
 
 
-def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _sha256_json(value: Any) -> str:
-    canonical = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
-
-
-def _audit_identity(
-    data_dir: Path, manifest: dict[str, Any], plan: dict[str, Any]
-) -> dict[str, Any]:
-    prepared = data_dir / "prepared"
-    source = manifest["langsmith"]
-    renderer_identity = {
-        "renderer": plan["config"]["renderer"],
-        "tokenizer_revision": plan["config"]["tokenizer_revision"],
-    }
-    return {
-        "started_at_utc": datetime.now(UTC).isoformat(),
-        "model_identity": plan["model"],
-        "model_sha256": _sha256_json(plan["model"]),
-        "source_dataset_identity": {
-            "workspace_id": source.get("workspace_id"),
-            "dataset_id": source.get("dataset_id"),
-            "examples": source.get("examples"),
-            "source_examples_sha256": manifest.get("source_examples_sha256"),
-        },
-        "split_files_sha256": {
-            split: _sha256_file(prepared / f"{split}.jsonl")
-            for split in ("train", "validation", "test")
-        },
-        "renderer_sha256": _sha256_json(renderer_identity),
-        "settings_sha256": _sha256_json(
-            {"model": plan["model"], "budget": plan["budget"], "config": plan["config"]}
-        ),
-    }
+_atomic_json = lora_sft.atomic_json
+_audit_identity = lora_sft.audit_identity
+_validate_canonical_rows = lora_sft.validate_canonical_rows
+_batch_active_tokens = lora_sft.batch_active_tokens
+_checkpoint_name = lora_sft.checkpoint_name
 
 
 def _safe_primary_error(failure: BaseException) -> dict[str, str]:
@@ -1678,18 +1338,6 @@ def _safe_primary_error(failure: BaseException) -> dict[str, str]:
             "Baseten lifecycle failed; exception details omitted for credential safety"
         ),
     }
-
-
-def _validate_canonical_rows(rows: list[dict[str, Any]], *, split: str) -> None:
-    for index, row in enumerate(rows):
-        messages = row.get("messages")
-        tools = row.get("tools")
-        if not isinstance(messages, list) or not messages:
-            raise PipelineError(f"{split} row {index} has no canonical messages")
-        if not all(isinstance(message, dict) for message in messages):
-            raise PipelineError(f"{split} row {index} has invalid canonical messages")
-        if tools is not None and not isinstance(tools, list):
-            raise PipelineError(f"{split} row {index} has invalid tool declarations")
 
 
 def _validate_capability(capability: Any, expected_model: str, required_context: int) -> None:
@@ -1726,20 +1374,7 @@ def _validate_capability(capability: Any, expected_model: str, required_context:
 
 
 def _finite_metrics(result: Any, *, operation: str) -> dict[str, float]:
-    try:
-        raw_metrics = getattr(result, "metrics", None) or {}
-        metrics = {str(name): float(value) for name, value in dict(raw_metrics).items()}
-        loss = getattr(result, "loss", None)
-        if loss is not None:
-            metrics.setdefault("loss", float(loss))
-    except (TypeError, ValueError) as exc:
-        raise BasetenRuntimeError(f"{operation} returned invalid metrics") from exc
-    invalid = [name for name, value in metrics.items() if not math.isfinite(value)]
-    if invalid:
-        raise BasetenRuntimeError(
-            f"{operation} returned non-finite metrics: {', '.join(sorted(invalid))}"
-        )
-    return metrics
+    return lora_sft.finite_metrics(result, operation=operation, error=BasetenRuntimeError)
 
 
 def _finite_loss_result(
@@ -1758,31 +1393,8 @@ def _finite_loss_result(
     return loss, active_tokens, metrics
 
 
-def _batch_active_tokens(batch: list[Any]) -> float:
-    count = 0.0
-    for datum in batch:
-        weights = getattr(datum, "loss_fn_inputs", {}).get("weights")
-        values = getattr(weights, "data", None)
-        if values is None:
-            count += _datum_token_count(datum)
-        else:
-            count += sum(float(value) for value in values)
-    return count
-
-
 def _checkpoint_path(value: Any, *, operation: str) -> str:
-    path = getattr(value, "path", None)
-    if not isinstance(path, str) or not path:
-        raise BasetenRuntimeError(f"{operation} returned no checkpoint path")
-    return path
-
-
-def _checkpoint_name(run_id: str, suffix: str) -> str:
-    candidate = re.sub(r"[^a-z0-9]+", "-", f"{run_id}-{suffix}".lower()).strip("-")
-    if len(candidate) <= 54:
-        return candidate
-    digest = hashlib.sha256(candidate.encode()).hexdigest()[:8]
-    return f"{candidate[:45].rstrip('-')}-{digest}"
+    return lora_sft.checkpoint_path(value, operation=operation, error=BasetenRuntimeError)
 
 
 def _combine_exceptions(message: str, errors: list[BaseException]) -> BaseException | None:
@@ -1807,35 +1419,7 @@ def _combine_exceptions(message: str, errors: list[BaseException]) -> BaseExcept
 
 
 def _load_prepared_data(data_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    prepared = Path(data_dir) / "prepared"
-    try:
-        manifest = json.loads((prepared / "manifest.json").read_text(encoding="utf-8"))
-        train_rows = _read_jsonl(prepared / "train.jsonl")
-        validation_rows = _read_jsonl(prepared / "validation.jsonl")
-        test_rows = _read_jsonl(prepared / "test.jsonl")
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PipelineError(f"cannot read prepared Baseten data: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise PipelineError("prepared Baseten manifest is not an object")
-    from smithtune.dataset import require_current_preparation
-    require_current_preparation(manifest)
-    split = manifest.get("split")
-    if not isinstance(split, dict):
-        raise PipelineError("prepared Baseten manifest has no valid split counts")
-    for partition, rows in (("train", train_rows), ("validation", validation_rows), ("test", test_rows)):
-        count = split.get(partition)
-        if isinstance(count, bool) or not isinstance(count, int) or count != len(rows):
-            raise PipelineError(f"prepared {partition} row count differs from manifest")
-        if partition in {"train", "validation"} and not rows:
-            raise PipelineError(f"prepared dataset has no {partition} rows")
-    return manifest, train_rows, validation_rows
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    if not all(isinstance(row, dict) for row in rows):
-        raise PipelineError(f"prepared data rows in {path.name} must be objects")
-    return rows
+    return lora_sft.load_prepared_data(data_dir, label="Baseten")
 
 
 def _resolved_settings(settings: Any, model: ModelSpec) -> BasetenSFTSettings:
@@ -1853,28 +1437,9 @@ def _resolved_settings(settings: Any, model: ModelSpec) -> BasetenSFTSettings:
 
 def _validate_manifest(manifest: dict[str, Any]) -> ModelSpec:
     model = resolve_prepared_model(manifest, MODEL_SPECS, provider="baseten")
-    source = manifest.get("langsmith")
-    split = manifest.get("split")
-    if not isinstance(source, dict) or not isinstance(split, dict):
-        raise PipelineError("prepared Baseten manifest has no valid dataset counts")
-    counts = [source.get("examples"), *(split.get(name) for name in ("train", "validation", "test"))]
-    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
-        raise PipelineError("prepared Baseten dataset counts must be non-negative integers")
-    if counts[0] < sum(counts[1:]):
-        raise PipelineError("prepared Baseten split counts exceed source examples")
+    lora_sft.validate_dataset_counts(manifest, label="Baseten")
     return model
 
 
 def _prepared_max_sequence_tokens(manifest: dict[str, Any], model: ModelSpec) -> int:
-    audit = manifest.get("audit")
-    maximum = audit.get("max_context_tokens") if isinstance(audit, dict) else None
-    if (
-        isinstance(maximum, bool)
-        or not isinstance(maximum, int)
-        or maximum < 2
-        or maximum > model.max_seq_len
-    ):
-        raise PipelineError(
-            "prepared Baseten data has no valid measured maximum context length"
-        )
-    return maximum
+    return lora_sft.prepared_max_sequence_tokens(manifest, model, label="Baseten")

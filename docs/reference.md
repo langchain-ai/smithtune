@@ -9,8 +9,8 @@ Recorded system messages are preserved; Qwen requires them at the start.
 
 ## Supported models
 
-Run `smithtune models list --provider fireworks` or
-`smithtune models list --provider baseten` to list supported model aliases and IDs.
+Run `smithtune models list --provider <fireworks|baseten|tinker>` to list supported
+model aliases and IDs.
 Only listed models are supported. Preparation and training check provider
 availability and select the tokenizer and renderer for the model.
 
@@ -26,6 +26,9 @@ Training prints whether Baseten reports serverless Loops for the model.
 `plan.json` records `capacity: baseten_default`, and `replay/sampler.json`
 records each sampler's capacity, `serverless` or `dedicated`.
 
+Smithtune sends `TINKER_API_KEY` only to the standard Tinker API and refuses to
+run when `TINKER_BASE_URL` points elsewhere.
+
 ## Preparation defaults
 
 - One complete trajectory per dataset example
@@ -34,6 +37,7 @@ records each sampler's capacity, `serverless` or `dedicated`.
 - All assistant messages are targets unless you [choose a different supervision scope](datasets.md#choose-assistant-teaching-targets)
 - Reasoning is omitted; add `--reasoning-policy preserve` to retain it
 - Examples over the context limit are rejected without truncation; lower the limit with `--max-seq-len`, for example `--max-seq-len 32768`
+- Exact duplicate training examples are kept once: same messages (roles, content, names, and tool calls), same assistant targets, and same tools available at each target. `prepared/rejected.json` lists each dropped copy with `duplicate_of`. Trajectories that share messages but differ in targets or tools are kept, in the same split, so a conversation never appears in both training and evaluation
 
 For Fireworks GLM-5.3-Flash, `prepare --reasoning-effort low|high|max` selects
 the native thinking-effort prompt used by training and replay. The default is
@@ -100,7 +104,7 @@ exactly. Interrupted preparation retains completed captures. New source download
 require a LangSmith instance that supplies `available_tools`; existing bound
 datasets and explicit contract overrides remain usable.
 
-Fireworks and Baseten render each selected supported assistant answer with its preceding
+Fireworks, Baseten, and Tinker render each selected supported assistant answer with its preceding
 messages and its tool list. Only that answer receives training loss; earlier
 assistant answers serve as context. Replay uses the same selection and per-call tools. This
 preserves the recorded trajectory prefix; it does not reconstruct hidden prompt
@@ -116,6 +120,11 @@ Muse Glimmer requires an explicit system message. It rejects assistant messages
 that combine visible text with tool calls, or make tool calls immediately before
 another assistant message.
 
+Nemotron renders an assistant message without reasoning after its thinking-off
+prompt. With `--reasoning-policy omit` (the default), Nemotron trains and replays
+with thinking off; with `preserve`, targets that have reasoning train with thinking
+on, and replay uses thinking on.
+
 ## Training options and artifacts
 
 Training prints a generated run ID and saves artifacts to `./runs/<run-id>`.
@@ -128,6 +137,15 @@ Training artifacts also include `plan.json`, `run-state.json`, `epochs.json`, an
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 It multiplies elapsed active time by the rate you pass, whichever capacity Baseten chose.
+Baseten Loops and Tinker pack rendered targets into microbatches of up to
+`--microbatch-token-budget` tokens (default: the prepared `max_seq_len`). Training
+rows with a target above the trainer's context limit are left out, up to
+`--max-dropped-training-rows` (default 1); more than that, or any validation row
+over the limit, stops training before provisioning. The saved `plan.json` lists
+left-out rows under `dataset.dropped_train_rows`.
+Tinker bills training tokens and has no spend guard; review the token and step
+counts in `plan`. Tinker keeps saved checkpoints until you delete them.
+Tinker training and validation losses are logged as means per target token.
 
 ### Remote controller recovery
 
@@ -165,7 +183,7 @@ operations may have succeeded before their IDs or checkpoints were saved locally
 Recovery options depend on the provider and training workflow; use the matching
 procedure below rather than inferring them from controller health.
 
-#### Fireworks Training API and Baseten Loops
+#### Fireworks Training API, Baseten Loops, and Tinker
 
 These integrations recover unfinished training by initializing a new run from a
 saved training-state checkpoint. They do not resume the same logical Smithtune
@@ -179,7 +197,8 @@ run. Sampler-only weights cannot initialize training.
    or management API when receipts are incomplete. Closing a client or deleting
    a VM does not establish that GPU capacity was released. Baseten's local spend
    guard cannot enforce a limit after the controller dies; sampler and judge
-   costs are separate from its training budget.
+   costs are separate from its training budget. Tinker's `run-state.json`
+   records `tinker_run_id` and checkpoints.
 2. **If training is unfinished, inspect `validations.json` for a saved resumable
    checkpoint** (`epochs.json` for older runs). Baseten also records
    `last_resumable_state_uri` in `run-state.json`; Fireworks records
@@ -227,9 +246,9 @@ the held-out validation split, separately from replay evaluation.
 
 `plan.training_schedule` shows steps per epoch and expected validation passes
 through `--max-epochs`; early stopping or spend limits can reduce the count.
-Fireworks batches training trajectories; Baseten Loops batches rendered assistant
-targets through gradient accumulation. Baseten's preview is an estimate; training
-recalculates it from the retained rendered sequences before provisioning.
+Fireworks batches training trajectories; Baseten Loops and Tinker batch rendered
+assistant targets through gradient accumulation. Their previews are estimates;
+training recalculates them from the retained rendered sequences before provisioning.
 
 The lowest validation loss across all checks selects the best checkpoint,
 recording its epoch and global optimizer step. `validations.json` preserves
@@ -237,6 +256,14 @@ completed checks incrementally. Early stopping is **off by default**. Opt in
 with `--early-stopping-patience N` to stop after N epochs without sufficient
 epoch-end loss improvement. `--early-stopping-min-delta` controls that comparison;
 checkpoint selection always uses the lowest loss across all checks.
+
+To compare checkpoints across training, for example one per epoch, add
+`--sampler-checkpoints all` to both `plan` and `train`. Baseten and Tinker then
+save sampler weights at every validation instead of only for each new best; Fireworks
+always does. Each save adds time and storage. Then evaluate any validated step from
+`validations.json` with `eval-plan` and `evaluate --checkpoint-step N`. Each step writes to its own
+`<run-dir>/replay-step-N` by default, and its LangSmith experiments record the
+checkpoint's epoch and step. `train --evaluate` always evaluates the best checkpoint.
 
 Choose an interval using the planned step count and validation cost. Each check
 runs the validation split and saves checkpoints, adding provider charges. A
@@ -262,6 +289,7 @@ throughput or cost.
 | --- | --- |
 | Fireworks dedicated | Increase `--batch-size` gradually, then tune `--pipeline-depth` separately to overlap more submitted training steps. Batches count trajectories, each potentially producing multiple assistant targets. |
 | Baseten Loops | Increase `--microbatch-token-budget` to fit more tokens per forward/backward call; keep it large enough for the longest sequence. `--batch-size` controls the effective batch through gradient accumulation; increasing it alone can just add accumulation work. |
+| Tinker | Same controls as Baseten Loops. |
 
 Use short trials on representative data within authorized spend, each in a new
 run directory. Change one setting at a time, holding data, model, capacity, LoRA
@@ -273,7 +301,7 @@ validation quality before committing to a full run.
 
 ## Sampler behavior
 
-Replay uses `SamplingClient` for both providers; serving capacity depends on the
+Replay uses `SamplingClient` for every provider; serving capacity depends on the
 training mode:
 
 | Training mode | Replay capacity |
@@ -281,6 +309,7 @@ training mode:
 | Fireworks serverless (default) | Shared serverless sampling for base and tuned models |
 | Fireworks dedicated | Two temporary dedicated deployments, for base and tuned models |
 | Baseten Loops | Two temporary samplers, after training resources shut down, on serverless or dedicated capacity as Baseten chooses |
+| Tinker | Tinker's shared sampling fleet for the base model and the saved sampler weights, billed per token; nothing to release |
 
 Fireworks requests deletion of owned dedicated resources on exit; Baseten
 deactivates its samplers. Dedicated capacity is billed for allocated time; judge
@@ -322,6 +351,7 @@ to Fireworks retention.
 | `--max-points-per-trajectory` | Cap assistant actions per trajectory; omitted by default, which scores every eligible action |
 | `--max-output-tokens` | Maximum generated response tokens |
 | `--concurrency` | Concurrent evaluation cases; default: 4 |
+| `--checkpoint-step` | Evaluate the checkpoint saved at a validated optimizer step instead of the best; non-best steps need training with `--sampler-checkpoints all` (Baseten and Tinker) |
 
 With `plan` and `train`, replay options require `--evaluate`. Repeat the same
 options on the preview and paid command. `eval-plan` accepts the case and token

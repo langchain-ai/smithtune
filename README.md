@@ -23,8 +23,8 @@ others) can run the whole flow:
 npx skills add langchain-ai/smithtune
 ```
 
-Set `LANGSMITH_API_KEY` and `BASETEN_API_KEY` (or `FIREWORKS_API_KEY`; see
-[credentials](#credentials-and-first-use-setup)), then check your setup:
+Set `LANGSMITH_API_KEY` and `BASETEN_API_KEY` (or `FIREWORKS_API_KEY` or
+`TINKER_API_KEY`; see [credentials](#credentials-and-first-use-setup)), then check your setup:
 
 ```bash
 smithtune acknowledge-data-rights
@@ -34,7 +34,7 @@ smithtune doctor
 Then ask your agent:
 
 ```text
-Use the smithtune skill to fine-tune a model on my LangSmith project <project> with [Baseten or Fireworks].
+Use the smithtune skill to fine-tune a model on my LangSmith project <project> with [Baseten, Fireworks, or Tinker].
 ```
 
 The flow:
@@ -87,6 +87,7 @@ Set these environment variables in the shell where you run smithtune:
 | `LANGSMITH_API_KEY` | Every workflow: dataset access, split publication, and LangSmith experiments |
 | `BASETEN_API_KEY` | Baseten training and evaluation, plus the default council and evaluation judge (DeepSeek V4.1 Flash and GLM-5.3-Flash on Baseten Model APIs) |
 | `FIREWORKS_API_KEY` | Fireworks training and evaluation, and Fireworks-hosted judges |
+| `TINKER_API_KEY` | Tinker training and evaluation; judges still need a Baseten, Fireworks, or Anthropic key |
 
 The LangSmith CLI uses `LANGSMITH_API_KEY` for authentication.
 
@@ -125,7 +126,7 @@ Use the same provider and paths throughout. For an existing run, use its origina
 provider and directories. Set the workspace to the one containing your dataset:
 
 ```bash
-provider=fireworks # or baseten
+provider=fireworks # or baseten, tinker
 model=qwen3p8-27b
 workspace_id='<workspace-id>'
 data_dir='./data/my-sft'
@@ -135,25 +136,26 @@ judge_model='baseten/zai-org/GLM-5.3-Flash'  # Fireworks only: accounts/firework
 smithtune models list --provider "$provider"
 ```
 
-`qwen3p8-27b` works with both providers. Choose another supported model from the list;
+`qwen3p8-27b` works with every provider. Choose another supported model from the list;
 preparation selects its tokenizer and formatting.
 
 ### Supported Models
 
 The following models are supported for fine-tuning:
 
-| Model | Fireworks training | Baseten training |
-| --- | --- | --- |
-| Qwen3.8 27B | ✓ | ✓ |
-| Kimi K3 | ✓ | ✓ |
-| DeepSeek V4 Flash 0731 | ✓ | — |
-| Muse Glimmer 30B | ✓ | — |
-| Qwen3.5 9B | — | ✓ |
-| GLM-5.3 Flash | ✓ | ✓ |
+| Model | Fireworks training | Baseten training | Tinker training |
+| --- | --- | --- | --- |
+| Qwen3.8 27B | ✓ | ✓ | ✓ (64K context) |
+| Kimi K3 | ✓ | ✓ | — |
+| DeepSeek V4 Flash 0731 | ✓ | — | — |
+| Muse Glimmer 30B | ✓ | — | — |
+| Qwen3.5 9B | — | ✓ | ✓ (64K context) |
+| GLM-5.3 Flash | ✓ | ✓ | — |
+| Nemotron 3 Super 120B | — | — | ✓ (64K context) |
+| Nemotron 3.5 Lightning 30B | — | — | ✓ (64K context) |
 
-Run `smithtune models list --provider fireworks` or
-`smithtune models list --provider baseten` for the aliases and IDs supported by
-your installed version. See [Supported models](docs/reference.md#supported-models)
+Run `smithtune models list --provider <fireworks|baseten|tinker>` for the
+aliases and IDs supported by your installed version. See [Supported models](docs/reference.md#supported-models)
 for provider access requirements and the [deployment guide](docs/deployment.md)
 for serving options. Training support does not imply serverless inference availability.
 
@@ -253,8 +255,8 @@ It assigns about 80% to training, 10% to validation, and 10% to testing. Each so
 stays in one split; the memberships are also published to the LangSmith dataset.
 
 Recorded system messages are preserved; reasoning is omitted by default. Unsupported
-or overlong trajectories are excluded without truncation and listed in
-`"$data_dir/prepared/rejected.json"`. By default, each supported assistant message
+or overlong trajectories are excluded without truncation, and exact duplicate training
+examples are kept once; both are listed in `"$data_dir/prepared/rejected.json"`. By default, each supported assistant message
 becomes one training target, with its preceding context and tools. To keep initial
 assistant history as context only, [choose a supervision scope](docs/datasets.md#choose-assistant-teaching-targets)
 when pulling the dataset. Context-only messages may have unknown tool availability;
@@ -305,7 +307,7 @@ When the selected workflow's `plan` reports `execution.requires_active_client: t
 run Smithtune on an existing Linux VM to keep training independent of your local
 machine. Use a persistent disk and keep the VM running.
 
-For the Fireworks Training API and Baseten Loops integrations, GPUs run at the
+For the Fireworks Training API, Baseten Loops, and Tinker integrations, GPUs run at the
 provider. The controller VM needs CPU and memory for tokenization and data loading,
 plus outbound access to the providers and LangSmith; it needs no local GPU.
 
@@ -372,7 +374,10 @@ smithtune evaluate \
 ```
 
 `eval-plan` previews without model calls. `evaluate` compares the saved best checkpoint
-with the base model and saves results in `"$run_dir/replay"`. Rerunning reuses completed
+with the base model and saves results in `"$run_dir/replay"`. To compare checkpoints
+from different epochs, train with `--sampler-checkpoints all` and pass
+`--checkpoint-step N` to both commands; see
+[checkpoint selection](docs/reference.md#validation-cadence-and-checkpoint-selection). Rerunning reuses completed
 predictions and judgments and retries LangSmith publication. Keep your local artifacts.
 
 To change the judge, replay cap, or sampling settings, use a fresh
@@ -380,8 +385,8 @@ To change the judge, replay cap, or sampling settings, use a fresh
 
 ## Deploy a trained model
 
-Deploy when you want an endpoint for your application. Both providers
-use `deploy`; Fireworks handles promotion automatically and reuses saved promotions.
+Deploy when you want an endpoint for your application. Fireworks and Baseten
+use `deploy`. Fireworks handles promotion automatically and reuses saved promotions.
 Run the command for your training provider:
 
 **Fireworks**: install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl)

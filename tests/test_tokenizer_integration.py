@@ -11,6 +11,7 @@ import pytest
 from tests.binding_fixtures import bound_row
 from smithtune.providers.baseten import provider as baseten
 from smithtune.providers.fireworks import provider as fireworks
+from smithtune.providers.tinker import provider as tinker
 from smithtune.providers.base import PipelineError
 from smithtune.hf_rendering import _normalize_messages
 from smithtune.rendering import load_training_renderer, render_row_tokens, replay_prompt, resolve_rendering_model
@@ -41,7 +42,7 @@ def test_kimi_sampler_stop_framing_preserves_truncation_checks(stop_reason, clos
 
 
 @pytest.mark.parametrize("model", [
-    *baseten.MODEL_SPECS.values(), *fireworks.MODEL_SPECS.values(),
+    *baseten.MODEL_SPECS.values(), *fireworks.MODEL_SPECS.values(), *tinker.MODEL_SPECS.values(),
 ], ids=lambda model: f"{model.provider}-{model.name}")
 def test_supported_tokenizers_render_all_assistant_targets(model):
     model = resolve_rendering_model(model)
@@ -80,6 +81,7 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         assert target.count(expected) == 1
     if model.renderer != "muse_glimmer":
         assert target.count("LEADING_TEXT_SENTINEL") == 1
+        assert "'type': 'text'" not in target  # Content parts are never rendered as a Python list.
         assert target.index("LEADING_TEXT_SENTINEL") < target.index("weather")
     for context in ("SYSTEM_CONTEXT_SENTINEL", "USER_CONTEXT_SENTINEL", "TOOL_RESULT_SENTINEL", "USER_TWO_SENTINEL"):
         assert context not in target
@@ -90,7 +92,7 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         assert target.count("</think>") == 3
         assert target.count("<|im_end|>") == 3
         assert "trl=1.13.0" in model.rendering_version
-    if model.provider == "baseten":
+    if model.provider in {"baseten", "tinker"}:
         with pytest.raises(PipelineError, match="implementation differs"):
             load_training_renderer(replace(model, rendering_version="previous-renderer"))
     if model.renderer == "hf_prefix_glm53_flash":
@@ -101,7 +103,10 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         assert target.count("<|close|>message<|sep|>") == 3
 
 
-@pytest.mark.parametrize("model", [model for model in baseten.MODEL_SPECS.values() if model.renderer.startswith("hf_prefix_")], ids=lambda model: model.name)
+@pytest.mark.parametrize("model", [
+    model for model in (*baseten.MODEL_SPECS.values(), *tinker.MODEL_SPECS.values())
+    if model.renderer.startswith("hf_prefix_") and (model.provider == "baseten" or "nemotron" in model.renderer)
+], ids=lambda model: f"{model.provider}-{model.name}")
 def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
     renderer = load_training_renderer(model)
     messages = [
@@ -112,6 +117,9 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
         {"role": "assistant", "reasoning_content": "LAST_REASON", "content": ""},
     ]
     for index in (1, 2, 4):
+        if renderer.thinking_switch:
+            # Nemotron targets without reasoning extend the thinking-off prompt.
+            renderer.replay_thinking = bool(messages[index]["reasoning_content"])
         prefix = renderer.prompt_tokens(messages[:index])
         datum = renderer.render(messages[:index + 1], final_target=True)[0]
         assert datum.token_ids[:len(prefix)] == prefix

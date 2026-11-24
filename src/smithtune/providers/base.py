@@ -19,6 +19,9 @@ class TerminationRequested(BaseException):
 
 
 ReasoningPolicy = Literal["omit", "preserve"]
+# Token-level providers that render with official Hugging Face chat templates
+# rather than the Fireworks cookbook renderers.
+HF_RENDERED_PROVIDERS = frozenset({"baseten", "tinker"})
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,7 @@ class TrainingOptions(CommonSFTSettings):
     replicas: int | None = None
     spend_reserve_fraction: float | None = None
     max_dropped_training_rows: int | None = None
+    sampler_checkpoints: str | None = None
 
 
 class TrainingProvider(Protocol):
