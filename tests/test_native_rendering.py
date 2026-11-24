@@ -212,3 +212,79 @@ def test_fireworks_glm_masks_each_assistant_target_and_preserves_replay_history(
     assert not any(datums[-1].token_weights[:len(prompt)])
     assert ("recorded reasoning" in tokenizer.decode(prompt)) == (policy == "preserve")
     assert "answer reasoning" not in tokenizer.decode(prompt)
+
+
+# The thinking-switch behavior of NVIDIA's Nemotron templates, without vendoring
+# them: reasoning renders as "<think>\n...</think>", its absence as
+# "<think></think>", and enable_thinking selects the matching generation prompt.
+NEMOTRON_TEMPLATE = (
+    "{%- for m in messages %}{%- if m.role == 'assistant' %}"
+    "{%- if m.reasoning_content is string and m.reasoning_content | trim | length > 0 %}"
+    "{%- set c = '<think>\\n' ~ m.reasoning_content ~ '</think>' ~ (m.content or '') %}"
+    "{%- else %}{%- set c = '<think></think>' ~ (m.content or '') %}{%- endif %}"
+    "{{- '<|im_start|>assistant\\n' ~ c ~ '<|im_end|>\\n' }}"
+    "{%- else %}{{- '<|im_start|>' ~ m.role ~ '\\n' ~ m.content ~ '<|im_end|>\\n' }}{%- endif %}{%- endfor %}"
+    "{%- if add_generation_prompt %}{%- if enable_thinking is not defined or enable_thinking %}"
+    "{{- '<|im_start|>assistant\\n<think>\\n' }}{%- else %}{{- '<|im_start|>assistant\\n<think></think>' }}"
+    "{%- endif %}{%- endif %}"
+)
+NEMOTRON_MESSAGES = [
+    {"role": "user", "content": "First?"},
+    {"role": "assistant", "reasoning_content": "Think first.", "content": "One."},
+    {"role": "user", "content": "Second?"},
+    {"role": "assistant", "content": "Two."},
+]
+
+
+def _nemotron(name="nemotron-3-super-120b"):
+    from smithtune.providers.tinker import provider as tinker
+
+    return NativePrefixRenderer(tinker.MODEL_SPECS[name], _tokenizer(NEMOTRON_TEMPLATE))
+
+
+@pytest.mark.parametrize("name", ["nemotron-3-super-120b", "nemotron-3p5-lightning-30b"])
+def test_nemotron_targets_extend_the_prompt_matching_their_reasoning(name):
+    renderer = _nemotron(name)
+    datums = renderer.render(NEMOTRON_MESSAGES)
+    targets = [span for datum in datums for span in _loss_spans(datum, renderer.tokenizer)]
+    assert targets == ["Think first.</think>One.<|im_end|>\n", "Two.<|im_end|>\n"]
+    # The target without reasoning follows the template's thinking-off prompt.
+    final = datums[-1]
+    start = max(i for i, weight in enumerate(final.token_weights) if weight and not final.token_weights[i - 1])
+    assert renderer.tokenizer.decode(final.token_ids[:start]).endswith("<|im_start|>assistant\n<think></think>")
+
+
+@pytest.mark.parametrize("policy,ending", [("omit", "<think></think>"), ("preserve", "<think>\n")])
+def test_nemotron_replay_prompt_follows_prepared_reasoning_policy(monkeypatch, policy, ending):
+    from smithtune.native_rendering import configure_replay_reasoning
+
+    renderer = _nemotron()
+    assert renderer.replay_thinking
+    configure_replay_reasoning(renderer, policy)
+    assert renderer.tokenizer.decode(renderer.prompt_tokens(NEMOTRON_MESSAGES[:1])).endswith(ending)
+    # Context checks configure their own renderer from the same policy.
+    monkeypatch.setattr(rendering, "load_training_renderer", lambda model: renderer)
+    renderer.replay_thinking = None
+    case = {"id": "c", "example_id": "e", "messages": NEMOTRON_MESSAGES[:1], "tools": []}
+    accepted, _ = rendering.validate_replay_context([case], renderer.model, 8, reasoning_policy=policy)
+    assert renderer.replay_thinking is (policy == "preserve") and len(accepted) == 1
+
+
+def test_replay_policy_leaves_templates_without_a_thinking_switch_unchanged():
+    from smithtune.native_rendering import configure_replay_reasoning
+
+    renderer = _renderer()
+    before = renderer.prompt_tokens(MESSAGES[:2])
+    configure_replay_reasoning(renderer, "omit")
+    assert not renderer.thinking_switch and renderer.prompt_tokens(MESSAGES[:2]) == before
+
+
+def test_nemotron_joins_text_parts_instead_of_rendering_a_list():
+    renderer = _nemotron()
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Part one."}, {"type": "text", "text": "Two."}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Answer."}]}]
+    datum, = renderer.render(messages)
+    assert _loss_spans(datum, renderer.tokenizer) == ["Answer.<|im_end|>\n"]
+    assert "Part one.\nTwo." in renderer.tokenizer.decode(datum.token_ids)
+    with pytest.raises(PipelineError, match="only text content"):
+        renderer.render([messages[0], {"role": "assistant", "content": [{"type": "image_url", "image_url": {}}]}])

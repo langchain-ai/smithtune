@@ -1161,7 +1161,7 @@ def test_replay_evaluation_calibrates_and_compares_models(tmp_path: Path, monkey
     monkeypatch.setattr(
         replay,
         "validate_replay_context",
-        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+        lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []),
     )
 
     candidate_contracts = []
@@ -1229,7 +1229,7 @@ def test_replay_evaluation_reports_text_scores(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(
         replay,
         "validate_replay_context",
-        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+        lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []),
     )
 
     def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):
@@ -1275,7 +1275,7 @@ def test_replay_resume_rejects_a_different_model_set(
     monkeypatch.setattr(
         replay,
         "validate_replay_context",
-        lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []),
+        lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []),
     )
 
     def fake_chat(model, messages, max_tokens, json_mode, request_contract=None):

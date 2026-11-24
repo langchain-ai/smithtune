@@ -1,6 +1,6 @@
 """Parse completions from the pinned Baseten training tokenizer formats.
 
-Qwen3.8/Qwen3.5 and GLM use their official chat templates. Kimi K3 uses
+Qwen3.8/Qwen3.5, GLM, and Nemotron use their official chat templates. Kimi K3 uses
 encoding_k3.py's typed XTML format; its control tokens are structural only
 when represented by their special token IDs, never by ordinary text.
 """
@@ -28,6 +28,8 @@ _STOPS = {
     "hf_prefix_qwen3_5": ("<|im_end|>",),
     "hf_prefix_glm53_flash": ("<|user|>", "<|observation|>"),
     "hf_prefix_kimi_k3": ("<|close|>message<|sep|>",),
+    "hf_prefix_nemotron3_super": ("<|im_end|>",),
+    "hf_prefix_nemotron3_5_lightning": ("<|im_end|>",),
 }
 _NAME = r"[A-Za-z0-9_.:-]+"
 
@@ -287,7 +289,8 @@ def _kimi_parse(tokenizer, tokens: list[int]) -> tuple[str, str, list[dict]]:
 def parse_completion(renderer, model, tokens: list[int], stop_reason: str, tools=None) -> dict[str, Any]:
     """Return evaluator-compatible assistant output, retaining malformed raw text.
 
-    The selected official generation prompts all open the reasoning channel.
+    The selected official generation prompts open the reasoning channel, except
+    a Nemotron thinking-off prompt, which closes it before the response.
     Incomplete reasoning, malformed tools, and length-limited output are invalid.
     """
     stops = stop_sequences(renderer, model)
@@ -302,9 +305,12 @@ def parse_completion(renderer, model, tokens: list[int], stop_reason: str, tools
             reasoning, content, calls = _kimi_parse(tokenizer, parse_tokens)
         else:
             text = tokenizer.decode(parse_tokens, skip_special_tokens=False)
-            if "</think>" not in text:
+            if getattr(renderer, "thinking_switch", False) and not renderer.replay_thinking:
+                reasoning, body = "", text
+            elif "</think>" not in text:
                 raise ValueError("unclosed reasoning channel")
-            reasoning, body = text.split("</think>", 1)
+            else:
+                reasoning, body = text.split("</think>", 1)
             if "<think>" in reasoning or any(tag in body for tag in ("<think>", "</think>", "<|im_start|>", "<|im_end|>", "<|user|>", "<|observation|>")):
                 raise ValueError("unexpected response boundary")
             content, calls = _xml_calls(body, glm=model.renderer == "hf_prefix_glm53_flash", tools=tools)

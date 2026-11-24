@@ -157,6 +157,12 @@ def test_tinker_profiles_render_with_hugging_face_templates():
         assert resolved == tinker.TinkerProvider().model_from_options(ModelOptions(model=alias))
     assert tinker.DEFAULT_MODEL.base_model == "Qwen/Qwen3.8-27B"
     assert tinker.MODEL_SPECS["qwen3p5-9b"].renderer == "hf_prefix_qwen3_5"
+    for alias, renderer in (("nemotron-3-super-120b", "hf_prefix_nemotron3_super"),
+                            ("nemotron-3p5-lightning-30b", "hf_prefix_nemotron3_5_lightning")):
+        model = tinker.MODEL_SPECS[alias]
+        assert model.renderer == renderer and model.tokenizer_model == model.base_model
+        assert model.base_model.startswith("nvidia/") and len(model.tokenizer_revision) == 40
+        assert (model.max_seq_len, model.thinking_trace_history_mode) == (65_536, "interleaved")
     with pytest.raises(PipelineError, match="supported aliases"):
         tinker.TinkerProvider().model_from_options(ModelOptions(model="kimi-k3"))
 

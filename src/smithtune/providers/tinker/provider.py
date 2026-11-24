@@ -55,6 +55,32 @@ MODEL_SPECS = {
         requires_tool_declarations=True,
         provider="tinker",
     ),
+    "nemotron-3-super-120b": ModelSpec(
+        name="nemotron-3-super-120b",
+        base_model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        tokenizer_model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        tokenizer_revision="2dc98e2afe4face0e4ce40972a915c45368bd34a",
+        renderer="hf_prefix_nemotron3_super",
+        max_seq_len=65_536,
+        trainer_max_seq_len=65_536,
+        thinking_trace_history_mode="interleaved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+        provider="tinker",
+    ),
+    "nemotron-3p5-lightning-30b": ModelSpec(
+        name="nemotron-3p5-lightning-30b",
+        base_model="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+        tokenizer_model="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+        tokenizer_revision="a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+        renderer="hf_prefix_nemotron3_5_lightning",
+        max_seq_len=65_536,
+        trainer_max_seq_len=65_536,
+        thinking_trace_history_mode="interleaved",
+        supports_reasoning_content=True,
+        requires_tool_declarations=True,
+        provider="tinker",
+    ),
 }
 DEFAULT_MODEL = MODEL_SPECS["qwen3p8-27b"]
 LOSS_FUNCTION = "cross_entropy"

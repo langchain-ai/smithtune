@@ -59,8 +59,8 @@ active target tokens. Run both providers' tests when changing the shared loop.
 `providers/tinker/` trains with the Tinker SDK's `ServiceClient` and samples saved
 `tinker://…/sampler_weights/…` checkpoints through `create_sampling_client`.
 Tinker serves samplers from its shared fleet, so replay owns no capacity; the
-adapter only closes its session. It reuses the Hugging Face renderers and
-completion parsers of the matching Baseten models (`HF_RENDERED_PROVIDERS`).
+adapter only closes its session. It shares the Hugging Face renderers and
+completion parsers with Baseten (`HF_RENDERED_PROVIDERS`); Nemotron's are Tinker-only.
 Credentials go only to the standard Tinker API. No test contacts Tinker; a paid
 smoke test is still needed after changing either adapter.
 

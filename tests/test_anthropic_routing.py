@@ -71,7 +71,7 @@ def test_replay_rejects_results_with_unverified_or_changed_judge_endpoint(tmp_pa
     row = bound_row({"messages": [{"role": "user", "content": "What is x?"}, {"role": "assistant", "content": "x is 1"}],
            "_source": {"example_id": "example-1", "source_scope": "thread", "source_scope_id": "thread-1"}})
     (data_dir / "prepared/test.jsonl").write_text(json.dumps(row) + "\n")
-    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, model, max_output_tokens: ([{**case, "prompt_tokens": 10} for case in cases], []))
+    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, model, max_output_tokens, **kwargs: ([{**case, "prompt_tokens": 10} for case in cases], []))
 
     def chat(model, messages, max_tokens, json_mode, request_contract=None):
         if json_mode:

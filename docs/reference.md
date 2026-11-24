@@ -120,6 +120,11 @@ Muse Glimmer requires an explicit system message. It rejects assistant messages
 that combine visible text with tool calls, or make tool calls immediately before
 another assistant message.
 
+Nemotron renders an assistant message without reasoning after its thinking-off
+prompt. With `--reasoning-policy omit` (the default), Nemotron trains and replays
+with thinking off; with `preserve`, targets that have reasoning train with thinking
+on, and replay uses thinking on.
+
 ## Training options and artifacts
 
 Training prints a generated run ID and saves artifacts to `./runs/<run-id>`.

@@ -81,6 +81,7 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         assert target.count(expected) == 1
     if model.renderer != "muse_glimmer":
         assert target.count("LEADING_TEXT_SENTINEL") == 1
+        assert "'type': 'text'" not in target  # Content parts are never rendered as a Python list.
         assert target.index("LEADING_TEXT_SENTINEL") < target.index("weather")
     for context in ("SYSTEM_CONTEXT_SENTINEL", "USER_CONTEXT_SENTINEL", "TOOL_RESULT_SENTINEL", "USER_TWO_SENTINEL"):
         assert context not in target
@@ -102,7 +103,10 @@ def test_supported_tokenizers_render_all_assistant_targets(model):
         assert target.count("<|close|>message<|sep|>") == 3
 
 
-@pytest.mark.parametrize("model", [model for model in baseten.MODEL_SPECS.values() if model.renderer.startswith("hf_prefix_")], ids=lambda model: model.name)
+@pytest.mark.parametrize("model", [
+    model for model in (*baseten.MODEL_SPECS.values(), *tinker.MODEL_SPECS.values())
+    if model.renderer.startswith("hf_prefix_") and (model.provider == "baseten" or "nemotron" in model.renderer)
+], ids=lambda model: f"{model.provider}-{model.name}")
 def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
     renderer = load_training_renderer(model)
     messages = [
@@ -113,6 +117,9 @@ def test_native_masks_preserve_actual_generation_prefix_and_native_text(model):
         {"role": "assistant", "reasoning_content": "LAST_REASON", "content": ""},
     ]
     for index in (1, 2, 4):
+        if renderer.thinking_switch:
+            # Nemotron targets without reasoning extend the thinking-off prompt.
+            renderer.replay_thinking = bool(messages[index]["reasoning_content"])
         prefix = renderer.prompt_tokens(messages[:index])
         datum = renderer.render(messages[:index + 1], final_target=True)[0]
         assert datum.token_ids[:len(prefix)] == prefix

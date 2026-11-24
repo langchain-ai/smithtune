@@ -151,6 +151,8 @@ The following models are supported for fine-tuning:
 | Muse Glimmer 30B | ✓ | — | — |
 | Qwen3.5 9B | — | ✓ | ✓ (64K context) |
 | GLM-5.3 Flash | ✓ | ✓ | — |
+| Nemotron 3 Super 120B | — | — | ✓ (64K context) |
+| Nemotron 3.5 Lightning 30B | — | — | ✓ (64K context) |
 
 Run `smithtune models list --provider <fireworks|baseten|tinker>` for the
 aliases and IDs supported by your installed version. See [Supported models](docs/reference.md#supported-models)

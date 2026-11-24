@@ -165,7 +165,7 @@ def replay_data(tmp_path, monkeypatch):
                         {"role": "assistant", "content": "answer"}],
            "_source": {"example_id": "one", "source_scope": "thread", "source_scope_id": "thread"}})
     (data / "prepared/test.jsonl").write_text(json.dumps(row) + "\n")
-    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *_: ([{**case, "prompt_tokens": 2} for case in cases], []))
+    monkeypatch.setattr(evaluation, "validate_replay_context", lambda cases, *_, **__: ([{**case, "prompt_tokens": 2} for case in cases], []))
     return data
 
 

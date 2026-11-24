@@ -164,6 +164,7 @@ def validate_reasoning_support(model: ModelSpec) -> None:
     if resolved_renderer_name(model) not in {
         "qwen3_8_preserved", "kimi_k3", "hf_assistant", "deepseek_v4", "muse_glimmer",
         "hf_prefix_kimi_k3", "hf_prefix_qwen3_5", "hf_prefix_glm53_flash",
+        "hf_prefix_nemotron3_super", "hf_prefix_nemotron3_5_lightning",
         "glm53_flash_preserve_thinking",
     }:
         raise PipelineError(
@@ -289,6 +290,7 @@ def validate_replay_context(
     max_output_tokens: int = DEFAULT_REPLAY_MAX_TOKENS,
     *,
     max_seq_len: int | None = None,
+    reasoning_policy: str = "omit",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Reject complete replay cases that cannot fit the model context."""
     if max_output_tokens < 1:
@@ -297,6 +299,10 @@ def validate_replay_context(
         raise PipelineError("serving context must be a positive integer")
     context_limit = min(model.max_seq_len, max_seq_len) if max_seq_len is not None else model.max_seq_len
     renderer = load_training_renderer(model)
+    if model.provider in HF_RENDERED_PROVIDERS:
+        from smithtune.native_rendering import configure_replay_reasoning
+
+        configure_replay_reasoning(renderer, reasoning_policy)
     has_tools = any(case.get("tools") for case in cases)
     if has_tools and not model.requires_tool_declarations:
         raise PipelineError(
