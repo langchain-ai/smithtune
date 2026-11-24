@@ -611,7 +611,7 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | "Data Rights and Permitted Use has not been acknowledged" | First-run acknowledgment missing | User runs `smithtune acknowledge-data-rights` interactively |
-| 401/403 from LangSmith, Fireworks, Baseten, OpenAI, or Anthropic | Key missing, wrong, or for another workspace/account; Baseten judges also need Model API access on the key | Check `doctor`, then the key's workspace; see README credentials |
+| 401/403 from LangSmith, Fireworks, Baseten, Tinker, OpenAI, or Anthropic | Key missing, wrong, or for another workspace/account; Baseten judges also need Model API access on the key | Check `doctor`, then the key's workspace; see README credentials |
 | "BASETEN_API_KEY is not set for the judge" on a Fireworks run | The default council and evaluation judge run on Baseten | Set `BASETEN_API_KEY`, or use the Fireworks judges from step 0 |
 | Pull downloads 0 or very few candidates | Filter fields wrong, or window too narrow | Re-test the filter with `langsmith trace list` over the same window; pull into a new directory |
 | Most trajectories excluded at pull | Missing per-assistant tool data, multimodal content, provider built-in tools | Read reasons in `download_summary` and per-trajectory errors |
@@ -634,6 +634,8 @@ Do not delete directories or edit saved files; they hold the recovery state.
 | Pull excludes "returned no messages" for fresh traces | LangSmith had not yet indexed the trajectories | Wait a minute, then pull into a new directory |
 | "Baseten has no capacity to provision this trainer (HTTP 429)" | No trainer capacity available now; nothing was provisioned | Retry later with a new `--run-dir`, or ask Baseten about capacity |
 | "Baseten refused to create the trainer (HTTP 403)" | Trainer GPU quota or access; Baseten's reason follows | Stop running trainers or ask Baseten to raise the limit |
+| "no validation at step N" from `--checkpoint-step` | That step was not validated | Pick a step listed in the error, from `"$run_dir/validations.json"` |
+| "step N saved no sampler weights" | Baseten or Tinker run trained with the default `--sampler-checkpoints best` | Evaluate the best checkpoint, or train a new run with `--sampler-checkpoints all` |
 | Train refuses the run directory | `--run-dir` not empty | New run directory; never clear an old one |
 | Evaluation stops before paid work on resume | Settings differ from the saved run | Re-run with the original settings |
 | "Fireworks blocks firectl from changing resources inside an AI agent" | firectl refuses deploy/undeploy under an agent | Give the user the printed `smithtune` command to run in their own terminal |

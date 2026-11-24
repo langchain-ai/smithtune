@@ -49,12 +49,12 @@ A serverless sampler has no model or deployment ID, so its receipt and cleanup
 use the sampler ID. Test serverless and dedicated samplers when changing either adapter.
 `providers/lora_sft.py` holds the client-driven LoRA loop shared by Baseten Loops
 and Tinker: microbatch packing, gradient accumulation, forward-only validation,
-and best-checkpoint pairing. Providers supply trainer operations that return a
-token-mean loss, plus provisioning, an optional guard, and cleanup. Loops reports
-token-mean losses with a `-100` target sentinel. Tinker reports `loss:sum` and
-indexes real target tokens, so its adapter keeps zero-weight real tokens and scales
-each step's weights by the inverse of its active target tokens. Run both providers'
-tests when changing the shared loop.
+best-checkpoint pairing, and optional sampler saves at every validation. Providers
+supply trainer operations that return a token-mean loss, plus provisioning, an
+optional guard, and cleanup. Loops reports token-mean losses with a `-100` target
+sentinel. Tinker reports `loss:sum` and indexes real target tokens, so its adapter
+keeps zero-weight real tokens and scales each step's weights by the inverse of its
+active target tokens. Run both providers' tests when changing the shared loop.
 
 `providers/tinker/` trains with the Tinker SDK's `ServiceClient` and samples saved
 `tinker://…/sampler_weights/…` checkpoints through `create_sampling_client`.

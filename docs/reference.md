@@ -108,7 +108,7 @@ exactly. Interrupted preparation retains completed captures. New source download
 require a LangSmith instance that supplies `available_tools`; existing bound
 datasets and explicit contract overrides remain usable.
 
-Fireworks and Baseten render each selected supported assistant answer with its preceding
+Fireworks, Baseten, and Tinker render each selected supported assistant answer with its preceding
 messages and its tool list. Only that answer receives training loss; earlier
 assistant answers serve as context. Replay uses the same selection and per-call tools. This
 preserves the recorded trajectory prefix; it does not reconstruct hidden prompt
@@ -136,6 +136,12 @@ Training artifacts also include `plan.json`, `run-state.json`, `epochs.json`, an
 Use `--init-from-checkpoint '<checkpoint-uri>'` to initialize a new training run from a saved checkpoint.
 Baseten's optional spend guard requires both `--max-spend-usd` and `--hourly-rate-usd`.
 It multiplies elapsed active time by the rate you pass, whichever capacity Baseten chose.
+Baseten Loops and Tinker pack rendered targets into microbatches of up to
+`--microbatch-token-budget` tokens (default: the prepared `max_seq_len`). Training
+rows with a target above the trainer's context limit are left out, up to
+`--max-dropped-training-rows` (default 1); more than that, or any validation row
+over the limit, stops training before provisioning. The saved `plan.json` lists
+left-out rows under `dataset.dropped_train_rows`.
 Tinker bills training tokens and has no spend guard; review the token and step
 counts in `plan`. Tinker keeps saved checkpoints until you delete them.
 
