@@ -295,8 +295,7 @@ compares it with the base model on held-out test data. Evaluation uses provider
 sampling clients to generate responses; [serving capacity, costs, and cleanup
 depend on the training mode](docs/reference.md#sampler-behavior). Fireworks supports
 serverless and dedicated LoRA training. Baseten evaluates on temporary samplers and chooses
-whether they run on serverless or dedicated capacity. Tinker samples from its shared
-fleet and bills per token, so there is no capacity to clean up.
+whether they run on serverless or dedicated capacity.
 You do not need to run `deploy` for this step.
 Omit `--evaluate` and its replay options to train only.
 
@@ -385,7 +384,7 @@ To change the judge, replay cap, or sampling settings, use a fresh
 ## Deploy a trained model
 
 Deploy when you want an endpoint for your application. Fireworks and Baseten
-use `deploy`; smithtune cannot deploy Tinker checkpoints yet. Fireworks handles promotion automatically and reuses saved promotions.
+use `deploy`. Fireworks handles promotion automatically and reuses saved promotions.
 Run the command for your training provider:
 
 **Fireworks**: install [firectl](https://docs.fireworks.ai/tools-sdks/firectl/firectl)

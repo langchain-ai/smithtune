@@ -544,9 +544,8 @@ when the user wants a per-epoch comparison.
 Fireworks reuses the saved checkpoint and training mode; a promoted model ID
 alone cannot be sampled. Baseten replay uses two temporary samplers, on serverless
 or dedicated capacity as Baseten chooses, and deactivates them on exit. Their
-sampling and judge costs fall outside the training spend guard. Tinker samples the
-saved checkpoint and its base model from Tinker's shared fleet, billed per token,
-with no capacity to clean up. See [sampler behavior](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#sampler-behavior)
+sampling and judge costs fall outside the training spend guard. Tinker leaves
+no capacity to clean up. See [sampler behavior](https://github.com/langchain-ai/smithtune/blob/main/docs/reference.md#sampler-behavior)
 for capacity and cleanup details.
 
 ## 9. Deploy (optional)

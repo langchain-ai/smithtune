@@ -26,12 +26,8 @@ Training prints whether Baseten reports serverless Loops for the model.
 `plan.json` records `capacity: baseten_default`, and `replay/sampler.json`
 records each sampler's capacity, `serverless` or `dedicated`.
 
-Tinker trains and samples on its shared fleet and bills per token, so smithtune
-provisions no capacity and records `capacity: tinker_shared`. Smithtune supports
-Tinker's default 64K-context variants of Qwen3.8 27B and Qwen3.5 9B; preparation
-and training stop if Tinker does not list the model or reports a shorter
-context. Set `TINKER_API_KEY`. Smithtune sends it only to the standard Tinker API
-and refuses to run when `TINKER_BASE_URL` points elsewhere.
+Smithtune sends `TINKER_API_KEY` only to the standard Tinker API and refuses to
+run when `TINKER_BASE_URL` points elsewhere.
 
 ## Preparation defaults
 
@@ -144,11 +140,7 @@ over the limit, stops training before provisioning. The saved `plan.json` lists
 left-out rows under `dataset.dropped_train_rows`.
 Tinker bills training tokens and has no spend guard; review the token and step
 counts in `plan`. Tinker keeps saved checkpoints until you delete them.
-
-Tinker sums cross-entropy over weighted tokens. Smithtune scales each optimizer
-step's loss weights by the inverse of that step's active target tokens, so each
-update minimizes the mean loss per target token. Logged training and validation
-losses are those token means. `plan.config.loss_normalization` records this.
+Tinker training and validation losses are logged as means per target token.
 
 ### Remote controller recovery
 
@@ -200,8 +192,8 @@ run. Sampler-only weights cannot initialize training.
    or management API when receipts are incomplete. Closing a client or deleting
    a VM does not establish that GPU capacity was released. Baseten's local spend
    guard cannot enforce a limit after the controller dies; sampler and judge
-   costs are separate from its training budget. Tinker holds no capacity
-   between requests; its `run-state.json` records `tinker_run_id` and checkpoints.
+   costs are separate from its training budget. Tinker's `run-state.json`
+   records `tinker_run_id` and checkpoints.
 2. **If training is unfinished, inspect `validations.json` for a saved resumable
    checkpoint** (`epochs.json` for older runs). Baseten also records
    `last_resumable_state_uri` in `run-state.json`; Fireworks records
@@ -263,9 +255,8 @@ checkpoint selection always uses the lowest loss across all checks.
 To compare checkpoints across training, for example one per epoch, add
 `--sampler-checkpoints all` to both `plan` and `train`. Baseten and Tinker then
 save sampler weights at every validation instead of only for each new best; Fireworks
-always does. This adds a save per validation: Baseten bills the trainer time, Tinker
-bills checkpoint storage. Then evaluate any validated step from `validations.json`
-with `eval-plan` and `evaluate --checkpoint-step N`. Each step writes to its own
+always does. Each save adds time and storage. Then evaluate any validated step from
+`validations.json` with `eval-plan` and `evaluate --checkpoint-step N`. Each step writes to its own
 `<run-dir>/replay-step-N` by default, and its LangSmith experiments record the
 checkpoint's epoch and step. `train --evaluate` always evaluates the best checkpoint.
 
@@ -293,7 +284,7 @@ throughput or cost.
 | --- | --- |
 | Fireworks dedicated | Increase `--batch-size` gradually, then tune `--pipeline-depth` separately to overlap more submitted training steps. Batches count trajectories, each potentially producing multiple assistant targets. |
 | Baseten Loops | Increase `--microbatch-token-budget` to fit more tokens per forward/backward call; keep it large enough for the longest sequence. `--batch-size` controls the effective batch through gradient accumulation; increasing it alone can just add accumulation work. |
-| Tinker | Same controls as Baseten Loops. Tinker schedules its own capacity, so throughput also depends on its shared queue. |
+| Tinker | Same controls as Baseten Loops. |
 
 Use short trials on representative data within authorized spend, each in a new
 run directory. Change one setting at a time, holding data, model, capacity, LoRA
