@@ -147,6 +147,7 @@ class TrainingOptions(CommonSFTSettings):
     replicas: int | None = None
     spend_reserve_fraction: float | None = None
     max_dropped_training_rows: int | None = None
+    sampler_checkpoints: str | None = None
 
 
 class TrainingProvider(Protocol):

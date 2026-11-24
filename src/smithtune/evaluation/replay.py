@@ -75,10 +75,19 @@ def validate_judge_credentials(judge_model: str) -> None:
         require_fireworks_key(message="FIREWORKS_API_KEY is not set for the judge")
 
 
-def training_metadata(run_dir: Path | None) -> dict:
+def training_metadata(run_dir: Path | None, step: int | None = None) -> dict:
     """Read the run and selected checkpoint's epoch/step when recorded."""
     if run_dir is None:
         return {}
+    if step is not None:
+        from smithtune.run_artifacts import validation_at_step
+
+        plan_path = run_dir / "plan.json"
+        plan = _load_json(plan_path) if plan_path.exists() else {}
+        validation = validation_at_step(run_dir, step)
+        values = {"parent_training_run_id": plan.get("run_id"), "checkpoint_epoch": validation.get("epoch"),
+                  "checkpoint_step": step, "checkpoint_selection": "step"}
+        return {key: value for key, value in values.items() if value is not None}
     plan_path, result_path = run_dir / "plan.json", run_dir / "result.json"
     plan = _load_json(plan_path) if plan_path.exists() else {}
     result = _load_json(result_path) if result_path.exists() else {}

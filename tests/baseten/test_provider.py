@@ -181,6 +181,7 @@ def test_plan_validates_the_approved_prepared_dataset_without_provider_calls(
         "learning_rate": 1e-4,
         "microbatch_token_budget": 262_144,
         "max_dropped_training_rows": 1,
+        "sampler_checkpoints": "best",
         "effective_batch_size": 32,
         "max_epochs": 5,
         "validation_every_steps": None,

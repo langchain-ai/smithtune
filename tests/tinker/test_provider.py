@@ -375,3 +375,30 @@ def test_futures_are_resolved_and_plain_values_pass_through():
     client = object()
     assert tinker_package.resolved(client) is client
     assert tinker_package.resolved(SimpleNamespace(result=lambda: client)) is client
+
+
+def test_sampler_checkpoint_policy_is_opt_in_and_validated():
+    from smithtune.providers.baseten.provider import BasetenProvider
+    from smithtune.providers.fireworks.provider import FireworksProvider
+
+    assert tinker.TinkerProvider().settings_from_options(TrainingOptions()).sampler_checkpoints == "best"
+    assert tinker.TinkerProvider().settings_from_options(TrainingOptions(sampler_checkpoints="all")).sampler_checkpoints == "all"
+    assert BasetenProvider().settings_from_options(TrainingOptions(sampler_checkpoints="all")).sampler_checkpoints == "all"
+    with pytest.raises(PipelineError, match="'best' or 'all'"):
+        tinker.TinkerProvider().settings_from_options(TrainingOptions(sampler_checkpoints="every"))
+    FireworksProvider().settings_from_options(TrainingOptions(sampler_checkpoints="all"))
+    with pytest.raises(PipelineError, match="every validation"):
+        FireworksProvider().settings_from_options(TrainingOptions(sampler_checkpoints="best"))
+
+
+def test_opting_in_saves_tinker_sampler_weights_for_every_validation(tmp_path):
+    _write_prepared_dataset(tmp_path)
+    trainer = FakeTrainer(validation_losses=(1.0, 1.2))
+    result = _train(_provider(FakeService(trainer)), tmp_path,
+                    tinker.TinkerSFTSettings(max_epochs=2, batch_size=32, sampler_checkpoints="all"))
+    assert trainer.saved_samplers == ["approved-run-sampler-epoch-1", "approved-run-sampler-epoch-2"]
+    assert result["best_epoch"] == 1
+    assert [row["sampler_weights_uri"] is not None for row in result["validations"]] == [True, True]
+    plan = json.loads((tmp_path / "run" / "plan.json").read_text())
+    assert plan["config"]["sampler_checkpoints"] == "all"
+    assert plan["checkpoint"].startswith("resumable state and sampler weights at every validation")

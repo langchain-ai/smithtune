@@ -240,6 +240,11 @@ def _parser() -> argparse.ArgumentParser:
             help="training random seed (default: %(default)s)",
         )
         shared.add_argument(
+            "--sampler-checkpoints", choices=("best", "all"),
+            help="save sampler weights for each new best (default) or at every validation, so evaluate "
+                 "--checkpoint-step can score any validated checkpoint; Fireworks always saves all",
+        )
+        shared.add_argument(
             "--lora-rank", type=int,
             help="LoRA rank for any provider (default: the prepared model profile's default_lora_rank)",
         )
@@ -323,6 +328,11 @@ def _parser() -> argparse.ArgumentParser:
             help="optional cap; default evaluates every assistant turn",
         )
         command.add_argument("--max-output-tokens", type=int, default=DEFAULT_REPLAY_MAX_TOKENS)
+        command.add_argument(
+            "--checkpoint-step", type=int,
+            help="evaluate the checkpoint saved at this validated optimizer step instead of the best "
+                 "(see validations.json; default output: <run-dir>/replay-step-N)",
+        )
         serving = command.add_argument_group("Baseten serving options", "Fireworks and Tinker use --run-dir and automatically compare the base model.")
         serving.add_argument("--model-id", help="existing Baseten model ID")
         serving.add_argument("--max-seq-len", type=int, help="existing endpoint's configured context limit (required unless using --run-dir)")
@@ -344,6 +354,12 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("--deployment-id", help="Fireworks deployment ID")
     remove.add_argument("--confirm", action="store_true")
     return parser
+
+
+def _default_replay_dir(args: argparse.Namespace) -> Path:
+    """Keep each evaluated checkpoint's predictions apart from the best checkpoint's."""
+    step = getattr(args, "checkpoint_step", None)
+    return args.run_dir / ("replay" if step is None else f"replay-step-{step}")
 
 
 def _model_options(args: argparse.Namespace) -> ModelOptions:
@@ -471,7 +487,7 @@ def _run_fireworks_evaluation(args):
     if args.run_dir is not None:
         if args.run_dir.resolve() == args.output_dir.resolve():
             raise PipelineError("--run-dir and --output-dir must be different directories")
-        model, best = checkpoint_from_run(args.data_dir, args.run_dir)
+        model, best = checkpoint_from_run(args.data_dir, args.run_dir, step=args.checkpoint_step)
     if args.command == "eval-plan":
         dataset._require_prepared_provider(_load_json(args.data_dir / "prepared" / "manifest.json"), "fireworks")
         with output_lock(args.output_dir):
@@ -506,7 +522,8 @@ def _run_fireworks_evaluation(args):
         args.data_dir, args.output_dir, best["resume_checkpoint"], args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
-        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
+        replay_sampler=sampler, confirm=args.confirm,
+        training=replay_evaluation.training_metadata(args.run_dir, args.checkpoint_step),
     )
 
 
@@ -523,7 +540,7 @@ def _run_baseten_sampler_evaluation(args):
     if args.run_dir is not None:
         if args.run_dir.resolve() == args.output_dir.resolve():
             raise PipelineError("--run-dir and --output-dir must be different directories")
-        model, checkpoint = checkpoint_from_run(args.data_dir, args.run_dir)
+        model, checkpoint = checkpoint_from_run(args.data_dir, args.run_dir, step=args.checkpoint_step)
     if args.command == "eval-plan":
         with output_lock(args.output_dir):
             value = replay_evaluation.prepare_replay_evaluation(
@@ -547,7 +564,8 @@ def _run_baseten_sampler_evaluation(args):
         args.data_dir, args.output_dir, checkpoint, args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
-        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
+        replay_sampler=sampler, confirm=args.confirm,
+        training=replay_evaluation.training_metadata(args.run_dir, args.checkpoint_step),
     )
 
 
@@ -564,7 +582,7 @@ def _run_tinker_sampler_evaluation(args):
     if args.run_dir is not None:
         if args.run_dir.resolve() == args.output_dir.resolve():
             raise PipelineError("--run-dir and --output-dir must be different directories")
-        model, checkpoint = checkpoint_from_run(args.data_dir, args.run_dir)
+        model, checkpoint = checkpoint_from_run(args.data_dir, args.run_dir, step=args.checkpoint_step)
     if args.command == "eval-plan":
         with output_lock(args.output_dir):
             value = replay_evaluation.prepare_replay_evaluation(
@@ -588,7 +606,8 @@ def _run_tinker_sampler_evaluation(args):
         args.data_dir, args.output_dir, checkpoint, args.judge_model,
         base_model=model.base_model, concurrency=args.concurrency,
         max_points_per_trajectory=args.max_points_per_trajectory, max_output_tokens=args.max_output_tokens,
-        replay_sampler=sampler, confirm=args.confirm, training=replay_evaluation.training_metadata(args.run_dir),
+        replay_sampler=sampler, confirm=args.confirm,
+        training=replay_evaluation.training_metadata(args.run_dir, args.checkpoint_step),
     )
 
 
@@ -761,13 +780,13 @@ def main(argv: list[str] | None = None) -> None:
             if args.output_dir is None:
                 if args.run_dir is None:
                     raise PipelineError("supply --run-dir or --output-dir")
-                args.output_dir = args.run_dir / "replay"
+                args.output_dir = _default_replay_dir(args)
             value = _run_fireworks_evaluation(args)
         elif args.command in ("eval-plan", "evaluate") and args.provider == "tinker":
             if args.output_dir is None:
                 if args.run_dir is None:
                     raise PipelineError("supply --run-dir or --output-dir")
-                args.output_dir = args.run_dir / "replay"
+                args.output_dir = _default_replay_dir(args)
             value = _run_tinker_sampler_evaluation(args)
         elif args.command in ("eval-plan", "evaluate") and (
             args.serving_mode == "sampler" or (
@@ -777,13 +796,15 @@ def main(argv: list[str] | None = None) -> None:
             if args.output_dir is None:
                 if args.run_dir is None:
                     raise PipelineError("supply --run-dir or --output-dir")
-                args.output_dir = args.run_dir / "replay"
+                args.output_dir = _default_replay_dir(args)
             value = _run_baseten_sampler_evaluation(args)
+        elif args.command in ("eval-plan", "evaluate") and args.checkpoint_step is not None:
+            raise PipelineError("--checkpoint-step requires sampler replay; Baseten endpoints serve their deployed checkpoint")
         elif args.command == "eval-plan":
             if args.output_dir is None:
                 if args.run_dir is None:
                     raise PipelineError("supply --run-dir or --output-dir")
-                args.output_dir = args.run_dir / "replay"
+                args.output_dir = _default_replay_dir(args)
             temporary_plan = _temporary_baseten_plan(args)
             baseten_endpoint = None if temporary_plan is not None else _eval_baseten_endpoint(args)
             context = {"baseten_context_limit": temporary_plan["settings"]["max_seq_len"]} if temporary_plan is not None else {}
@@ -805,7 +826,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.output_dir is None:
                 if args.run_dir is None:
                     raise PipelineError("supply --run-dir or --output-dir")
-                args.output_dir = args.run_dir / "replay"
+                args.output_dir = _default_replay_dir(args)
             temporary_plan = _temporary_baseten_plan(args)
             if temporary_plan is not None:
                 value = _run_temporary_evaluation(args, temporary_plan)

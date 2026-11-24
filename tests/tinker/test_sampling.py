@@ -177,3 +177,53 @@ def test_tinker_replay_requires_the_tinker_credential(tmp_path, monkeypatch):
     with pytest.raises(PipelineError, match="TINKER_API_KEY is not set"):
         run_replay_evaluation(tmp_path, tmp_path / "replay", CHECKPOINT, "baseten/zai-org/GLM-5.3-Flash",
                               confirm=True, replay_sampler=sampler)
+
+
+def test_a_validated_step_can_be_evaluated_when_its_sampler_weights_were_saved(tmp_path):
+    from smithtune.evaluation.replay import training_metadata
+
+    data, run = tmp_path / "data", tmp_path / "run"
+    write_manifest(data, model=DEFAULT_MODEL)
+    _json_dump(run / "plan.json", {"provider": "tinker", "base_model": DEFAULT_MODEL.base_model, "run_id": "smoke"})
+    _json_dump(run / "result.json", {"provider": "tinker", "tinker_run_id": "tinker-run-1",
+                                     "best_sampler_weights_uri": CHECKPOINT, "best_epoch": 2, "best_step": 4})
+    step_one = "tinker://tinker-run-1/sampler_weights/smoke-sampler-epoch-1"
+    _json_dump(run / "validations.json", [
+        {"epoch": 1, "step": 2, "sampler_weights_uri": step_one},
+        {"epoch": 2, "step": 4, "sampler_weights_uri": CHECKPOINT},
+        {"epoch": 3, "step": 6, "sampler_weights_uri": None},
+    ])
+    assert sampling.checkpoint_from_run(data, run, step=2)[1] == step_one
+    assert training_metadata(run, 2) == {"parent_training_run_id": "smoke", "checkpoint_epoch": 1,
+                                         "checkpoint_step": 2, "checkpoint_selection": "step"}
+    with pytest.raises(PipelineError, match="--sampler-checkpoints all"):
+        sampling.checkpoint_from_run(data, run, step=6)
+    with pytest.raises(PipelineError, match="validated steps: 2, 4, 6"):
+        sampling.checkpoint_from_run(data, run, step=3)
+    _json_dump(run / "validations.json", [{"epoch": 1, "step": 2, "sampler_weights_uri": "tinker://other-run/sampler_weights/x"}])
+    with pytest.raises(PipelineError, match="best sampler checkpoint"):
+        sampling.checkpoint_from_run(data, run, step=2)
+
+
+def test_evaluate_writes_a_selected_step_to_its_own_output(tmp_path, monkeypatch, capsys):
+    from smithtune import cli
+
+    data, run = tmp_path / "data", tmp_path / "run"
+    write_manifest(data, model=DEFAULT_MODEL)
+    _json_dump(run / "plan.json", {"provider": "tinker", "base_model": DEFAULT_MODEL.base_model})
+    step_one = "tinker://tinker-run-1/sampler_weights/smoke-sampler-epoch-1"
+    _json_dump(run / "result.json", {"provider": "tinker", "tinker_run_id": "tinker-run-1", "best_sampler_weights_uri": CHECKPOINT})
+    _json_dump(run / "validations.json", [{"epoch": 1, "step": 2, "sampler_weights_uri": step_one}])
+    calls = []
+    monkeypatch.setattr(sampling, "TinkerReplaySampler", lambda *args, **kwargs: calls.append(("sampler", args)) or "sampler")
+    monkeypatch.setattr(cli.replay_evaluation, "validate_judge_credentials", lambda judge: None)
+    monkeypatch.setattr(cli.replay_evaluation, "run_replay_evaluation",
+                        lambda *args, **kwargs: calls.append(("run", args, kwargs)) or {"status": "completed"})
+
+    cli.main(["evaluate", "--provider", "tinker", "--run-dir", str(run), "--data-dir", str(data),
+              "--checkpoint-step", "2", "--confirm"])
+    capsys.readouterr()
+    _, args, kwargs = calls[-1]
+    assert args[1] == run / "replay-step-2" and args[2] == step_one
+    assert kwargs["training"]["checkpoint_step"] == 2
+    assert calls[0] == ("sampler", (sampling.checkpoint_from_run(data, run, step=2)[0], step_one, run / "replay-step-2"))

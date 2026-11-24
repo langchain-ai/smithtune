@@ -82,9 +82,12 @@ class TinkerSFTSettings(CommonSFTSettings):
     lora_rank: int | None = None
     microbatch_token_budget: int | None = None
     max_dropped_training_rows: int = 1
+    sampler_checkpoints: str = "best"
 
     def validate(self) -> None:
         super().validate()
+        if self.sampler_checkpoints not in lora_sft.SAMPLER_CHECKPOINT_POLICIES:
+            raise PipelineError("sampler_checkpoints must be 'best' or 'all'")
         for name in ("lora_rank", "microbatch_token_budget"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
@@ -200,7 +203,11 @@ class TinkerProvider:
                 "--max-spend-usd, --hourly-rate-usd, --replicas, and --spend-reserve-fraction are Baseten-only; "
                 "Tinker bills per token and provisions no replicas"
             )
-        optional = {"max_dropped_training_rows": options.max_dropped_training_rows} if options.max_dropped_training_rows is not None else {}
+        optional = {
+            name: getattr(options, name)
+            for name in ("max_dropped_training_rows", "sampler_checkpoints")
+            if getattr(options, name) is not None
+        }
         settings = TinkerSFTSettings(
             max_epochs=options.max_epochs,
             early_stopping_patience=options.early_stopping_patience,
@@ -299,12 +306,15 @@ class TinkerProvider:
                 "loss_normalization": LOSS_NORMALIZATION,
                 "capacity": CAPACITY,
                 "max_dropped_training_rows": settings.max_dropped_training_rows,
+                "sampler_checkpoints": settings.sampler_checkpoints,
             },
             "training_schedule": lora_sft.estimated_schedule(train_rows, settings),
             "evaluation": "forward-only cross-entropy on the held-out validation split",
             "checkpoint": (
-                "resumable state at every validation and sampler weights for each new best; "
-                "Tinker keeps saved checkpoints until you delete them"
+                ("resumable state and sampler weights at every validation"
+                 if settings.sampler_checkpoints == "all"
+                 else "resumable state at every validation and sampler weights for each new best")
+                + "; Tinker keeps saved checkpoints until you delete them"
             ),
             "billing": "per token at Tinker's training, prefill, and sampling prices; no capacity to release",
             # Tinker bills per token, so there is no active-time guard to configure.
@@ -425,6 +435,7 @@ class TinkerProvider:
             update_state=update_state,
             errors=ERRORS,
             retry=lambda operation: retry_transient(operation, sleeper=self._sleeper),
+            save_every_sampler=settings.sampler_checkpoints == "all",
         )
         result: dict[str, Any] = {
             "status": "training",

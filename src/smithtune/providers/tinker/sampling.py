@@ -15,19 +15,25 @@ from smithtune.artifacts import _json_dump, _utc_now
 from smithtune.providers.base import PipelineError
 from smithtune.providers.tinker import CAPACITY, close_service, resolved, service_client
 from smithtune.rendering import load_training_renderer
-from smithtune.run_artifacts import load_checkpoint_context, require_matching_base_model
+from smithtune.run_artifacts import load_checkpoint_context, require_matching_base_model, validation_at_step
 
 
 _CHECKPOINT = re.compile(r"tinker://([A-Za-z0-9][A-Za-z0-9:._-]*)/sampler_weights/([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
-def checkpoint_from_run(data_dir: Path, run_dir: Path) -> tuple[Any, str]:
+def checkpoint_from_run(data_dir: Path, run_dir: Path, *, step: int | None = None) -> tuple[Any, str]:
     model, plan, result = load_checkpoint_context(data_dir, run_dir, provider="tinker")
     if not isinstance(plan, dict) or not isinstance(result, dict) or any(
         item.get("provider") != "tinker" for item in (plan, result)
     ):
         raise PipelineError("Tinker evaluation requires a completed Tinker training run")
-    checkpoint = result.get("best_sampler_weights_uri")
+    if step is None:
+        checkpoint = result.get("best_sampler_weights_uri")
+    else:
+        checkpoint = validation_at_step(run_dir, step).get("sampler_weights_uri")
+        if checkpoint is None:
+            raise PipelineError(f"step {step} saved no sampler weights; train with --sampler-checkpoints all "
+                                "to evaluate checkpoints other than the best")
     match = _CHECKPOINT.fullmatch(checkpoint) if isinstance(checkpoint, str) else None
     if not match or match[1] != result.get("tinker_run_id"):
         raise PipelineError("Tinker evaluation requires the saved best sampler checkpoint in --run-dir")

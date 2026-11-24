@@ -334,6 +334,8 @@ class FireworksProvider:
             )
         if options.provisioning_timeout is not None and options.training_mode != "dedicated":
             raise PipelineError("--provisioning-timeout requires --training-mode dedicated")
+        if options.sampler_checkpoints == "best":
+            raise PipelineError("Fireworks saves sampler weights at every validation; omit --sampler-checkpoints or pass all")
         defaults = SFTSettings()
         settings = SFTSettings(
             max_epochs=options.max_epochs,

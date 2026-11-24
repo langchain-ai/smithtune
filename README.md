@@ -373,7 +373,10 @@ smithtune evaluate \
 ```
 
 `eval-plan` previews without model calls. `evaluate` compares the saved best checkpoint
-with the base model and saves results in `"$run_dir/replay"`. Rerunning reuses completed
+with the base model and saves results in `"$run_dir/replay"`. To compare checkpoints
+from different epochs, train with `--sampler-checkpoints all` and pass
+`--checkpoint-step N` to both commands; see
+[checkpoint selection](docs/reference.md#validation-cadence-and-checkpoint-selection). Rerunning reuses completed
 predictions and judgments and retries LangSmith publication. Keep your local artifacts.
 
 To change the judge, replay cap, or sampling settings, use a fresh

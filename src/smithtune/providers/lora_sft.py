@@ -26,6 +26,10 @@ from smithtune.providers.base import ModelSpec, PipelineError
 from smithtune.providers.validation import training_schedule
 
 
+# "best" saves sampler weights for each new best; "all" saves them at every validation.
+SAMPLER_CHECKPOINT_POLICIES = ("best", "all")
+
+
 @dataclass(frozen=True)
 class ProviderErrors:
     """Name a provider in messages and raise its own error types."""
@@ -458,6 +462,9 @@ class SFTLoop:
     # Guard errors raised after a checkpoint save are deferred until that
     # checkpoint is recorded, unless the checkpoint would become the new best.
     deferred: tuple[type[BaseException], ...] = ()
+    # Save sampler weights at every validation, not only for a new best, so any
+    # validated checkpoint can be evaluated.
+    save_every_sampler: bool = False
     retry: Callable[[Callable[[], Any]], Any] = field(default=lambda operation: operation())
     state_extras: Callable[[], dict[str, Any]] = field(default=dict)
     epochs: list[dict[str, Any]] = field(default_factory=list)
@@ -604,6 +611,20 @@ class SFTLoop:
                 self.guard.check("best checkpoint")
             except self.deferred as exc:
                 post_checkpoint_error = exc
+        elif self.save_every_sampler and post_checkpoint_error is None:
+            # A guard stop before an optional save records the validation without it.
+            try:
+                self.guard.check("validation sampler checkpoint")
+            except self.deferred as exc:
+                post_checkpoint_error = exc
+            else:
+                sampler_uri = self.trainer.save_weights_for_sampler(
+                    checkpoint_name(self.run_id, f"sampler-{suffix}")
+                )
+                try:
+                    self.guard.check("validation sampler checkpoint")
+                except self.deferred as exc:
+                    post_checkpoint_error = exc
 
         # A best checkpoint always pairs resume state and sampler weights
         # from the same completed optimizer update.

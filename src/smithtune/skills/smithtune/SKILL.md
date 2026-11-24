@@ -535,6 +535,12 @@ smithtune evaluate --provider "$provider" --data-dir "$data_dir" --run-dir "$run
 Rerunning reuses completed predictions and judgments. To change the judge, cap,
 or sampling settings, pass a fresh `--output-dir` to both commands.
 
+To compare checkpoints, for example one per epoch, the run must have been trained
+with `--sampler-checkpoints all` (Baseten and Tinker; Fireworks always saves them).
+Pass `--checkpoint-step N` with a step from `"$run_dir/validations.json"` to both
+commands; results go to `"$run_dir/replay-step-N"`. Suggest the flag at `plan` time
+when the user wants a per-epoch comparison.
+
 Fireworks reuses the saved checkpoint and training mode; a promoted model ID
 alone cannot be sampled. Baseten replay uses two temporary samplers, on serverless
 or dedicated capacity as Baseten chooses, and deactivates them on exit. Their

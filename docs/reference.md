@@ -254,6 +254,15 @@ with `--early-stopping-patience N` to stop after N epochs without sufficient
 epoch-end loss improvement. `--early-stopping-min-delta` controls that comparison;
 checkpoint selection always uses the lowest loss across all checks.
 
+To compare checkpoints across training, for example one per epoch, add
+`--sampler-checkpoints all` to both `plan` and `train`. Baseten and Tinker then
+save sampler weights at every validation instead of only for each new best; Fireworks
+always does. This adds a save per validation: Baseten bills the trainer time, Tinker
+bills checkpoint storage. Then evaluate any validated step from `validations.json`
+with `eval-plan` and `evaluate --checkpoint-step N`. Each step writes to its own
+`<run-dir>/replay-step-N` by default, and its LangSmith experiments record the
+checkpoint's epoch and step. `train --evaluate` always evaluates the best checkpoint.
+
 Choose an interval using the planned step count and validation cost. Each check
 runs the validation split and saves checkpoints, adding provider charges. A
 failure or exhausted spend budget preserves completed checks without forcing
@@ -340,6 +349,7 @@ to Fireworks retention.
 | `--max-points-per-trajectory` | Cap assistant actions per trajectory; omitted by default, which scores every eligible action |
 | `--max-output-tokens` | Maximum generated response tokens |
 | `--concurrency` | Concurrent evaluation cases; default: 4 |
+| `--checkpoint-step` | Evaluate the checkpoint saved at a validated optimizer step instead of the best; non-best steps need training with `--sampler-checkpoints all` (Baseten and Tinker) |
 
 With `plan` and `train`, replay options require `--evaluate`. Repeat the same
 options on the preview and paid command. `eval-plan` accepts the case and token

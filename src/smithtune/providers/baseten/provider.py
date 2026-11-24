@@ -168,6 +168,7 @@ class BasetenSFTSettings(CommonSFTSettings):
     replicas: int = 1
     spend_reserve_fraction: float = 0.1
     max_dropped_training_rows: int = 1
+    sampler_checkpoints: str = "best"
 
     def validate(self) -> None:
         numeric = {
@@ -204,6 +205,8 @@ class BasetenSFTSettings(CommonSFTSettings):
         if invalid_counts:
             raise PipelineError("invalid Baseten count settings: " + ", ".join(invalid_counts))
         super().validate()
+        if self.sampler_checkpoints not in lora_sft.SAMPLER_CHECKPOINT_POLICIES:
+            raise PipelineError("sampler_checkpoints must be 'best' or 'all'")
         _maximum_active_seconds(self.max_spend_usd, self.hourly_rate_usd, self.spend_reserve_fraction)
 
     def maximum_active_seconds(self) -> float | None:
@@ -743,7 +746,7 @@ class BasetenProvider:
             raise PipelineError("--lora-alpha, --pipeline-depth, --training-mode, --training-shape, and --provisioning-timeout are Fireworks-only")
         optional = {
             name: getattr(options, name)
-            for name in ("replicas", "spend_reserve_fraction", "max_dropped_training_rows")
+            for name in ("replicas", "spend_reserve_fraction", "max_dropped_training_rows", "sampler_checkpoints")
             if getattr(options, name) is not None
         }
         settings = BasetenSFTSettings(
@@ -848,10 +851,15 @@ class BasetenProvider:
                 "capacity": CAPACITY,
                 "with_sampler": False,
                 "max_dropped_training_rows": settings.max_dropped_training_rows,
+                "sampler_checkpoints": settings.sampler_checkpoints,
             },
             "training_schedule": lora_sft.estimated_schedule(_train_rows, settings),
             "evaluation": "forward-only cross-entropy on the held-out validation split",
-            "checkpoint": "resumable state at every validation and sampler weights for each new best",
+            "checkpoint": (
+                "resumable state and sampler weights at every validation"
+                if settings.sampler_checkpoints == "all"
+                else "resumable state at every validation and sampler weights for each new best"
+            ),
             "budget": {
                 "enabled": settings.max_spend_usd is not None,
                 "max_spend_usd": settings.max_spend_usd,
@@ -1002,6 +1010,7 @@ class BasetenProvider:
             deferred=(BudgetExceeded,),
             retry=lambda operation: retry_idempotent(operation, sleeper=self._sleeper),
             state_extras=lambda: {"active_seconds": budget.elapsed_seconds},
+            save_every_sampler=settings.sampler_checkpoints == "all",
         )
         service: Any | None = None
         trainer: Any | None = None
